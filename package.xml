@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Draw2D</name>
+  <description>Quicker TechDraw drawings: sheets by paper size, standard views at a scale that fits, auto-lettered sections and a fast-editing switch.</description>
+  <version>0.1.0</version>
+  <date>2026-11-22</date>
+  <maintainer email="101029458+Raviknight@users.noreply.github.com">Raviknight</maintainer>
+  <license file="LICENSE">LGPL-2.1-or-later</license>
+  <url type="repository" branch="main">https://github.com/Raviknight/Draw2D</url>
+  <url type="bugtracker">https://github.com/Raviknight/Draw2D/issues</url>
+  <url type="readme">https://github.com/Raviknight/Draw2D/blob/main/README.md</url>
+  <icon>Draw2DTools/Resources/icons/Draw2D.svg</icon>
+
+  <content>
+    <workbench>
+      <classname>Draw2DWorkbench</classname>
+      <subdirectory>./</subdirectory>
+      <icon>Draw2DTools/Resources/icons/Draw2D.svg</icon>
+      <freecadmin>1.1.0</freecadmin>
+      <depend type="internal">TechDraw</depend>
+      <tag>TechDraw</tag>
+      <tag>drawing</tag>
+      <tag>2D</tag>
+    </workbench>
+  </content>
+</package>

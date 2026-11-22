@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.FCStd1
+*.FCBak
+.vscode/
+.idea/
