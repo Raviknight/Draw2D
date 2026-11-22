@@ -14,6 +14,10 @@ Status: first version (0.1.0), not yet in the Addon Manager.
 | **Section, auto-lettered** | With a view selected: adds a section through the middle of the part, lettered with the next free letter (A-A, B-B …; I, O and Q are skipped). The section is placed next to the view. Double-click it to move the cut with TechDraw's own section dialog. |
 | **Fast editing on/off** | On: the page stops updating itself and views switch to Coarse View, so small edits don't freeze FreeCAD. Off: views go back to full quality and the page redraws once. |
 
+**Moving views.** Projected views stay lined up with the front view but can be dragged along one axis, as in Onshape: side views (left/right) slide left-right, top/bottom views slide up-down, the isometric moves freely, and dragging the front view moves them all. TechDraw's own *AutoDistribute* is switched off for these groups; set the group's **Draw2DAligned** property to false to drop the locking. Fit to page lays the views out evenly again.
+
+The scale is also written into the title block's *Scale* field.
+
 Which page a command acts on: a selected page (or a view on it), else the page in the active tab, else the only page in the document.
 
 ## Install by hand (until it is in the Addon Manager)

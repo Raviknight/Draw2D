@@ -122,6 +122,59 @@ def show_page(page):
         pass
 
 
+class RedrawWatcher:
+    """For a few seconds after a Draw2D action, redraw views that came out
+    at the wrong size (see core.stale_views)."""
+
+    def __init__(self, page, seconds=20.0, interval_ms=400, retry_s=2.0):
+        self.page = page
+        self.ticks_left = int(seconds * 1000 / interval_ms)
+        self.retry_ticks = max(1, int(retry_s * 1000 / interval_ms))
+        self.last_redraw = {}
+        self.tick_no = 0
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(interval_ms)
+        _WATCHERS.add(self)
+
+    def stop(self):
+        self.timer.stop()
+        _WATCHERS.discard(self)
+
+    def tick(self):
+        self.tick_no += 1
+        self.ticks_left -= 1
+        try:
+            page = self.page
+            if self.ticks_left <= 0 or page is None or not page.isValid() \
+                    or not page.KeepUpdated:
+                self.stop()
+                return
+            views = core.part_views(page)
+            stale = core.stale_views(views)
+            if not stale and self.tick_no > 2:
+                self.stop()
+                return
+            for v in stale:
+                last = self.last_redraw.get(v.Name, -10 ** 6)
+                if self.tick_no - last >= self.retry_ticks:
+                    self.last_redraw[v.Name] = self.tick_no
+                    v.recompute()
+        except Exception as e:
+            App.Console.PrintWarning("Draw2D redraw check: %s\n" % e)
+            self.stop()
+
+
+_WATCHERS = set()
+
+
+def watch_redraw(page):
+    for w in list(_WATCHERS):
+        if w.page == page:
+            w.stop()
+    RedrawWatcher(page)
+
+
 def run_in_transaction(doc, name, func):
     doc.openTransaction(name)
     try:
@@ -236,6 +289,7 @@ class NewSheet:
         page = run_in_transaction(doc, "Draw2D new sheet", work)
         doc.recompute()
         show_page(page)
+        watch_redraw(page)
         msg = "%s %s sheet created" % (size, orient.lower())
         if add_views and parts:
             msg += ", views at %s" % core.scale_text(page.Scale)
@@ -282,6 +336,7 @@ class StandardViews:
                            lambda: core.add_standard_views(page, parts, iso))
         doc.recompute()
         show_page(page)
+        watch_redraw(page)
         say("Standard views added at %s" % core.scale_text(page.Scale))
 
 
@@ -308,6 +363,7 @@ class FitToPage:
             warn(str(e))
             return
         doc.recompute()
+        watch_redraw(page)
         say("Page scale is now %s" % core.scale_text(scale))
 
 
@@ -367,6 +423,7 @@ class SpeedToggle:
                 doc.recompute()
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
+            watch_redraw(page)
         say("Fast editing %s for %s" % ("ON" if fast else "OFF (redrawn)", page.Label))
 
 
@@ -380,5 +437,42 @@ COMMANDS = [
 
 for _name, _cmd in COMMANDS:
     Gui.addCommand(_name, _cmd)
+
+
+class AlignmentObserver:
+    """Keeps dragged projected views on their alignment axis (see core)."""
+
+    def __init__(self):
+        self.pending = set()
+
+    def slotChangedObject(self, obj, prop):
+        if prop not in ("X", "Y"):
+            return
+        try:
+            if not obj.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+                return
+        except Exception:
+            return
+        key = (obj.Document.Name, obj.Name)
+        if key in self.pending:
+            return
+        self.pending.add(key)
+        # Fix it after TechDraw has finished handling the drag.
+        QtCore.QTimer.singleShot(0, lambda: self._fix(key))
+
+    def _fix(self, key):
+        self.pending.discard(key)
+        try:
+            doc = App.getDocument(key[0])
+            obj = doc.getObject(key[1]) if doc else None
+            if obj is not None:
+                core.enforce_alignment(obj)
+        except Exception as e:  # never break FreeCAD over a layout nicety
+            App.Console.PrintWarning("Draw2D alignment: %s\n" % e)
+
+
+# This module is imported once per FreeCAD session, so one observer.
+ALIGNMENT_OBSERVER = AlignmentObserver()
+App.addDocumentObserver(ALIGNMENT_OBSERVER)
 
 COMMAND_NAMES = [n for n, _ in COMMANDS]

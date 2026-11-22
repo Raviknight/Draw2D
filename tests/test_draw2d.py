@@ -137,19 +137,97 @@ class TestViews(DocTest):
         self.assertGreaterEqual(page.Scale, 2.0)
 
     def test_layout_matches_techdraw_placement(self):
-        # Our predicted spacing must equal what TechDraw does after recompute.
+        # With TechDraw's own AutoDistribute on, it must place every view
+        # exactly where Draw2D's layout puts them when it is off.
+        page = core.create_page(self.doc, "A3", "Landscape")
+        group = core.add_standard_views(page, [self.box], isometric=True)
+        ours = {v.Name: (float(v.X), float(v.Y)) for v in group.Views}
+        core.make_aligned(group, False)
+        self.doc.recompute()
+        for v in group.Views:
+            self.assertAlmostEqual(float(v.X), ours[v.Name][0], places=3, msg=v.Type)
+            self.assertAlmostEqual(float(v.Y), ours[v.Name][1], places=3, msg=v.Type)
+
+    def test_every_view_drawn_at_page_scale(self):
+        # The bug Ravi saw: views kept their first (1:1) drawing.
+        page = core.create_page(self.doc, "A3", "Landscape")
+        group = core.add_standard_views(page, [self.box])
+        self.doc.recompute()
+        import Part
+        s = page.Scale
+        expect = {"Front": (400, 50), "Top": (400, 300), "Right": (300, 50)}
+        for v in group.Views:
+            bb = Part.makeCompound(v.getVisibleEdges()).BoundBox
+            w, h = expect[v.Type]
+            self.assertAlmostEqual(bb.XLength, w * s, places=2, msg=v.Type)
+            self.assertAlmostEqual(bb.YLength, h * s, places=2, msg=v.Type)
+
+    def test_standard_directions_match_techdraw(self):
         page = core.create_page(self.doc, "A3", "Landscape")
         group = core.add_standard_views(page, [self.box], isometric=True)
         self.doc.recompute()
-        s = page.Scale
-        layout = core.group_layout(group)
+        for v in group.Views:
+            d, x = core.STANDARD_DIRECTIONS[v.Type]
+            d, x = App.Vector(d).normalize(), App.Vector(x).normalize()
+            self.assertTrue(App.Vector(v.Direction).normalize().isEqual(d, 1e-9), v.Type)
+            self.assertTrue(App.Vector(v.XDirection).normalize().isEqual(x, 1e-9), v.Type)
+
+    def test_stale_drawings_detected(self):
+        import Part
+        part = self.doc.addObject("Part::Feature", "Plain")
+        part.Shape = Part.makeBox(100, 80, 60)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        group = core.add_standard_views(page, [part])
+        self.doc.recompute()
+        views = core.part_views(page)
+        self.assertEqual(core.stale_views(views), [])
+        # Headless FreeCAD redraws synchronously, so make the drawings stale
+        # by growing the part 3x without recomputing the views.
+        part.Shape = Part.makeBox(300, 240, 180)
+        self.assertEqual(len(core.stale_views(views)), 3)
+        core.redraw([group] + list(group.Views))
+        self.assertEqual(core.stale_views(views), [])
+
+    def test_title_block_shows_scale(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        core.add_standard_views(page, [self.box])
+        self.assertEqual(page.Template.EditableTexts["scale"], "1 : 2")
+
+    def test_views_slide_on_one_axis_only(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        group = core.add_standard_views(page, [self.box], isometric=True)
+        self.doc.recompute()
+        self.assertTrue(core.is_aligned(group))
+        self.assertFalse(group.AutoDistribute)
+        right, top = group.getItemByLabel("Right"), group.getItemByLabel("Top")
+        iso = group.getItemByLabel("FrontTopRight")
+        front = group.Anchor
+        # side view dragged diagonally: keeps the new X, snaps Y back
+        right.X, right.Y = float(right.X) - 20, 33.0
+        self.assertTrue(core.enforce_alignment(right))
+        self.assertEqual(float(right.Y), 0.0)
+        # top view dragged diagonally: keeps the new Y, snaps X back
+        top.X, top.Y = 12.0, float(top.Y) - 10
+        self.assertTrue(core.enforce_alignment(top))
+        self.assertEqual(float(top.X), 0.0)
+        # isometric is free
+        iso.X, iso.Y = 1.0, 2.0
+        self.assertFalse(core.enforce_alignment(iso))
+        self.assertEqual((float(iso.X), float(iso.Y)), (1.0, 2.0))
+        # front view drags the whole group
+        gx, gy = float(group.X), float(group.Y)
+        front.X, front.Y = 5.0, 7.0
+        self.assertTrue(core.enforce_alignment(front))
+        self.assertEqual((float(group.X), float(group.Y)), (gx + 5.0, gy + 7.0))
+        self.assertEqual((float(front.X), float(front.Y)), (0.0, 0.0))
+
+    def test_alignment_off_leaves_views_alone(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        group = core.add_standard_views(page, [self.box])
+        core.make_aligned(group, False)
         right = group.getItemByLabel("Right")
-        top = group.getItemByLabel("Top")
-        cols, rows = layout["cols"], layout["rows"]
-        expect_dx = s * (cols[0] + cols[1]) / 2 + layout["gap_x"]
-        expect_dy = s * (rows[0] + rows[1]) / 2 + layout["gap_y"]
-        self.assertAlmostEqual(abs(float(right.X)), expect_dx, places=3)
-        self.assertAlmostEqual(abs(float(top.Y)), expect_dy, places=3)
+        right.Y = 40.0
+        self.assertFalse(core.enforce_alignment(right))
 
     def test_first_angle_detected(self):
         page = core.create_page(self.doc, "A3", "Landscape")

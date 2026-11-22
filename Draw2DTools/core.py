@@ -292,23 +292,38 @@ def is_first_angle(group):
     return ptype.lower().startswith("first")
 
 
-def group_layout(group, shape=None):
+# Directions TechDraw gives the standard projections when Front looks along -Y
+# (checked against FreeCAD 1.1: see tests).
+STANDARD_DIRECTIONS = {
+    "Front": (App.Vector(0, -1, 0), App.Vector(1, 0, 0)),
+    "Top": (App.Vector(0, 0, 1), App.Vector(1, 0, 0)),
+    "Right": (App.Vector(1, 0, 0), App.Vector(0, 1, 0)),
+    "FrontTopRight": (App.Vector(1, -1, 1), App.Vector(1, 1, 0)),
+}
+
+
+def group_layout(group, shape=None, specs=None):
     """Describe a projection group's size in a scale-independent way.
 
-    Returns dict with col/row model sizes, gaps and the anchor cell so that
-    ``group_box(layout, scale)`` and ``anchor_offset(layout, scale)`` work.
+    ``specs`` is a list of (name, type, direction, xdirection); by default it
+    comes from the group's existing views. Returns a dict with col/row model
+    sizes, gaps and each view's grid cell, for ``group_box``,
+    ``anchor_offset`` and ``item_offsets``.
     """
     shape = shape or source_shape(group.Source)
     first = is_first_angle(group)
-    cols, rows = {}, {}
-    for item in group.Views:
-        cell = _GRID.get(item.Type)
+    if specs is None:
+        specs = [(v.Name, v.Type, v.Direction, v.XDirection) for v in group.Views]
+    cols, rows, cells = {}, {}, {}
+    for name, vtype, direction, xdirection in specs:
+        cell = _GRID.get(vtype)
         if cell is None:
             continue
         cx, cy = cell
         if first:
             cx, cy = -cx, -cy
-        w, h = projected_extent(shape, item.Direction, item.XDirection)
+        cells[name] = (cx, cy)
+        w, h = projected_extent(shape, direction, xdirection)
         cols[cx] = max(cols.get(cx, 0.0), w)
         rows[cy] = max(rows.get(cy, 0.0), h)
     if not cols:
@@ -318,9 +333,30 @@ def group_layout(group, shape=None):
         "rows": [rows[k] for k in sorted(rows)],
         "col_keys": sorted(cols),
         "row_keys": sorted(rows),
+        "cells": cells,
         "gap_x": float(group.spacingX),
         "gap_y": float(group.spacingY),
     }
+
+
+def _centers(sizes, keys, gap, s):
+    """Centre of each column/row (paper mm), measured from the box centre."""
+    total = s * sum(sizes) + gap * (len(sizes) - 1)
+    pos = -total / 2.0
+    out = {}
+    for size, key in zip(sizes, keys):
+        out[key] = pos + s * size / 2.0
+        pos += s * size + gap
+    return out
+
+
+def item_offsets(layout, s):
+    """{item name: (dx, dy)} of each projection relative to the Front view."""
+    xs = _centers(layout["cols"], layout["col_keys"], layout["gap_x"], s)
+    ys = _centers(layout["rows"], layout["row_keys"], layout["gap_y"], s)
+    x0, y0 = xs.get(0, 0.0), ys.get(0, 0.0)
+    return {name: (xs[cx] - x0, ys[cy] - y0)
+            for name, (cx, cy) in layout["cells"].items()}
 
 
 def group_box(layout, s):
@@ -331,16 +367,9 @@ def group_box(layout, s):
 
 def anchor_offset(layout, s):
     """Offset of the Front view centre from the group box centre (paper mm)."""
-    def offset(sizes, keys, gap):
-        total = s * sum(sizes) + gap * (len(sizes) - 1)
-        pos = -total / 2.0
-        for size, key in zip(sizes, keys):
-            if key == 0:
-                return pos + s * size / 2.0
-            pos += s * size + gap
-        return 0.0
-    return (offset(layout["cols"], layout["col_keys"], layout["gap_x"]),
-            offset(layout["rows"], layout["row_keys"], layout["gap_y"]))
+    xs = _centers(layout["cols"], layout["col_keys"], layout["gap_x"], s)
+    ys = _centers(layout["rows"], layout["row_keys"], layout["gap_y"], s)
+    return xs.get(0, 0.0), ys.get(0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -367,13 +396,13 @@ def _arrangements(gw, gh, extras, s):
     yield max(gw, rw), gh + GAP + rh, "below"
 
 
-def plan_page(page, group, extras_views=()):
+def plan_page(page, group, extras_views=(), layout=None):
     """Pick the scale and positions for the group and the extra views.
 
     Returns (scale, {view_name: (x, y)}) where the group entry is the
     position of its anchor (Front view).
     """
-    layout = group_layout(group)
+    layout = layout or group_layout(group)
     extras = [(v, extra_view_size(v)) for v in extras_views]
     sizes = [sz for _, sz in extras]
     regions = page_regions(page)
@@ -443,14 +472,153 @@ def fit_page(page):
     if group is None:
         raise ValueError("This page has no projection group to fit")
     scale, positions = plan_page(page, group, extras)
+    apply_plan(page, group, extras, scale, positions)
+    redraw([group] + list(group.Views) + list(extras))
+    return scale
+
+
+def redraw(views):
+    """Recompute views one by one.
+
+    In the GUI a touched view is not always redrawn by doc.recompute() after
+    only its scale changed (checked on FreeCAD 1.1.4); recomputing each view
+    directly is what makes it draw again.
+    """
+    for v in views:
+        v.recompute()
+
+
+def stale_views(views, tolerance=0.25):
+    """Views whose drawing is not at their current scale (or not drawn yet).
+
+    TechDraw draws in background threads and has no 'busy' flag in Python;
+    if a redraw is requested while an older one is still running, the older
+    result can land last. Standard scales are at least 2x apart, so a drawing
+    more than 25 % off its expected size is stale.
+    """
+    import Part
+    stale = []
+    shapes = {}
+    for v in views:
+        if not v.isDerivedFrom("TechDraw::DrawViewPart") or \
+                v.isDerivedFrom("TechDraw::DrawViewSection") or \
+                v.isDerivedFrom("TechDraw::DrawViewDetail") or \
+                v.isDerivedFrom("TechDraw::DrawProjGroup"):
+            continue
+        try:
+            key = tuple(o.Name for o in v.Source)
+            if key not in shapes:
+                shapes[key] = source_shape(v.Source)
+            w, h = projected_extent(shapes[key], v.Direction, v.XDirection)
+            expected = max(w, h) * float(v.getScale())
+            edges = v.getVisibleEdges()
+            if not edges:
+                stale.append(v)
+                continue
+            bb = Part.makeCompound(edges).BoundBox
+            drawn = max(bb.XLength, bb.YLength)
+        except Exception:
+            continue
+        if expected > 1e-6 and abs(drawn / expected - 1.0) > tolerance:
+            stale.append(v)
+    return stale
+
+
+def apply_plan(page, group, extras, scale, positions):
+    """Set the scale and positions, then make every view redraw.
+
+    In the GUI TechDraw draws each view as soon as it exists, so views made
+    before the scale was known keep their old drawing unless touched.
+    """
     page.Scale = scale
-    for view in [group] + extras:
+    set_title_block_scale(page, scale)
+    for view in [group] + list(extras):
         if view.ScaleType != "Page":
             view.ScaleType = "Page"
         view.Scale = scale
         if view.Name in positions:
             view.X, view.Y = positions[view.Name]
-    return scale
+    if is_aligned(group):
+        layout = group_layout(group)
+        offsets = item_offsets(layout, scale)
+        for item in group.Views:
+            if item.Name in offsets:
+                item.X, item.Y = offsets[item.Name]
+    for view in list(group.Views) + [group] + list(extras):
+        view.touch()
+
+
+def set_title_block_scale(page, scale):
+    """Write the scale into the title block's 'scale' field, if it has one."""
+    tpl = page.Template
+    if tpl is None or "EditableTexts" not in tpl.PropertiesList:
+        return False
+    texts = dict(tpl.EditableTexts)
+    keys = [k for k in texts if k.lower() == "scale"]
+    if not keys:
+        return False
+    text = scale_text(scale).replace(":", " : ")
+    for k in keys:
+        texts[k] = text
+    tpl.EditableTexts = texts
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Projected views that slide along their alignment axis
+# ---------------------------------------------------------------------------
+# TechDraw's AutoDistribute locks every view of a group in place. Draw2D turns
+# it off and keeps each view aligned with the Front view on one axis only:
+# side views (Left/Right/Rear) move left-right, Top/Bottom move up-down,
+# isometric/corner views move freely, and moving the Front view moves all.
+ALIGN_PROP = "Draw2DAligned"
+_SLIDE_X = {"Right", "Left", "Rear"}       # keep Y = 0, X free
+_SLIDE_Y = {"Top", "Bottom"}               # keep X = 0, Y free
+
+
+def make_aligned(group, on=True):
+    if ALIGN_PROP not in group.PropertiesList:
+        group.addProperty("App::PropertyBool", ALIGN_PROP, "Draw2D",
+                          "Projected views stay aligned with the Front view on one "
+                          "axis but can be dragged along the other")
+    setattr(group, ALIGN_PROP, on)
+    group.AutoDistribute = not on
+
+
+def is_aligned(group):
+    return bool(getattr(group, ALIGN_PROP, False)) and not group.AutoDistribute
+
+
+def parent_group(item):
+    for parent in item.InList:
+        if parent.isDerivedFrom("TechDraw::DrawProjGroup"):
+            return parent
+    return None
+
+
+def enforce_alignment(item):
+    """Snap a dragged projection back onto its alignment axis. True if changed."""
+    if not item.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+        return False
+    group = parent_group(item)
+    if group is None or not is_aligned(group):
+        return False
+    x, y = float(item.X), float(item.Y)
+    if item.Type == "Front":
+        if abs(x) < 1e-9 and abs(y) < 1e-9:
+            return False
+        # Moving the Front view moves the whole group with it.
+        group.X = float(group.X) + x
+        group.Y = float(group.Y) + y
+        item.X, item.Y = 0.0, 0.0
+        return True
+    if item.Type in _SLIDE_X and abs(y) > 1e-9:
+        item.Y = 0.0
+        return True
+    if item.Type in _SLIDE_Y and abs(x) > 1e-9:
+        item.X = 0.0
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -464,22 +632,26 @@ def add_standard_views(page, objs, isometric=False):
     page.addView(group)
     group.Source = list(objs)
     group.ScaleType = "Page"
-    group.addProjection("Front")
-    group.Anchor.Direction = App.Vector(0, -1, 0)
-    group.Anchor.XDirection = App.Vector(1, 0, 0)
-    group.Anchor.RotationVector = App.Vector(1, 0, 0)
-    group.addProjection("Top")
-    group.addProjection("Right")
-    if isometric:
-        group.addProjection("FrontTopRight")
+    make_aligned(group, True)
+    types = ["Front", "Top", "Right"] + (["FrontTopRight"] if isometric else [])
+
+    # Work out the scale BEFORE any view exists. In the GUI each view starts
+    # drawing in a background thread as soon as it is added; a view first
+    # drawn at 1:1 kept that drawing even after the scale changed.
     _, extras = page_content(page)
-    scale, positions = plan_page(page, group, extras)
+    specs = [(t, t) + STANDARD_DIRECTIONS[t] for t in types]
+    layout = group_layout(group, specs=specs)
+    scale, positions = plan_page(page, group, extras, layout)
     page.Scale = scale
     group.Scale = scale
-    group.X, group.Y = positions[group.Name]
-    for v in extras:
-        if v.Name in positions:
-            v.X, v.Y = positions[v.Name]
+
+    group.addProjection("Front")
+    group.Anchor.Direction = STANDARD_DIRECTIONS["Front"][0]
+    group.Anchor.XDirection = STANDARD_DIRECTIONS["Front"][1]
+    group.Anchor.RotationVector = STANDARD_DIRECTIONS["Front"][1]
+    for t in types[1:]:
+        group.addProjection(t)
+    apply_plan(page, group, extras, scale, positions)
     return group
 
 
@@ -536,6 +708,7 @@ def add_section(page, base, letter=None, direction="Right"):
     sec.XDirection = sec_x
     sec.ScaleType = "Page"
     sec.Scale = page.Scale
+    sec.touch()
 
     # Put it beside the base view (right for left/right cuts, below for up/down).
     x0, y0, x1, y1 = view_box(base)
@@ -576,7 +749,7 @@ def set_fast(page, fast):
         for v in views:
             v.CoarseView = False
         page.KeepUpdated = True
-        for v in views:
-            v.touch()
+        groups = [v for v in page.Views if v.isDerivedFrom("TechDraw::DrawProjGroup")]
+        redraw(groups + views)
         page.touch()
     return fast
