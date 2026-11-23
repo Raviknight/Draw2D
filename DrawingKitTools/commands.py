@@ -231,8 +231,8 @@ class SheetDialog(ui.Popover):
         self.iso = ui.toggle("+ Isometric", False, "Add an isometric view too")
         self.views.toggled.connect(self.iso.setEnabled)
         self.iso.setEnabled(has_part)
-        self.views.setVisible(has_part)
-        self.iso.setVisible(has_part)
+        # (no setVisible here: on a widget without a parent it opens its own
+        # window, which closes the pop-up; the row is simply left out)
         if has_part:
             self.add_row(self.views, self.iso, stretch=True)
 
@@ -691,6 +691,15 @@ GDT_SYMBOLS = {
 }
 
 
+ZONE_TIPS = [
+    ("U", "Ⓤ Unequally disposed profile zone; type the offset in the next box"),
+    ("CZ", "CZ Common zone: one zone for several features"),
+    ("P", "Ⓟ Projected tolerance zone (e.g. threaded holes); height in the next box"),
+    ("F", "Ⓕ Free state (non-rigid parts)"),
+    ("T", "Ⓣ Tangent plane"),
+]
+
+
 class _SegmentRow:
     """One frame row: symbol | ⌀ tol Ⓜ | A Ⓜ | B Ⓜ | C Ⓜ"""
 
@@ -698,7 +707,10 @@ class _SegmentRow:
         from . import gdt
         self.char = ui.combo([(k, "%s  %s" % (GDT_SYMBOLS.get(k, ""), lab))
                               for k, lab in gdt.CHARACTERISTICS], seg.get("char", "position"), 150)
-        self.char.setVisible(show_char)
+        if not show_char:
+            # never setVisible(True) here: the combo has no parent yet, so it
+            # would open as its own window and close the pop-up at once
+            self.char.setVisible(False)
         self.dia = ui.toggle("⌀", seg.get("dia", True), "Diameter (cylindrical) zone")
         self.tol = ui.field(seg.get("tol", "0.05"), 52, tip="Tolerance")
         self.mod = ui.mmc_button(seg.get("mod", ""))
@@ -737,7 +749,31 @@ class FrameDialog(ui.Popover):
         self.count = ui.field(count or self.last.get("count", ""), 40, "6X",
                               "Count above the frame (filled in when you click one of several holes)")
         self.more = ui.toggle("+ Segment", False, "Second row: composite or stacked frame")
-        self.add_row("Count", self.count, self.more, stretch=True)
+        self.opts = ui.toggle("Modifiers…", False,
+                              "Zone modifiers (Ⓤ CZ Ⓟ Ⓕ Ⓣ Ⓔ), all around, between")
+        self.add_row("Count", self.count, self.more, self.opts, stretch=True)
+        # zone modifiers and leader symbols, hidden until asked for
+        last = self.last
+        zones = last.get("zones") or []
+        self.z = {}
+        tips = dict(ZONE_TIPS)
+        for code, label in (("U", "Ⓤ"), ("CZ", "CZ"), ("P", "Ⓟ"), ("F", "Ⓕ"), ("T", "Ⓣ")):
+            self.z[code] = ui.toggle(label, code in zones, tips[code])
+        self.uval = ui.field(last.get("uval", ""), 34, "0.1", "Ⓤ offset towards the outside of the profile")
+        self.proj = ui.field(last.get("proj", ""), 34, "15", "Ⓟ projected zone height")
+        self.zrow = self.add_row(self.z["U"], self.uval, self.z["CZ"], self.z["P"], self.proj,
+                                 self.z["F"], self.z["T"], stretch=True)
+        self.around = ui.toggle("○ All around", last.get("all_around", False),
+                                "All around: the tolerance applies to the whole outline in this view")
+        b = last.get("between") or ["", ""]
+        self.b1 = ui.field(b[0], 26, "J", "Between: from point")
+        self.b2 = ui.field(b[1], 26, "K", "Between: to point")
+        self.lrow = self.add_row(self.around, "Between", self.b1, "↔", self.b2, stretch=True)
+        for r in (self.zrow, self.lrow):
+            r.setVisible(bool(zones or last.get("all_around") or any(b)))
+        self.opts.setChecked(self.zrow.isVisible())
+        self.opts.toggled.connect(lambda on: (self.zrow.setVisible(on), self.lrow.setVisible(on),
+                                              self.adjustSize()))
         self.kind = ui.combo([(True, "Composite"), (False, "Stacked")], True, 100)
         self.row2 = _SegmentRow({"tol": "0.02", "dia": True, "datums": ["A", "", ""]}, show_char=False)
         self.seg2 = self.add_row(self.kind, *self.row2.widgets())
@@ -751,8 +787,17 @@ class FrameDialog(ui.Popover):
 
     def choice(self):
         first = self.row1.value()
+        first["zones"] = [code for code, b in self.z.items() if b.isChecked()]
+        if "U" in first["zones"]:
+            first["uval"] = self.uval.text().strip() or "0.1"
+        if "P" in first["zones"] and self.proj.text().strip():
+            first["proj"] = self.proj.text().strip()
         c = dict(first)
         c["count"] = self.count.text().strip()
+        c["all_around"] = self.around.isChecked()
+        between = [self.b1.text().strip().upper(), self.b2.text().strip().upper()]
+        if all(between):
+            c["between"] = between
         FrameDialog.last = dict(c)
         if self.more.isChecked():
             composite = bool(self.kind.currentData())
@@ -817,14 +862,18 @@ class ToleranceFrame:
                 "ToolTip": "Pick the characteristic, tolerance, modifiers and datums, click "
                            "the feature (a hole gets its count, e.g. 6X), then click where "
                            "the frame goes. The leader stays attached when the view moves; "
-                           "drag the frame to move it."}
+                           "drag the frame to move it. Select a size dimension first to put "
+                           "the frame under its value (e.g. position of a hole's axis). "
+                           "Modifiers… adds Ⓤ CZ Ⓟ Ⓕ Ⓣ, all around and between."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
 
     def Activated(self):
         from . import annot
-        page = target_page()
+        dims = [o for o in Gui.Selection.getSelection()
+                if o.isDerivedFrom("TechDraw::DrawViewDimension")]
+        page = parent_page(dims[0]) if dims else target_page()
         if page is None:
             warn("Open the page (or select a view on it) first.")
             return
@@ -832,6 +881,13 @@ class ToleranceFrame:
         if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
             return
         c = dlg.choice()
+        if dims:
+            doc = page.Document
+            sym = run_in_transaction(doc, "DrawingKit tolerance frame",
+                                     lambda: annot.add_frame(page, None, c, dimension=dims[0]))
+            doc.recompute()
+            say("%s placed under the dimension; it moves with it" % sym.Label)
+            return
         show_page(page)
         Gui.updateGui()
 
@@ -1179,7 +1235,14 @@ class DimensionDialog(ui.Popover):
         self.basic = ui.toggle("[x] Basic", settings["basic"],
                                "Basic (theoretically exact, boxed) - no tolerance")
         self.reference = ui.toggle("(x) Ref", settings["reference"], "Reference (in parentheses)")
-        self.add_row(self.decimals, self.basic, self.reference, stretch=True)
+        self.envelope = ui.toggle("Ⓔ", "Ⓔ" in settings["after"],
+                                  "Envelope requirement (ISO 14405 / Rule #1) after the size")
+
+        def envelope(on):
+            t = self.after.text().replace("Ⓔ", "").rstrip()
+            self.after.setText((t + " Ⓔ") if on else t)
+        self.envelope.toggled.connect(envelope)
+        self.add_row(self.decimals, self.basic, self.reference, self.envelope, stretch=True)
 
         def sync(*_):
             basic = self.basic.isChecked()

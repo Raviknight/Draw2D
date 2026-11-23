@@ -873,6 +873,56 @@ class TestAnnotations(DocTest):
         h = float(re.search(r'height="([\d.]+)mm"', sym.Symbol).group(1))
         return w, h
 
+    def test_zone_modifiers_widen_the_frame(self):
+        import xml.etree.ElementTree as ET
+        base = {"char": "position", "tol": "0.1", "dia": True, "mod": "MMC",
+                "datums": ["A", "B", ""], "tsize": 3.5}
+        plain = self.annot.add_frame(self.page, (300, 230), base)
+        full = self.annot.add_frame(self.page, (300, 200), dict(
+            base, zones=["CZ", "P", "F", "T"], proj="15"))
+        ET.fromstring(full.Symbol)
+        self.assertGreater(self._svg_size(full)[0], self._svg_size(plain)[0] + 4 * 4.2)
+        for t in (">P<", ">F<", ">T<", ">CZ<", ">15<", ">M<"):
+            self.assertIn(t, full.Symbol)
+        # Ⓜ comes before Ⓟ (ASME Y14.5 order)
+        self.assertLess(full.Symbol.index(">M<"), full.Symbol.index(">P<"))
+        prof = self.annot.add_frame(self.page, (300, 170), {
+            "char": "profile_surface", "tol": "0.2", "zones": ["U"], "uval": "0.05",
+            "datums": ["A", "", ""], "tsize": 3.5})
+        self.assertIn(">U<", prof.Symbol)
+        self.assertIn(">0.05<", prof.Symbol)
+
+    def test_all_around_and_between(self):
+        x0, y0, x1, y1 = core.view_box(self.front)
+        p = {"char": "profile_surface", "tol": "0.1", "datums": ["A", "", ""],
+             "all_around": True, "between": ["J", "K"], "tsize": 3.5}
+        fr = self.annot.add_frame(self.page, (x1 + 30, y1 + 10), p, anchor=(x1, (y0 + y1) / 2))
+        self.assertIn("<circle", fr.Symbol)        # the all-around circle
+        texts = list(fr.EditableTexts)
+        self.assertIn("J", texts)
+        self.assertIn("K", texts)
+
+    def test_frame_under_a_dimension_moves_with_it(self):
+        from DrawingKitTools import holes
+        h = [x for x in holes.holes_seen_end_on(self.front) if abs(x.radius - 6) < 1e-6][0]
+        dim = self.doc.addObject("TechDraw::DrawViewDimension", "Dim")
+        dim.Type = "Diameter"
+        dim.MeasureType = "Projected"
+        dim.References2D = [(self.front, holes.circle_edge_name(self.front, h))]
+        self.page.addView(dim)
+        dim.X, dim.Y = 40, 30
+        self.doc.recompute()
+        fr = self.annot.add_frame(self.page, None, {"char": "position", "tol": "0.1", "dia": True,
+                                                   "datums": ["A", "", ""]}, dimension=dim)
+        self.assertEqual(fr.DrawingKitAnchorKind, "dimlabel")
+        self.assertNotIn("fill:#000000\" d", fr.Symbol)
+        cx, cy = core.view_center(self.front)
+        self.assertLess(float(fr.Y), cy + 30)       # below the value
+        bx = float(fr.X)
+        dim.X = 55
+        self.annot.refresh([fr])
+        self.assertAlmostEqual(float(fr.X) - bx, 15.0, places=6)
+
     def test_plain_note_with_several_lines(self):
         import xml.etree.ElementTree as ET
         n = self.annot.add_note(self.page, (60, 60), ["ALL FILLETS R1", "BREAK SHARP EDGES"])

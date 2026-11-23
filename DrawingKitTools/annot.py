@@ -168,6 +168,11 @@ def anchor_page(sym):
         sdir = {"up": (0, 1), "down": (0, -1), "left": (-1, 0), "right": (1, 0)}.get(side, (0, 1))
     if kind == "view" and link is not None:
         return view_point(link, (a.x, a.y)), sdir
+    if kind == "dimlabel" and link is not None:
+        # under a dimension's value (ISO: frame attached to a size dimension)
+        view = link.References2D[0][0]
+        cx, cy = core.view_center(view)
+        return (cx + float(link.X), cy + float(link.Y)), (0, -1)
     if kind == "dim" and link is not None:
         p0, p1, (ux, uy) = dimension_ends(link)
         if int(round(a.x)) == 0:
@@ -322,18 +327,58 @@ def frame_segments(p):
     rows = p.get("rows")
     if rows:
         return rows
-    return [{k: p.get(k) for k in ("char", "tol", "dia", "mod", "datums", "datum_mods")}]
+    return [{k: p.get(k) for k in ("char", "tol", "dia", "mod", "datums", "datum_mods",
+                                   "zones", "uval", "proj")}]
 
 
 def _field(name, row):
     return name if row == 0 else "%s_%d" % (name, row + 1)
 
 
+# Zone modifiers that follow the tolerance value, in drawing order
+# (ISO 1101 / ASME Y14.5): unequal profile Ⓤ + value, common zone CZ,
+# material condition Ⓜ/Ⓛ, projected Ⓟ + height, free state Ⓕ,
+# tangent plane Ⓣ, envelope Ⓔ.
+ZONES = [("U", "Ⓤ Unequally disposed profile (with offset value)"),
+         ("CZ", "CZ Common zone"),
+         ("P", "Ⓟ Projected tolerance zone (with height)"),
+         ("F", "Ⓕ Free state"),
+         ("T", "Ⓣ Tangent plane")]
+# (Ⓔ envelope belongs after a size dimension, not in a frame: Edit dimension)
+_CHAR_W = 2.2       # width of one tolerance-text character at 3.5 mm
+
+
+def tolerance_items(seg):
+    """[(kind, text)] drawn after the tolerance value: kind 'circ' (circled
+    letter) or 'text'."""
+    zones = seg.get("zones") or []
+    out = []
+    if "U" in zones:
+        out.append(("circ", "U"))
+        out.append(("text", seg.get("uval") or "0.1"))
+    if "CZ" in zones:
+        out.append(("text", "CZ"))
+    if seg.get("mod"):
+        out.append(("circ", gdt.MODIFIERS[seg["mod"]]))
+    if "P" in zones:
+        out.append(("circ", "P"))
+        if seg.get("proj"):
+            out.append(("text", seg["proj"]))
+    for z in ("F", "T"):
+        if z in zones:
+            out.append(("circ", z))
+    return out
+
+
+def _item_w(kind, text):
+    return 4.8 if kind == "circ" else len(text) * _CHAR_W + 1.0
+
+
 def segment_cells(seg, k=1.0):
     """(tolerance cell width, [datum cell widths]) of one segment."""
     tol = seg.get("tol") or "0.05"
-    tol_w = (len(tol) * 2.2 + 3.0 + (3.4 if seg.get("dia") else 0.0)
-             + (4.2 if seg.get("mod") else 0.0)) * k
+    tol_w = (len(tol) * _CHAR_W + 3.0 + (3.4 if seg.get("dia") else 0.0)
+             + sum(_item_w(*it) for it in tolerance_items(seg))) * k
     datum_ws = []
     for d, m in zip(seg.get("datums") or [], seg.get("datum_mods") or ["", "", ""]):
         if d:
@@ -346,7 +391,34 @@ def frame_cells(p):
     return segment_cells(frame_segments(p)[0])
 
 
-def draw_frame(sk, anchor, box_centre, p, values):
+def dim_text_side(dim, label_x):
+    """For a frame under a Ø/R dimension: ('left'|'right', half text width).
+    The leader meets the shoulder at the end nearer the feature; the frame
+    lines up with that end and runs away from the leader."""
+    if dim.Type not in ("Diameter", "Radius"):
+        return None
+    try:
+        _, p1, _ = dimension_ends(dim)
+    except Exception:
+        return None
+    fs = 3.5
+    vo = getattr(dim, "ViewObject", None)
+    if vo is not None and hasattr(vo, "Fontsize"):
+        fs = float(getattr(vo.Fontsize, "Value", vo.Fontsize))
+    try:
+        txt = dim.getText()            # e.g. '⌀10.00 mm'
+    except Exception:
+        txt = "⌀10"
+    txt = txt.replace(" mm", "").replace("mm", "")
+    if "w" in (dim.FormatSpec or "") and "." in txt:
+        txt = txt.rstrip("0").rstrip(".")   # %w drops trailing zeros
+    w = len(txt) * fs * 0.55
+    # the frame's edge just past the shoulder end where the leader leaves,
+    # so the leader runs clear of it
+    return ("left" if p1[0] < label_x else "right"), w / 2.0 - 1.5
+
+
+def draw_frame(sk, anchor, box_centre, p, values, align=None):
     """Feature control frame centred at box_centre; leader+arrow to anchor.
 
     Several segments stack downwards. Composite: one characteristic box
@@ -364,6 +436,10 @@ def draw_frame(sk, anchor, box_centre, p, values):
     n = len(segs)
     bx, by = box_centre
     x0 = bx - W / 2.0
+    if align is not None:
+        side, half = align
+        x0 = bx - half if side == "left" else bx + half - W
+        bx = x0 + W / 2.0
     ytop = by + n * H / 2.0
     if composite:
         sk.rect(x0, ytop - n * H, x0 + H, ytop)
@@ -384,11 +460,18 @@ def draw_frame(sk, anchor, box_centre, p, values):
             _dia(sk, tx, cy, 2.6 * k)
             tx += 3.4 * k
         name = _field("tolerance", r)
-        sk.text(tx, cy, values.get(name, seg.get("tol", "")), anchor="start", editable=name)
+        tol = values.get(name, seg.get("tol", ""))
+        sk.text(tx, cy, tol, anchor="start", editable=name)
+        mx = tx + (len(seg.get("tol") or "0.05") * _CHAR_W + 0.5) * k
+        for kind_, txt in tolerance_items(seg):
+            w = _item_w(kind_, txt) * k
+            if kind_ == "circ":
+                sk.circle((mx + w / 2.0, cy), 1.8 * k)
+                sk.text(mx + w / 2.0, cy + 0.1 * k, txt, size=2.6)
+            else:
+                sk.text(mx + w / 2.0, cy, txt)
+            mx += w
         x += tol_w
-        if seg.get("mod"):
-            sk.circle((x - 2.4 * k, cy), 1.8 * k)
-            sk.text(x - 2.4 * k, cy + 0.1 * k, gdt.MODIFIERS[seg["mod"]], size=2.6)
         pairs = [(d, m) for d, m in zip(seg.get("datums") or [], seg.get("datum_mods") or ["", "", ""]) if d]
         for i, ((d, m), w) in enumerate(zip(pairs, datum_ws)):
             sk.line((x, y0), (x, y1))
@@ -402,13 +485,37 @@ def draw_frame(sk, anchor, box_centre, p, values):
     count = values.get("count", p.get("count", ""))
     if count:
         sk.text(x0, ytop + 2.5 * k, count, anchor="start", editable="count")
+    between = p.get("between") or []
+    if len(between) == 2 and all(between):
+        draw_between(sk, bx, ytop - n * H - 3.0 * k, between[0], between[1])
     if anchor is not None:
         # leave from the left or right end of the first row, as usual
         first_cy = ytop - H / 2.0
-        end = (x0 if anchor[0] < bx else x0 + widths[0], first_cy)
-        sk.line(end, anchor)
-        draw_arrow(sk, anchor, end)
+        left = anchor[0] < bx
+        end = (x0 if left else x0 + widths[0], first_cy)
+        if p.get("all_around"):
+            # ISO 1101 / ASME: small circle at the leader's bend
+            knee = (end[0] + (-4.0 if left else 4.0) * k, first_cy)
+            sk.line(end, knee)
+            sk.circle(knee, 1.0 * k)
+            sk.line(knee, anchor)
+            draw_arrow(sk, anchor, knee)
+        else:
+            sk.line(end, anchor)
+            draw_arrow(sk, anchor, end)
     return W
+
+
+def draw_between(sk, cx, cy, a, b):
+    """'A ↔ B' (between symbol): the tolerance applies from point A to B."""
+    k = sk.k
+    half = 4.5 * k
+    sk.text(cx - half - 2.2 * k, cy, a, editable="between1")
+    sk.text(cx + half + 2.2 * k, cy, b, editable="between2")
+    l, r = (cx - half, cy), (cx + half, cy)
+    sk.line(l, r)
+    draw_arrow(sk, l, r)
+    draw_arrow(sk, r, l)
 
 
 def _symbol(sk, name, x0, ytop):
@@ -505,8 +612,10 @@ def render(sym):
             draw_datum(sk, (ax, ay), sdir, box, letter)
             fields = ["datum"]
         elif kind == "frame":
-            anchor = None if getattr(sym, ANCHOR_KIND, "free") == "free" else (ax, ay)
-            draw_frame(sk, anchor, box, p, values)
+            akind = getattr(sym, ANCHOR_KIND, "free")
+            anchor = None if akind in ("free", "dimlabel") else (ax, ay)
+            align = dim_text_side(getattr(sym, LINK), ax) if akind == "dimlabel" else None
+            draw_frame(sk, anchor, box, p, values, align)
         elif kind == "tag":
             sk.text(box[0], box[1], p.get("label", ""), size=2.5)
             if math.hypot(off.x, off.y) > 8.0 * sk.k:
@@ -671,12 +780,27 @@ def add_datum(page, x, y, letter=None, box=None, dimension=None, dim_end=1):
                 kind, view, local if kind == "view" else (x, y), off)
 
 
-def add_frame(page, box, params, anchor=None):
+def add_frame(page, box, params, anchor=None, dimension=None):
     """Tolerance frame at page point ``box``; leader to page point ``anchor``
-    (attached to the view under it) if given."""
+    (attached to the view under it) if given. With ``dimension`` the frame
+    sits under that dimension's value and moves with it (``box`` may be
+    None for the usual place just below)."""
     p = dict(params)
     p.setdefault("datum_mods", ["", "", ""])
     label = "GD&T %s %s" % (p.get("char", ""), p.get("tol", ""))
+    if dimension is not None:
+        if dimension.Type in ("Diameter", "Radius"):
+            # value on a horizontal shoulder, so the frame can sit under it
+            # without the dimension line running through it
+            from . import holes
+            holes.set_horizontal_text(dimension)
+        view = dimension.References2D[0][0]
+        cx, cy = core.view_center(view)
+        lx, ly = cx + float(dimension.X), cy + float(dimension.Y)
+        k = float(p.get("tsize", default_size())) / 3.5
+        rows = len(frame_segments(p))
+        off = (0.0, -(4.0 + rows * H / 2.0) * k) if box is None else (box[0] - lx, box[1] - ly)
+        return _new(page, "frame", label, p, "dimlabel", dimension, (0, 0), off)
     if anchor is None:
         return _new(page, "frame", label, p, "free", None, box, (0, 0))
     kind, view, local, _ = attach_point(page, anchor[0], anchor[1])
