@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>DrawingKit</name>
   <description>Community add-on for the TechDraw workbench: Onshape-style drawings with sized sheets and a clean title block, fitted standard views, projected views by pointing, click-defined and stepped sections, detail views, centre marks with bolt circles, hole callouts, datum flags and geometric tolerance frames.</description>
