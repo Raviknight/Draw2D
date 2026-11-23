@@ -44,7 +44,8 @@ class DrawingKitWorkbench(Gui.Workbench):
     def Initialize(self):
         import TechDrawGui  # noqa: F401  (page display, and registers TechDraw's commands)
         from DrawingKitTools import commands
-        self.appendToolbar("DrawingKit", commands.COMMAND_NAMES)
+        for name, cmds in commands.COMMAND_GROUPS:
+            self.appendToolbar(name, cmds)
         self.appendMenu("DrawingKit", commands.COMMAND_NAMES)
         known = set(Gui.listCommands())
         for name, cmds in self.TECHDRAW_TOOLBARS:

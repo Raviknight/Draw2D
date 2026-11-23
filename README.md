@@ -4,23 +4,46 @@ A FreeCAD 1.1 workbench that makes TechDraw drawings quicker, inspired by how On
 
 The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. The DrawingKit buttons are also added at the end of TechDraw's *TechDraw Pages* toolbar, for when you are in TechDraw. (Double-clicking a page in the tree still switches to TechDraw; that is TechDraw's own preference, *switch workbench on click*.)
 
-Status: early version (0.3.0), not yet in the Addon Manager.
+Status: early version (0.4.0), not yet in the Addon Manager.
 
 ## Commands
+
+The buttons sit on three toolbars: **DrawingKit views**, **DrawingKit annotation** and **DrawingKit tables**.
+
+### Views
 
 | Button | What it does |
 |---|---|
 | **New drawing sheet** | Pick a paper size (ISO A4–A0, ANSI A–E) and orientation, and get a page with DrawingKit's frame and title block. If a part is selected you can add its standard views in the same step. |
-| **Add standard views, fitted** | With a 3D part selected: adds front, top and right views (and an optional isometric) as a projection group. The scale is the largest standard scale (1:1, 1:2, 1:5, 1:10 … 2:1, 5:1 …) that fits the drawing area beside the title block. The views are centred. |
+| **Add standard views, fitted** | With a 3D part selected: adds front, top and right views (and an optional isometric) as a projection group. The front view is the part's most descriptive face, turned so its longest side runs across the page (a flat flange shows its round face). The scale is the largest standard scale (1:1, 1:2, 1:5 … 2:1, 5:1 …) that fits beside the title block. The title block is filled in from the part. |
 | **Projected view by pointing** | Select a view, then move the mouse: a preview shows the view you'd get to the right, left, above, below or at a corner (isometric-style). Click to place it; click again for more; Esc to stop. From the front view it joins the projection group; from any other view it becomes a separate view that stays lined up with its parent. |
 | **Section by cut line** | Select a view and click on it where the cut goes: one point for a straight cut, or several for a stepped (zig-zag) cut through several features. Segments snap to horizontal/vertical. Right-click or Enter, then click where the section view goes; the arrows point that way. Lettered A-A, B-B … automatically (I, O and Q are skipped). A stepped cut must cross the part from one side to the other. |
-| **Detail view by clicking** | Click the centre of the area to enlarge, click again to set the circle, then click where the detail goes. It gets the next free letter and a standard scale (at least twice the base view, aiming for a detail about 60 mm across), e.g. "DETAIL A (5 : 1)". |
-| **Centre marks and centre lines** | Adds centre marks to holes and round features seen end-on, and centre lines along their axes seen from the side. Evenly spaced holes round a centre get a bolt circle: the dashed pitch circle and a short radial line through each hole, as on a flange drawing. Works on the selected views, or on every view of the page. Run it again to refresh after changes; fillets are left alone. |
-| **Hole callouts** | Labels holes as "4X ⌀8.00 THRU" or "⌀5.00 ↧ 10.00": identical holes are counted, through holes say THRU, blind holes get their depth. Select hole circles for just those holes, or a view (or nothing, for the whole page) for every kind of hole seen end-on. The labels are TechDraw diameter dimensions, so they follow model changes; they are placed outside the part, each in its own direction, on the drawing area. |
-| **Datum flag** | Click on the edge that is the datum: the flag's triangle sits on it and the lettered box sticks out away from the part. Lettered A, B, C … automatically. |
-| **Geometric tolerance frame** | Pick the characteristic (all 14 ISO 1101 / ASME Y14.5 symbols), tolerance, diameter zone, MMC/LMC and up to three datums, then click where the frame goes, e.g. "⌖ \| ⌀0.05 \| A \| B". The symbols are drawn as lines, so they print right with any font. |
-| **Fit to page** | Picks the scale again so the projection group and the other views fit, then re-centres them. Use it after adding views or changing the part. |
+| **Aligned section** | For features at an angle, like holes on a bolt circle: click out through one feature, the centre, then out through another at any angle; the angled part is swung flat into the section (TechDraw's aligned complex section). |
+| **Detail view by clicking** | Click the centre of the area to enlarge, click again to set the circle, then click where the detail goes. It gets the next free letter and a standard scale, e.g. "DETAIL A (5 : 1)". |
+| **Auxiliary view** | Select a slanted straight edge (a face seen edge-on), then click on the side where the view goes: it looks square-on at that face, so the face shows true size, and stays lined up with its parent along the face's normal. |
+| **Fit to page** | Picks the scale again so the projection group and the other views fit, then re-centres them. Datums and frames follow. |
 | **Fast editing on/off** | On: the page stops updating itself and views switch to Coarse View, so small edits don't freeze FreeCAD. Off: views go back to full quality and the page redraws once. |
+
+### Annotation
+
+| Button | What it does |
+|---|---|
+| **Centre marks and centre lines** | Centre marks on holes and round features seen end-on, centre lines along their axes seen from the side. Evenly spaced holes round a centre get a bolt circle (dashed pitch circle plus a short radial line through each hole). Run it again to refresh; fillets are left alone. |
+| **Hole callouts** | Labels holes as "6X ⌀4.00 THRU" or "⌀5.00 ↧ 10.00": identical holes are counted, through holes say THRU, blind holes get their depth. The text reads horizontally on a shoulder (TechDraw's *Referencing* style); switch a callout's *Standard And Style* property to *Oriented/Inlined* to have it along the leader instead. They are TechDraw diameter dimensions, so they follow model changes. |
+| **Edit dimension** | Select one or more dimensions for an Onshape-style pop-up: text before/after ("3X ", " H7"), decimals, tolerance (none, symmetric ±, deviation +/−), **basic** (boxed, theoretically exact) or **reference** (in parentheses). Basic dimensions carry no tolerance; use them for the dimensions that locate features under a position or profile tolerance. |
+| **Datum flag** | Click the datum edge, then where the letter box goes (Enter: straight out). The triangle stays on the edge when the view moves; drag the box anywhere and a leader keeps it connected. For an axis or centre-plane datum (a diameter, a slot's width), select its dimension first: the triangle goes on the dimension line. Lettered A, B, C … automatically. |
+| **Datum target** | Datum target point: an X on the part with a leader to the divided circle (e.g. A1, with an optional target-area size). Follows the view. |
+| **Geometric tolerance frame** | Pick the characteristic (all 14 ISO 1101 / ASME Y14.5 symbols), tolerance, ⌀ zone, MMC/LMC, and up to three datums each with their own MMC/LMC. Click the toleranced feature, then where the frame goes. Clicking one of several identical holes puts the count (e.g. "6X") above the frame. The leader stays on the feature when the view moves; drag the frame to move it. Tick **Second segment** for a composite frame (one characteristic box over two rows: pattern-locating above, feature-relating below) or a stacked one (each row its own characteristic). |
+
+### Tables and title block
+
+| Button | What it does |
+|---|---|
+| **Hole table** | Select a view: every hole seen end-on gets a tag (A1, A2 … one letter per size) that follows the view, and a table lists each tag's X / Y from the part's lower-left corner and its size. |
+| **Fill title block** | Fills empty title-block fields from the part (name, material, drawing number) and your FreeCAD author name, and numbers the sheets "1 / N". Fields you have typed in are kept. Also done automatically when you add standard views. |
+| **Add revision** | Adds the next revision (A, B, C …) with what changed, the date and who approved it to a revision table at the top right of the frame, and puts the letter in the title block. |
+
+Datums, frames, targets, tags and tables are TechDraw symbols drawn by DrawingKit: drag them like views, and edit their texts (datum letters, tolerance values, table cells) in their *Editable Texts* property.
 
 **Moving views.** Drag a view by any of its lines or faces (TechDraw on its own only lets you grab the small name label). Projected views stay lined up, as in Onshape: side views slide left-right, top/bottom views slide up-down, the isometric moves freely, and dragging the front view moves them all. Views made with *Projected view by pointing* follow their parent the same way. A quick click still selects edges and faces as usual; hold Alt to drag the TechDraw way. To stop the locking on a group, set its **DrawingKitAligned** property to false.
 

@@ -212,8 +212,21 @@ def add_callout(page, view, group, shape=None, used_angles=None, clearance=10.0)
     dim.FormatSpec = callout_text(group)
     page.addView(dim)
     dim.X, dim.Y = rel   # relative to the view centre, page mm
+    set_horizontal_text(dim)
     dim.Label = "Hole %s" % dim.FormatSpec.replace("%.2f", "%.2f" % (hole.radius * 2))
     return dim
+
+
+def set_horizontal_text(dim):
+    """Callout text reads horizontally on a shoulder ('Referencing' style)
+    instead of running along the leader. GUI only (it is a display
+    property); keeps the ISO/ASME family the user has chosen."""
+    vo = getattr(dim, "ViewObject", None)
+    if vo is None or "StandardAndStyle" not in vo.PropertiesList:
+        return False
+    current = str(vo.StandardAndStyle)
+    vo.StandardAndStyle = "ASME Referencing" if current.startswith("ASME") else "ISO Referencing"
+    return True
 
 
 def add_callouts(page, view, holes=None):

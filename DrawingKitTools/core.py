@@ -5,6 +5,7 @@ Everything in here works without the FreeCAD GUI, so it can be tested with
 freecadcmd. The GUI commands in ``commands.py`` are thin wrappers around it.
 """
 
+import math
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -247,8 +248,13 @@ def create_page(doc, size, orientation, templates=None, drawingkit_template=True
         path = templates[(size, orientation)]
     tpl.Template = path
     page.Template = tpl
-    page.Label = "Sheet %s" % size
+    n = len([o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")])
+    page.Label = "Sheet %d (%s)" % (n, size)
     page.Scale = 1.0
+    try:
+        renumber_sheets(doc)
+    except Exception:
+        pass
     return page
 
 
@@ -502,6 +508,8 @@ def fit_page(page):
     scale, positions = plan_page(page, group, extras)
     apply_plan(page, group, extras, scale, positions)
     redraw([group] + list(group.Views) + list(extras))
+    from . import annot
+    annot.refresh_page(page)   # datums and frames follow their features
     return scale
 
 
@@ -590,6 +598,83 @@ def set_title_block_scale(page, scale):
         texts[k] = text
     tpl.EditableTexts = texts
     return True
+
+
+# ---------------------------------------------------------------------------
+# Title block from the part, sheet numbers
+# ---------------------------------------------------------------------------
+def page_part(page):
+    """The 3D object drawn on the page (first projection group's source)."""
+    for v in page.Views:
+        if v.isDerivedFrom("TechDraw::DrawViewPart") or v.isDerivedFrom("TechDraw::DrawProjGroup"):
+            src = list(getattr(v, "Source", []) or [])
+            if src:
+                return src[0]
+    return None
+
+
+def part_material(obj):
+    mat = getattr(obj, "ShapeMaterial", None)
+    name = getattr(mat, "Name", "") if mat is not None else ""
+    if name and name.lower() != "default":
+        return name
+    m = getattr(obj, "Material", None)   # older/other objects
+    if isinstance(m, dict):
+        return m.get("Name", "")
+    return ""
+
+
+def author_name():
+    return App.ParamGet("User parameter:BaseApp/Preferences/Document").GetString("prefAuthor", "")
+
+
+def _blank(value, defaults=()):
+    v = (value or "").strip()
+    return not v or v in defaults
+
+
+def fill_title_block(page, part=None):
+    """Fill empty (or still default) title-block fields from the part.
+    Fields the user has typed in are left alone. Returns the fields set."""
+    tpl = page.Template
+    if tpl is None or "EditableTexts" not in tpl.PropertiesList:
+        return {}
+    part = part or page_part(page)
+    texts = dict(tpl.EditableTexts)
+    doc = page.Document
+    changed = {}
+
+    def put(key, value, defaults=()):
+        if key in texts and value and _blank(texts[key], defaults):
+            texts[key] = value
+            changed[key] = value
+
+    if part is not None:
+        put("title", part.Label, (doc.Label, doc.Name, "ISO 5457 template"))
+        put("part_material", part_material(part))
+        put("drawing_number", part.Label.upper().replace(" ", "-"), ("DN",))
+    put("creator", author_name(), ("A. Nemesis",))
+    if changed:
+        tpl.EditableTexts = texts
+    renumber_sheets(doc)
+    return changed
+
+
+def renumber_sheets(doc):
+    """'1 / N', '2 / N'... in the order the pages were made."""
+    pages_ = [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")]
+    n = len(pages_)
+    for i, p in enumerate(pages_):
+        tpl = p.Template
+        if tpl is None or "EditableTexts" not in tpl.PropertiesList:
+            continue
+        texts = dict(tpl.EditableTexts)
+        if "sheet_number" in texts:
+            want = "%d / %d" % (i + 1, n)
+            if texts["sheet_number"] != want:
+                texts["sheet_number"] = want
+                tpl.EditableTexts = texts
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +813,7 @@ def add_standard_views(page, objs, isometric=False, front=None):
     for t in types[1:]:
         group.addProjection(t)
     apply_plan(page, group, extras, scale, positions)
+    fill_title_block(page, objs[0])
     return group
 
 
@@ -1146,9 +1232,20 @@ def follow_parent(view):
     """Snap a linked view back in line with its parent. True if it moved."""
     parent = getattr(view, PARENT_PROP, None)
     axis = getattr(view, AXIS_PROP, "")
-    if parent is None or axis not in ("H", "V"):
+    if parent is None or not axis:
         return False
     px, py = view_center(parent)
+    if axis.startswith("N:"):
+        # auxiliary view: stays on the line through the parent along the
+        # normal of the edge it was projected from
+        ang = math.radians(float(axis[2:]))
+        nx, ny = math.cos(ang), math.sin(ang)
+        t = (float(view.X) - px) * nx + (float(view.Y) - py) * ny
+        tx, ty = px + nx * t, py + ny * t
+        if abs(float(view.X) - tx) > 1e-6 or abs(float(view.Y) - ty) > 1e-6:
+            view.X, view.Y = tx, ty
+            return True
+        return False
     if axis == "H" and abs(float(view.Y) - py) > 1e-6:
         view.Y = py
         return True
@@ -1168,6 +1265,120 @@ def realign_children(obj):
         for child in linked_children(v):
             moved = follow_parent(child) or moved
     return moved
+
+
+# ---------------------------------------------------------------------------
+# Auxiliary views
+# ---------------------------------------------------------------------------
+def _straight_edge(view, edge_name):
+    """(p0, p1) unscaled view coords (Y up) of a straight edge 'EdgeN'."""
+    e = view.getEdgeByIndex(int(edge_name.replace("Edge", "")))
+    c = getattr(e, "Curve", None)
+    if c is None or c.TypeId not in ("Part::GeomLine", "Part::GeomLineSegment") \
+            or len(e.Vertexes) < 2:
+        raise ValueError("Pick a straight edge for the auxiliary view")
+    return App.Vector(e.Vertexes[0].Point), App.Vector(e.Vertexes[-1].Point)
+
+
+def auxiliary_setup(page, base, edge_name, point):
+    """Directions, rotation and position for an auxiliary view of the face
+    seen edge-on as ``edge_name`` in ``base``, placed towards page ``point``.
+
+    Returns (direction, xdirection, rotation_deg, (x, y), normal_angle_deg)."""
+    p0, p1 = _straight_edge(base, edge_name)
+    ex, ey = p1.x - p0.x, p1.y - p0.y
+    n_ = math.hypot(ex, ey)
+    ex, ey = ex / n_, ey / n_
+    nx, ny = -ey, ex
+    cx, cy = view_center(base)
+    if (point[0] - cx) * nx + (point[1] - cy) * ny < 0:
+        nx, ny = -nx, -ny
+    # turn the view so its 'up' runs along the edge, by no more than 90 deg
+    rotation = math.degrees(math.atan2(ey, ex)) - 90.0
+    if rotation <= -90.0:
+        rotation += 180.0
+        ex, ey = -ex, -ey
+    elif rotation > 90.0:
+        rotation -= 180.0
+        ex, ey = -ex, -ey
+    d, right, up = view_axes(base)
+    e3 = right * ex + up * ey
+    n3 = right * nx + up * ny
+    # An auxiliary view shows the slanted face itself: look at the part from
+    # the side it is placed on (whatever the page's projection angle).
+    vd = n3
+    vx = e3.cross(vd)                    # up = edge direction -> X = up x D
+    vx.normalize()
+    t = (point[0] - cx) * nx + (point[1] - cy) * ny
+    pos = (cx + nx * t, cy + ny * t)
+    return vd, vx, rotation, pos, math.degrees(math.atan2(ny, nx))
+
+
+def add_auxiliary_view(page, base, edge_name, point):
+    """Auxiliary view square-on to the face that ``edge_name`` shows edge-on."""
+    vd, vx, rot, pos, nang = auxiliary_setup(page, base, edge_name, point)
+    doc = page.Document
+    view = doc.addObject("TechDraw::DrawViewPart", "AuxView")
+    page.addView(view)
+    view.Source = base.Source
+    view.Direction = vd
+    view.XDirection = vx
+    view.Rotation = rot
+    view.ScaleType = "Page"
+    view.Scale = page.Scale
+    view.X, view.Y = pos
+    view.Label = "Auxiliary view from %s" % base.Label
+    view.addProperty("App::PropertyLink", PARENT_PROP, "DrawingKit",
+                     "View this one was projected from; it stays lined up with it")
+    view.addProperty("App::PropertyString", AXIS_PROP, "DrawingKit",
+                     "N:<angle> = slides along that direction from the parent")
+    setattr(view, PARENT_PROP, base)
+    setattr(view, AXIS_PROP, "N:%.6f" % nang)
+    view.touch()
+    return view
+
+
+# ---------------------------------------------------------------------------
+# Aligned sections (cut line bends through a centre, e.g. bolt-circle holes)
+# ---------------------------------------------------------------------------
+def add_aligned_section(page, base, points, place, letter=None):
+    """TechDraw 'Aligned' complex section along clicked page points
+    (outer point, centre, outer point...). The last segment sets the view
+    direction; the others are swung into its plane."""
+    if len(points) < 3:
+        raise ValueError("Click at least three points: out, centre, out")
+    pts = [tuple(map(float, p)) for p in points]
+    # the last segment is snapped to horizontal/vertical: it is the one seen true
+    (ax, ay), (bx, by) = pts[-2], pts[-1]
+    if abs(bx - ax) >= abs(by - ay):
+        pts[-1] = (bx, ay)
+    else:
+        pts[-1] = (ax, by)
+    direction = cut_orientation(pts[-2:], place)
+    shape = source_shape(base.Source)
+    model = [page_to_model(base, x, y) for x, y in pts]
+    margin = 5.0 / view_scale(base)
+    first = _past_outline(model[0], model[0] - model[1], shape, margin)
+    last = _past_outline(model[-1], model[-1] - model[-2], shape, margin)
+    import Part
+    doc = page.Document
+    sec = _new_section(page, base, letter, "TechDraw::DrawComplexSection")
+    tool = doc.addObject("Part::Feature", "CutLine_%s" % sec.SectionSymbol)
+    tool.Label = "Cut line %s-%s" % (sec.SectionSymbol, sec.SectionSymbol)
+    tool.Shape = Part.makePolygon([first] + model[1:-1] + [last])
+    if App.GuiUp and tool.ViewObject is not None:
+        tool.ViewObject.Visibility = False
+    sec.CuttingToolWireObject = tool
+    sec.ProjectionStrategy = "Aligned"
+    sec.SectionOrigin = model[-2]
+    sec.SectionDirection = "Aligned"
+    sec_dir, sec_x = _section_vectors(base, direction)
+    sec.Direction = sec_dir
+    sec.SectionNormal = sec_dir
+    sec.XDirection = sec_x
+    _place_section(page, base, sec, direction, shape, place)
+    sec.touch()
+    return sec
 
 
 # ---------------------------------------------------------------------------

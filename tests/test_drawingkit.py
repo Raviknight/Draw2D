@@ -758,6 +758,271 @@ class TestBestFront(DocTest):
             self.assertTrue(App.Vector(v.XDirection).normalize().isEqual(ex, 1e-9), v.Type)
 
 
+def flange(doc, bolt_r=2.0, n=6):
+    """Disc r40 x 10 with a boss r20 up to z=25, bore r6, n holes on r30."""
+    import math
+    import Part
+    shp = Part.makeCylinder(40, 10).fuse(Part.makeCylinder(20, 25)).cut(
+        Part.makeCylinder(6, 40, App.Vector(0, 0, -5)))
+    for k in range(n):
+        a = math.radians(360.0 / n * k)
+        shp = shp.cut(Part.makeCylinder(bolt_r, 40, App.Vector(30 * math.cos(a), 30 * math.sin(a), -5)))
+    obj = doc.addObject("Part::Feature", "Flange")
+    obj.Shape = shp.removeSplitter()
+    doc.recompute()
+    return obj
+
+
+class TestAnnotations(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import annot
+        self.annot = annot
+        self.part = flange(self.doc)
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        self.group = core.add_standard_views(self.page, [self.part])
+        self.doc.recompute()
+        self.front = self.group.Anchor
+        self.right = self.group.getItemByLabel("Right")
+
+    def test_datum_sticks_to_the_view(self):
+        import xml.etree.ElementTree as ET
+        x0, y0, x1, y1 = core.view_box(self.right)
+        d = self.annot.add_datum(self.page, (x0 + x1) / 2, y0)
+        ET.fromstring(d.Symbol)
+        self.assertEqual(d.DrawingKitAnchorKind, "view")
+        self.assertEqual(list(d.EditableTexts), ["A"])
+        before = (float(d.X), float(d.Y))
+        self.group.X = float(self.group.X) + 12
+        self.annot.refresh(self.annot.attached_to(self.group))
+        self.assertAlmostEqual(float(d.X) - before[0], 12.0, places=6)
+        self.assertAlmostEqual(float(d.Y) - before[1], 0.0, places=6)
+
+    def test_dragging_moves_the_box_not_the_anchor(self):
+        x0, y0, x1, y1 = core.view_box(self.right)
+        d = self.annot.add_datum(self.page, (x0 + x1) / 2, y0)
+        anchor_before = self.annot.anchor_page(d)[0]
+        d.X = float(d.X) + 15
+        self.assertTrue(self.annot.dragged(d))
+        self.assertAlmostEqual(d.DrawingKitOffset.x, 15.0, places=6)
+        self.assertEqual(self.annot.anchor_page(d)[0], anchor_before)
+
+    def test_frame_with_count_and_datum_modifiers(self):
+        fr = self.annot.add_frame(
+            self.page, (300, 230),
+            {"char": "position", "tol": "0.05", "dia": True, "mod": "MMC",
+             "datums": ["A", "B", ""], "datum_mods": ["", "MMC", ""], "count": "6X"},
+            anchor=core.model_to_page(self.front, App.Vector(30, 0, 10)))
+        self.assertEqual(list(fr.EditableTexts), ["0.05", "A", "B", "6X"])
+        self.assertEqual(fr.DrawingKitAnchorKind, "view")
+        self.assertIn("<circle", fr.Symbol)   # the Ⓜ circles
+
+    def test_datum_on_a_diameter_dimension(self):
+        from DrawingKitTools import holes
+        h = [x for x in holes.holes_seen_end_on(self.front) if abs(x.radius - 6) < 1e-6][0]
+        dim = self.doc.addObject("TechDraw::DrawViewDimension", "Dim")
+        dim.Type = "Diameter"
+        dim.MeasureType = "Projected"
+        dim.References2D = [(self.front, holes.circle_edge_name(self.front, h))]
+        self.page.addView(dim)
+        dim.X, dim.Y = 40, 30
+        self.doc.recompute()
+        (a0, a1, u) = self.annot.dimension_ends(dim)
+        s = core.view_scale(self.front)
+        self.assertAlmostEqual(math_dist(a0, a1), 12 * s, places=6)   # Ø12 bore
+        d = self.annot.add_datum(self.page, 0, 0, "B", dimension=dim)
+        self.assertEqual(d.DrawingKitAnchorKind, "dim")
+        self.assertEqual(self.annot.next_datum_letter(self.doc), "A")
+
+    def _two_rows(self, composite):
+        row1 = {"char": "position", "tol": "0.25", "dia": True, "mod": "MMC",
+                "datums": ["A", "B", "C"], "datum_mods": ["", "", ""]}
+        row2 = {"char": "position" if composite else "perpendicularity", "tol": "0.05",
+                "dia": True, "mod": "MMC", "datums": ["A", "", ""], "datum_mods": ["", "", ""]}
+        return {"char": "position", "rows": [row1, row2], "composite": composite, "count": "6X"}
+
+    def test_composite_frame_shares_one_symbol(self):
+        import re
+        fr = self.annot.add_frame(self.page, (300, 230), self._two_rows(True))
+        texts = list(fr.EditableTexts)
+        self.assertEqual(texts, ["0.25", "A", "B", "C", "0.05", "A", "6X"])
+        # one characteristic symbol drawn (a single position circle+cross group)
+        self.assertEqual(fr.Symbol.count("transform=\"translate"), 1)
+        h = float(re.search(r'height="([\d.]+)mm"', fr.Symbol).group(1))
+        self.assertGreater(h, 2 * 7.0)        # two rows tall
+
+    def test_stacked_frame_has_a_symbol_per_row(self):
+        fr = self.annot.add_frame(self.page, (300, 230), self._two_rows(False))
+        self.assertEqual(fr.Symbol.count("transform=\"translate"), 2)
+
+    def test_datum_target(self):
+        x0, y0, x1, y1 = core.view_box(self.right)
+        t = self.annot.add_target(self.page, (x0 + x1) / 2, y1, "A1", "⌀3")
+        self.assertEqual(sorted(t.EditableTexts), ["A1", "⌀3"])
+
+    def test_hole_callout_count_for_frames(self):
+        from DrawingKitTools import holes
+        hs = holes.holes_seen_end_on(self.front)
+        groups = holes.group_holes(hs)
+        self.assertIn(6, [len(g) for g in groups])
+
+
+def math_dist(a, b):
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+class TestAuxiliaryView(DocTest):
+    def test_looks_square_on_at_the_slanted_face(self):
+        import Part
+        blk = Part.makeBox(60, 40, 30)
+        cutter = Part.makeBox(40, 60, 40)
+        cutter.rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), 45)
+        cutter.translate(App.Vector(40, -10, 30))
+        obj = self.doc.addObject("Part::Feature", "Wedge")
+        obj.Shape = blk.cut(cutter)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [obj], front=FRONT)
+        self.doc.recompute()
+        front = g.Anchor
+        slanted = None
+        i = 0
+        while i < 100:
+            try:
+                e = front.getEdgeByIndex(i)
+            except Exception:
+                break
+            if len(e.Vertexes) == 2:
+                p0, p1 = e.Vertexes[0].Point, e.Vertexes[1].Point
+                if abs(abs(p1.x - p0.x) - abs(p1.y - p0.y)) < 1e-6 and abs(p1.x - p0.x) > 1:
+                    slanted = "Edge%d" % i
+            i += 1
+        self.assertIsNotNone(slanted)
+        cx, cy = core.view_center(front)
+        aux = core.add_auxiliary_view(page, front, slanted, (cx + 80, cy + 80))
+        self.doc.recompute()
+        # the chamfer face's outward normal is (1, 0, 1)/sqrt2: we look straight at it
+        n = App.Vector(1, 0, 1).normalize()
+        self.assertTrue(App.Vector(aux.Direction).normalize().isEqual(n, 1e-6))
+        self.assertLessEqual(abs(float(aux.Rotation)), 90.0)
+        self.assertIn("Up-to-date", aux.State)
+        aux.X = float(aux.X) + 10           # dragged off its line...
+        self.assertTrue(core.follow_parent(aux))   # ...comes back onto it
+        ang = math_angle(aux, front)
+        self.assertAlmostEqual(ang, 45.0, places=3)
+
+
+def math_angle(view, parent):
+    import math
+    (x, y), (px, py) = core.view_center(view), core.view_center(parent)
+    return math.degrees(math.atan2(y - py, x - px))
+
+
+class TestAlignedSection(DocTest):
+    def test_makes_an_aligned_complex_section(self):
+        import math
+        part = flange(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part])
+        self.doc.recompute()
+        f = g.Anchor
+        P = lambda x, y: core.model_to_page(f, App.Vector(x, y, 10))
+        a60 = math.radians(60)
+        pts = [P(30 * math.cos(a60), 30 * math.sin(a60)), P(0, 0), P(0.5, -30)]
+        fx, fy = core.view_center(f)
+        sec = core.add_aligned_section(page, f, pts, (fx + 120, fy))
+        self.assertEqual(sec.TypeId, "TechDraw::DrawComplexSection")
+        self.assertEqual(sec.ProjectionStrategy, "Aligned")
+        wire = sec.CuttingToolWireObject.Shape
+        self.assertEqual(len(wire.Edges), 2)
+        with self.assertRaises(ValueError):
+            core.add_aligned_section(page, f, pts[:2], (fx + 120, fy))
+
+
+class TestTitleAndTables(DocTest):
+    def test_title_block_from_part_and_sheet_numbers(self):
+        part = flange(self.doc)
+        p1 = core.create_page(self.doc, "A3", "Landscape")
+        core.add_standard_views(p1, [part])
+        p2 = core.create_page(self.doc, "A4", "Landscape")
+        t1, t2 = dict(p1.Template.EditableTexts), dict(p2.Template.EditableTexts)
+        self.assertEqual(t1["title"], "Flange")
+        self.assertEqual(t1["drawing_number"], "FLANGE")
+        self.assertEqual((t1["sheet_number"], t2["sheet_number"]), ("1 / 2", "2 / 2"))
+        # a field the user typed in is kept
+        texts = dict(p1.Template.EditableTexts)
+        texts["title"] = "My flange"
+        p1.Template.EditableTexts = texts
+        core.fill_title_block(p1, part)
+        self.assertEqual(dict(p1.Template.EditableTexts)["title"], "My flange")
+
+    def test_hole_table(self):
+        from DrawingKitTools import tables
+        part = coupon(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = g.getItemByLabel("Top")
+        rows = tables.hole_rows(top)
+        self.assertEqual([r[0] for r in rows], ["A1", "B1", "B2", "B3", "C1"])
+        bore = rows[0]
+        self.assertAlmostEqual(bore[1], 25.0, places=3)   # disc r25: centre is 25 from lower-left
+        self.assertAlmostEqual(bore[2], 25.0, places=3)
+        self.assertEqual(bore[3], "⌀16.00 THRU")
+        table, tags = tables.add_hole_table(page, top)
+        self.assertEqual(len(tags), 5)
+        self.assertIn("HOLE TABLE", table.Symbol)
+
+    def test_revisions(self):
+        from DrawingKitTools import tables
+        page = core.create_page(self.doc, "A3", "Landscape")
+        t = tables.add_revision(page, "Initial release", "RS", "2026-11-22")
+        t = tables.add_revision(page, "Holes enlarged", "RS", "2026-12-01")
+        p = __import__("json").loads(t.DrawingKitParams)
+        self.assertEqual([r[0] for r in p["rows"]], ["A", "B"])
+        self.assertEqual(dict(page.Template.EditableTexts)["revision_index"], "B")
+        self.assertEqual(len([v for v in page.Views if getattr(v, "DrawingKitAnnot", "") == "revtable"]), 1)
+
+
+class TestEditDimension(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import dims
+        self.dims = dims
+        page = core.create_page(self.doc, "A4", "Landscape")
+        g = core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        self.dim = self.doc.addObject("TechDraw::DrawViewDimension", "Dim")
+        self.dim.Type = "DistanceX"
+        self.dim.References2D = [(g.Anchor, "Edge0")]
+        page.addView(self.dim)
+        self.doc.recompute()
+
+    def test_round_trip_and_text(self):
+        d = self.dim
+        self.dims.set_dimension(d, before="3X ", after=" H7", decimals=3, tol="deviation",
+                                upper=0.02, lower=0.01)
+        s = self.dims.read_dimension(d)
+        self.assertEqual((s["before"], s["after"], s["decimals"], s["tol"]),
+                         ("3X ", " H7", 3, "deviation"))
+        self.assertAlmostEqual(s["upper"], 0.02)
+        self.assertAlmostEqual(s["lower"], 0.01)
+        self.assertFalse(d.EqualTolerance)
+
+    def test_basic_drops_the_tolerance(self):
+        d = self.dim
+        self.dims.set_dimension(d, tol="symmetric", upper=0.1, basic=True)
+        self.assertTrue(d.TheoreticalExact)
+        self.assertEqual(self.dims.read_dimension(d)["tol"], "none")
+
+    def test_reference_and_symmetric(self):
+        d = self.dim
+        self.dims.set_dimension(d, decimals=1, tol="symmetric", upper=0.05, reference=True)
+        s = self.dims.read_dimension(d)
+        self.assertTrue(s["reference"])
+        self.assertEqual(s["tol"], "symmetric")
+        self.assertEqual(d.FormatSpec, "(%.1f)")
+
+
 class TestSpeed(DocTest):
     def test_toggle(self):
         page = core.create_page(self.doc, "A3", "Landscape")
