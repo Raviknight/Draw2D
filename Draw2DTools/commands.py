@@ -98,16 +98,27 @@ def selected_part_view():
 
 
 def show_page(page):
-    """Open (or bring forward) the page's tab."""
+    """Open (or bring forward) the page's tab, staying in this workbench.
+
+    Not ViewObject.doubleClicked(): in FreeCAD 1.1 that also switches to the
+    TechDraw workbench (ViewProviderPage::doubleClicked -> assureWorkbench).
+    """
+    view = Gui.activeView()
+    if view is not None and hasattr(view, "getPage"):
+        try:
+            if core.same(view.getPage(), page):
+                return
+        except Exception:
+            pass
     try:
-        page.ViewObject.doubleClicked()
+        page.ViewObject.show()   # creates the tab if needed
         Gui.updateGui()
     except Exception:
         pass
     view = Gui.activeView()
     if view is not None and hasattr(view, "getPage"):
         try:
-            if view.getPage() == page:
+            if core.same(view.getPage(), page):
                 return
         except Exception:
             pass
@@ -170,7 +181,7 @@ _WATCHERS = set()
 
 def watch_redraw(page):
     for w in list(_WATCHERS):
-        if w.page == page:
+        if core.same(w.page, page):
             w.stop()
     RedrawWatcher(page)
 
@@ -189,6 +200,12 @@ def run_in_transaction(doc, name, func):
 # ---------------------------------------------------------------------------
 # Dialogs
 # ---------------------------------------------------------------------------
+def all_sheets():
+    """Every paper size Draw2D can make, in both orientations."""
+    from . import templates as d2t
+    return {(s, o): None for s in d2t.SIZES for o in d2t.ORIENTATIONS}
+
+
 class SheetDialog(QtWidgets.QDialog):
     """Pick a sheet size and orientation."""
 
@@ -270,18 +287,14 @@ class NewSheet:
 
     def Activated(self):
         doc = App.ActiveDocument
-        templates = core.available_templates()
-        if not templates:
-            warn("No TechDraw templates found in %s" % core.template_dir())
-            return
         parts = selected_parts()
-        dlg = SheetDialog(templates, Gui.getMainWindow())
+        dlg = SheetDialog(all_sheets(), Gui.getMainWindow())
         if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
             return
         size, orient, add_views, iso = dlg.choice()
 
         def work():
-            page = core.create_page(doc, size, orient, templates)
+            page = core.create_page(doc, size, orient)
             if add_views and parts:
                 core.add_standard_views(page, parts, iso)
             return page
@@ -318,8 +331,7 @@ class StandardViews:
             if pages(doc):
                 warn("There are several pages. Select the page too (Ctrl+click it in the tree).")
                 return
-            templates = core.available_templates()
-            dlg = SheetDialog(templates, Gui.getMainWindow())
+            dlg = SheetDialog(all_sheets(), Gui.getMainWindow())
             dlg.views.setChecked(True)
             dlg.views.setEnabled(False)
             if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
@@ -327,7 +339,7 @@ class StandardViews:
             size, orient, _, iso = dlg.choice()
             page = run_in_transaction(
                 doc, "Draw2D new sheet",
-                lambda: core.create_page(doc, size, orient, templates))
+                lambda: core.create_page(doc, size, orient))
         else:
             iso = ask_isometric()
             if iso is None:
@@ -370,31 +382,79 @@ class FitToPage:
 class Section:
     def GetResources(self):
         return {"Pixmap": icon("Draw2D_Section.svg"),
-                "MenuText": "Section, auto-lettered",
-                "ToolTip": "Select a view on the page. Adds a section through the "
-                           "middle of the part with the next free letter (A-A, B-B...)."
-                           " Edit it afterwards by double-clicking the section."}
+                "MenuText": "Section by cut line",
+                "ToolTip": "Select a view. Click on it where the cut goes: one point "
+                           "for a straight cut, or several points for a stepped "
+                           "(zig-zag) cut. Right-click or Enter, then click where the "
+                           "section view goes; the arrows point that way. Lettered "
+                           "A-A, B-B... automatically."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
 
     def Activated(self):
-        doc = App.ActiveDocument
-        base = selected_part_view()
+        base, page = _base_view_and_page()
         if base is None:
-            warn("Select the view to cut (e.g. the front view) on the page first.")
             return
-        page = parent_page(base)
-        directions = ["Right", "Left", "Up", "Down"]
-        direction, ok = QtWidgets.QInputDialog.getItem(
-            Gui.getMainWindow(), "Draw2D - Section",
-            "Look direction (arrows point this way):", directions, 0, False)
-        if not ok:
-            return
-        sec = run_in_transaction(doc, "Draw2D section",
-                                 lambda: core.add_section(page, base, direction=direction))
-        doc.recompute()
-        say("%s added" % sec.Label)
+        Gui.Selection.clearSelection()
+        from . import interact
+
+        def preview_line(points, cursor=None):
+            pts = list(points) + ([cursor] if cursor else [])
+            snapped = core.snap_cut_points(pts)
+            if len(snapped) == 1:
+                x, y = snapped[0]
+                r = 4.0
+                return [("line", [(x - r, y), (x + r, y)]), ("line", [(x, y - r), (x, y + r)])]
+            return [("line", snapped)]
+
+        def on_move_cut(pt, points):
+            return preview_line(points, pt)
+
+        def on_cut_done(points):
+            if not points:
+                return
+            cut = core.snap_cut_points(points)
+
+            def on_move_place(pt, _p):
+                shapes = preview_line(cut)
+                try:
+                    direction = core.cut_orientation(cut, pt)
+                    sec_dir, sec_x = core._section_vectors(base, direction)
+                    w, h = core.projected_extent(core.source_shape(base.Source), sec_dir, sec_x)
+                    s = core.view_scale(base)
+                    bx, by = core.view_center(base)
+                    if direction in ("Right", "Left"):
+                        x, y = pt[0], by
+                    else:
+                        x, y = bx, pt[1]
+                    shapes.append(("rect", x, y, w * s, h * s))
+                except Exception:
+                    pass
+                return shapes
+
+            def on_place_done(places):
+                if not places:
+                    return
+                doc = page.Document
+                sec = run_in_transaction(
+                    doc, "Draw2D section",
+                    lambda: core.add_cut_section(page, base, cut, places[-1]))
+                doc.recompute()
+                watch_redraw(page)
+                say("%s added" % sec.Label)
+
+            interact.PagePicker(page, "Draw2D: click where the section view goes "
+                                      "(Esc to cancel)",
+                                on_move=on_move_place, on_click=lambda pt, pts: True,
+                                on_done=on_place_done, finish_on_right_click=False)
+
+        interact.PagePicker(page, "Draw2D: click the cut line on the view (one point = "
+                                  "straight cut, more = stepped). Right-click or Enter "
+                                  "when done, Esc to cancel.",
+                            on_move=on_move_cut, on_click=lambda pt, pts: False,
+                            on_done=lambda pts: QtCore.QTimer.singleShot(
+                                0, lambda: on_cut_done(pts)))
 
 
 class SpeedToggle:
@@ -427,11 +487,111 @@ class SpeedToggle:
         say("Fast editing %s for %s" % ("ON" if fast else "OFF (redrawn)", page.Label))
 
 
+def _base_view_and_page():
+    base = selected_part_view()
+    if base is None:
+        warn("Select a view on the page first (click one of its lines).")
+        return None, None
+    page = parent_page(base)
+    if page is None:
+        warn("That view is not on a page.")
+        return None, None
+    show_page(page)
+    Gui.updateGui()
+    return base, page
+
+
+class ProjectedView:
+    def GetResources(self):
+        return {"Pixmap": icon("Draw2D_ProjectedView.svg"),
+                "MenuText": "Projected view by pointing",
+                "ToolTip": "Select a view, then move the mouse to where the new view "
+                           "should go and click: right, left, above, below or a corner "
+                           "(isometric-style). Click again for more views; Esc to stop."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        base, page = _base_view_and_page()
+        if base is None:
+            return
+        Gui.Selection.clearSelection()
+        self._pick(page, base)
+
+    def _pick(self, page, base):
+        from . import interact
+        doc = page.Document
+
+        def on_move(pt, _points):
+            try:
+                x, y, w, h = core.projection_preview(page, base, pt)
+            except Exception:
+                return []
+            return [("line", [core.view_center(base), (x, y)]), ("rect", x, y, w, h)]
+
+        def on_done(points):
+            if not points:
+                return
+            try:
+                view = run_in_transaction(
+                    doc, "Draw2D projected view",
+                    lambda: core.add_projected_view(page, base, points[-1]))
+            except ValueError as e:
+                warn(str(e))
+            else:
+                doc.recompute()
+                watch_redraw(page)
+                say("%s added" % view.Label)
+            # keep going from the same base view until Esc
+            QtCore.QTimer.singleShot(0, lambda: self._pick(page, base))
+
+        interact.PagePicker(page, "Draw2D: click where the projected view goes "
+                                  "(Esc to stop)",
+                            on_move=on_move, on_click=lambda pt, pts: True,
+                            on_done=on_done, finish_on_right_click=False)
+
+
+class CenterMarks:
+    def GetResources(self):
+        return {"Pixmap": icon("Draw2D_CenterMarks.svg"),
+                "MenuText": "Centre marks and centre lines",
+                "ToolTip": "Adds centre marks to holes and round features seen end-on, "
+                           "and centre lines along their axes seen from the side. "
+                           "Select views, or the page for all views. Run again to "
+                           "refresh them after changes."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        doc = App.ActiveDocument
+        views = []
+        for obj in Gui.Selection.getSelection():
+            if obj.isDerivedFrom("TechDraw::DrawProjGroup"):
+                views.extend(obj.Views)
+            elif obj.isDerivedFrom("TechDraw::DrawViewPart") and \
+                    not obj.isDerivedFrom("TechDraw::DrawViewDetail"):
+                views.append(obj)
+        if not views:
+            page = target_page()
+            if page is None:
+                warn("Select views or the page first.")
+                return
+            views = [v for v in core.part_views(page)
+                     if not v.isDerivedFrom("TechDraw::DrawViewDetail")]
+        total = run_in_transaction(doc, "Draw2D centre marks",
+                                   lambda: sum(core.add_center_marks(v) for v in views))
+        say("%d centre line(s) on %d view(s)" % (total, len(views)))
+
+
 COMMANDS = [
     ("Draw2D_NewSheet", NewSheet()),
     ("Draw2D_StandardViews", StandardViews()),
-    ("Draw2D_FitToPage", FitToPage()),
+    ("Draw2D_ProjectedView", ProjectedView()),
     ("Draw2D_Section", Section()),
+    ("Draw2D_CenterMarks", CenterMarks()),
+    ("Draw2D_FitToPage", FitToPage()),
     ("Draw2D_SpeedToggle", SpeedToggle()),
 ]
 
@@ -449,7 +609,7 @@ class AlignmentObserver:
         if prop not in ("X", "Y"):
             return
         try:
-            if not obj.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+            if not obj.isDerivedFrom("TechDraw::DrawView"):
                 return
         except Exception:
             return
@@ -474,5 +634,11 @@ class AlignmentObserver:
 # This module is imported once per FreeCAD session, so one observer.
 ALIGNMENT_OBSERVER = AlignmentObserver()
 App.addDocumentObserver(ALIGNMENT_OBSERVER)
+
+try:
+    from . import interact as _interact
+    _interact.start_watching()
+except Exception as _e:  # drag-anywhere is a convenience; never block loading
+    App.Console.PrintWarning("Draw2D: drag-anywhere not available: %s\n" % _e)
 
 COMMAND_NAMES = [n for n, _ in COMMANDS]

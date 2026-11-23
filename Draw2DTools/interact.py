@@ -1,0 +1,358 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+"""Mouse interaction on a TechDraw page (GUI only).
+
+- PagePicker: click points on the page with a live preview, for commands
+  like "projected view by pointing" and "section by cut line".
+- Drag-anywhere: drag a view by any of its lines or faces, not just by its
+  label as TechDraw requires. A plain click still selects as before.
+
+Page coordinates are mm with Y up. TechDraw's scene uses the same numbers
+times its "Rez" factor, with Y down.
+"""
+
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtCore, QtGui
+
+try:
+    from PySide import QtWidgets
+except ImportError:
+    QtWidgets = QtGui
+
+from . import core
+
+
+def rez():
+    p = App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/Rez")
+    return p.GetFloat("Resolution", 10.0)
+
+
+def to_page(scene_pt):
+    k = rez()
+    return scene_pt.x() / k, -scene_pt.y() / k
+
+
+def to_scene(x, y):
+    k = rez()
+    return QtCore.QPointF(x * k, -y * k)
+
+
+def page_scene(page):
+    import TechDrawGui
+    try:
+        return TechDrawGui.getSceneForPage(page)
+    except Exception:
+        return None
+
+
+def page_graphics_view(page):
+    scene = page_scene(page)
+    if scene is None:
+        return None
+    views = scene.views()
+    return views[0] if views else None
+
+
+def _pen(color, dashed=True, width=0.35):
+    pen = QtGui.QPen(QtGui.QColor(color))
+    pen.setWidthF(width * rez())
+    if dashed:
+        pen.setStyle(QtCore.Qt.DashLine)
+    pen.setCosmetic(False)
+    return pen
+
+
+def status(text):
+    try:
+        Gui.getMainWindow().statusBar().showMessage(text)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Picking points with a preview
+# ---------------------------------------------------------------------------
+class PagePicker(QtCore.QObject):
+    """Collect clicks on a page.
+
+    on_move(pt, points) -> list of shapes to preview, each either
+        ("rect", x, y, w, h) centred rect, or ("line", [(x, y), ...]).
+    on_click(pt, points) -> True to finish (calls on_done), False to keep going.
+    on_done(points) is called when finished (Enter / right-click / on_click
+    returning True); on_cancel() on Esc.
+    """
+
+    active = None
+
+    def __init__(self, page, hint, on_move=None, on_click=None, on_done=None,
+                 on_cancel=None, finish_on_right_click=True):
+        super().__init__()
+        self.page = page
+        self.hint = hint
+        self.on_move = on_move
+        self.on_click = on_click
+        self.on_done = on_done
+        self.on_cancel = on_cancel
+        self.finish_on_right_click = finish_on_right_click
+        self.points = []
+        self.items = []
+        self.scene = page_scene(page)
+        self.gview = page_graphics_view(page)
+        if self.scene is None or self.gview is None:
+            raise RuntimeError("Open the page first")
+        if PagePicker.active is not None:
+            PagePicker.active.cancel()
+        PagePicker.active = self
+        self.gview.viewport().installEventFilter(self)
+        self.gview.installEventFilter(self)
+        self.gview.viewport().setMouseTracking(True)
+        self.gview.viewport().setCursor(QtCore.Qt.CrossCursor)
+        self.gview.setFocus()
+        status(hint)
+
+    # -- preview ----------------------------------------------------------
+    def _clear_preview(self):
+        for it in self.items:
+            try:
+                self.scene.removeItem(it)
+            except Exception:
+                pass
+        self.items = []
+
+    def _draw(self, shapes):
+        self._clear_preview()
+        for shape in shapes or []:
+            if shape[0] == "rect":
+                _, x, y, w, h = shape
+                tl = to_scene(x - w / 2.0, y + h / 2.0)
+                item = QtWidgets.QGraphicsRectItem(tl.x(), tl.y(), w * rez(), h * rez())
+                item.setPen(_pen("#1f77b4"))
+                item.setBrush(QtGui.QBrush(QtGui.QColor(31, 119, 180, 30)))
+            else:
+                pts = shape[1]
+                if len(pts) < 2:
+                    continue
+                path = QtGui.QPainterPath(to_scene(*pts[0]))
+                for p in pts[1:]:
+                    path.lineTo(to_scene(*p))
+                item = QtWidgets.QGraphicsPathItem(path)
+                item.setPen(_pen("#d62728", dashed=True, width=0.5))
+            item.setZValue(1e6)
+            self.scene.addItem(item)
+            self.items.append(item)
+
+    # -- events -------------------------------------------------------------
+    def _pt(self, event):
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        return to_page(self.gview.mapToScene(pos.toPoint() if hasattr(pos, "toPoint") else pos))
+
+    def eventFilter(self, obj, event):
+        t = event.type()
+        try:
+            if t == QtCore.QEvent.MouseMove and obj is self.gview.viewport():
+                if self.on_move:
+                    self._draw(self.on_move(self._pt(event), self.points))
+                return False
+            if t == QtCore.QEvent.MouseButtonPress and obj is self.gview.viewport():
+                if event.button() == QtCore.Qt.LeftButton:
+                    pt = self._pt(event)
+                    self.points.append(pt)
+                    done = self.on_click(pt, self.points) if self.on_click else False
+                    if done:
+                        self.finish()
+                    elif self.on_move:
+                        self._draw(self.on_move(pt, self.points))
+                    return True
+                if event.button() == QtCore.Qt.RightButton:
+                    # act after the release, so the context-menu event that
+                    # follows is still swallowed by this filter
+                    self._right = "finish" if (self.finish_on_right_click and self.points) \
+                        else "cancel"
+                    return True
+            if t == QtCore.QEvent.MouseButtonRelease and obj is self.gview.viewport() \
+                    and event.button() == QtCore.Qt.RightButton:
+                action = getattr(self, "_right", None)
+                self._right = None
+                if action:
+                    QtCore.QTimer.singleShot(80, getattr(self, action))
+                return True
+            if t in (QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.MouseButtonDblClick) \
+                    and obj is self.gview.viewport():
+                return True
+            if t == QtCore.QEvent.ContextMenu:
+                return True  # right-click ends picking; no TechDraw menu
+            if t == QtCore.QEvent.KeyPress:
+                if event.key() == QtCore.Qt.Key_Escape:
+                    self.cancel()
+                    return True
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    self.finish()
+                    return True
+        except Exception as e:
+            App.Console.PrintError("Draw2D: %s\n" % e)
+            self.cancel()
+            return True
+        return False
+
+    def _stop(self):
+        self._clear_preview()
+        try:
+            self.gview.viewport().removeEventFilter(self)
+            self.gview.removeEventFilter(self)
+            self.gview.viewport().unsetCursor()
+        except Exception:
+            pass
+        if PagePicker.active is self:
+            PagePicker.active = None
+        status("")
+
+    def finish(self):
+        self._stop()
+        if self.on_done:
+            try:
+                self.on_done(list(self.points))
+            except Exception as e:
+                App.Console.PrintError("Draw2D: %s\n" % e)
+                QtWidgets.QMessageBox.warning(Gui.getMainWindow(), "Draw2D", str(e))
+
+    def cancel(self):
+        self._stop()
+        if self.on_cancel:
+            self.on_cancel()
+
+
+# ---------------------------------------------------------------------------
+# Drag a view from anywhere on it
+# ---------------------------------------------------------------------------
+DRAG_THRESHOLD_PX = 6
+
+
+def _view_under(page, x, y, margin=3.0):
+    """Smallest part view whose box (plus a margin for line width) contains
+    page point (x, y)."""
+    best = None
+    for v in core.part_views(page):
+        try:
+            x0, y0, x1, y1 = core.view_box(v)
+        except Exception:
+            continue
+        if x0 - margin <= x <= x1 + margin and y0 - margin <= y <= y1 + margin:
+            area = (x1 - x0) * (y1 - y0)
+            if best is None or area < best[0]:
+                best = (area, v)
+    return best[1] if best else None
+
+
+class DragAnywhere(QtCore.QObject):
+    """Event filter on a page's viewport that moves views dragged by their
+    lines or faces. Hold Alt to get TechDraw's normal behaviour."""
+
+    def __init__(self, page, gview):
+        super().__init__(gview)
+        self.page = page
+        self.gview = gview
+        self.press = None      # (screen pos, page pt, view, start positions)
+        self.dragging = False
+
+    def _scene_item_is_geometry(self, pos):
+        item = self.gview.itemAt(pos)
+        return isinstance(item, QtWidgets.QGraphicsPathItem)
+
+    def eventFilter(self, obj, event):
+        if PagePicker.active is not None:
+            return False
+        t = event.type()
+        try:
+            if t == QtCore.QEvent.MouseButtonPress:
+                self.press, self.dragging = None, False
+                if event.button() != QtCore.Qt.LeftButton or \
+                        event.modifiers() & (QtCore.Qt.AltModifier | QtCore.Qt.ControlModifier
+                                             | QtCore.Qt.ShiftModifier):
+                    return False
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                if not self._scene_item_is_geometry(pos):
+                    return False  # labels, frames, dimensions: TechDraw handles them
+                x, y = to_page(self.gview.mapToScene(pos))
+                view = _view_under(self.page, x, y)
+                if view is None:
+                    return False
+                target = self._move_target(view)
+                self.press = (pos, (x, y), view, target, (float(target.X), float(target.Y)))
+                return False
+            if t == QtCore.QEvent.MouseMove and self.press is not None:
+                if not (event.buttons() & QtCore.Qt.LeftButton):
+                    self.press = None
+                    return False
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                start_pos, start_pt, view, target, start_xy = self.press
+                if not self.dragging:
+                    if (pos - start_pos).manhattanLength() < DRAG_THRESHOLD_PX:
+                        return False
+                    self.dragging = True
+                    QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.ClosedHandCursor)
+                x, y = to_page(self.gview.mapToScene(pos))
+                nx, ny = start_xy[0] + x - start_pt[0], start_xy[1] + y - start_pt[1]
+                target.X, target.Y = nx, ny
+                core.enforce_alignment(target)
+                return True
+            if t == QtCore.QEvent.MouseButtonRelease and self.press is not None:
+                was_dragging = self.dragging
+                self.press, self.dragging = None, False
+                if was_dragging:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                    # let TechDraw finish its click, then drop the face/edge it selected
+                    QtCore.QTimer.singleShot(0, Gui.Selection.clearSelection)
+                return False
+        except Exception as e:
+            App.Console.PrintWarning("Draw2D drag: %s\n" % e)
+            self.press, self.dragging = None, False
+        return False
+
+    @staticmethod
+    def _move_target(view):
+        """Front view of an aligned group: move the whole group."""
+        if view.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+            group = core.parent_group(view)
+            if group is not None and (core.same(group.Anchor, view) or not core.is_aligned(group)):
+                return group
+        return view
+
+
+_installed = {}
+
+
+def install_drag(page):
+    """Make views on this page draggable from anywhere (once per page tab)."""
+    gview = page_graphics_view(page)
+    if gview is None:
+        return False
+    key = id(gview.viewport())
+    if key in _installed:
+        return True
+    f = DragAnywhere(page, gview)
+    gview.viewport().installEventFilter(f)
+    _installed[key] = f
+    gview.viewport().destroyed.connect(lambda *_: _installed.pop(key, None))
+    return True
+
+
+def install_drag_everywhere():
+    """Hook every open page, and pages opened later."""
+    for doc in App.listDocuments().values():
+        for obj in doc.Objects:
+            if obj.isDerivedFrom("TechDraw::DrawPage"):
+                try:
+                    install_drag(obj)
+                except Exception:
+                    pass
+
+
+def _on_subwindow(_win):
+    QtCore.QTimer.singleShot(200, install_drag_everywhere)
+
+
+def start_watching():
+    mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+    if mdi is not None:
+        mdi.subWindowActivated.connect(_on_subwindow)
+    install_drag_everywhere()

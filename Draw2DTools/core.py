@@ -149,6 +149,7 @@ def drawing_area(template_path, page_w, page_h):
     frame = None
     title = None
     rects = []
+    texts = []
     try:
         root = ET.parse(template_path).getroot()
         vb = root.get("viewBox")
@@ -159,6 +160,8 @@ def drawing_area(template_path, page_w, page_h):
         else:
             sx = sy = 1.0
         for el in root.iter():
+            if _local(el.tag) == "text" and el.get("x") and el.get("y"):
+                texts.append((_num(el.get("x")) * sx, page_h - _num(el.get("y")) * sy))
             if _local(el.tag) != "rect":
                 continue
             x, y = _num(el.get("x")) * sx, _num(el.get("y")) * sy
@@ -186,6 +189,15 @@ def drawing_area(template_path, page_w, page_h):
         tw = min(180.0, frame[2] - frame[0])
         th = min(60.0, (frame[3] - frame[1]) / 3.0)
         title = (frame[2] - tw, frame[1], frame[2], frame[1] + th)
+    else:
+        # ISO 7200 templates put a row (material, tolerances, scale) just
+        # above the title block frame. Keep views clear of it too.
+        tx0, ty0, tx1, ty1 = title
+        top = ty1
+        for x, y in texts:
+            if tx0 - 0.1 <= x <= tx1 and ty1 < y <= ty1 + 20.0:
+                top = max(top, y + 7.0)
+        title = (tx0, ty0, tx1, top)
     return frame, title
 
 
@@ -210,14 +222,30 @@ def free_regions(frame, title, pad=5.0):
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
-def create_page(doc, size, orientation, templates=None):
-    templates = templates or available_templates()
-    key = (size, orientation)
-    if key not in templates:
-        raise ValueError("No FreeCAD template for %s %s" % (size, orientation))
+def create_page(doc, size, orientation, templates=None, draw2d_template=True):
+    """New page of the given paper size.
+
+    Uses Draw2D's own frame and title block (any size, both orientations,
+    projection symbol to match the page). With ``draw2d_template=False``, or
+    if that fails, FreeCAD's bundled template for the size is used.
+    """
     page = doc.addObject("TechDraw::DrawPage", "Page")
     tpl = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
-    tpl.Template = templates[key]
+    path = None
+    if draw2d_template:
+        try:
+            from . import templates as d2t
+            path = d2t.template_path(size, orientation, page_first_angle(page))
+        except Exception as e:
+            App.Console.PrintWarning("Draw2D template failed, using FreeCAD's: %s\n" % e)
+    if path is None:
+        templates = templates or available_templates()
+        if (size, orientation) not in templates:
+            doc.removeObject(tpl.Name)
+            doc.removeObject(page.Name)
+            raise ValueError("No template for %s %s" % (size, orientation))
+        path = templates[(size, orientation)]
+    tpl.Template = path
     page.Template = tpl
     page.Label = "Sheet %s" % size
     page.Scale = 1.0
@@ -597,7 +625,22 @@ def parent_group(item):
 
 
 def enforce_alignment(item):
-    """Snap a dragged projection back onto its alignment axis. True if changed."""
+    """Snap a moved view back onto its alignment axis and bring the views
+    projected from it along. True if anything changed."""
+    changed = False
+    if PARENT_PROP in getattr(item, "PropertiesList", []):
+        changed = follow_parent(item) or changed
+    if item.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+        changed = _enforce_group_item(item) or changed
+    if item.isDerivedFrom("TechDraw::DrawView"):
+        changed = realign_children(item) or changed
+        group = parent_group(item) if item.isDerivedFrom("TechDraw::DrawProjGroupItem") else None
+        if group is not None:
+            changed = realign_children(group) or changed
+    return changed
+
+
+def _enforce_group_item(item):
     if not item.isDerivedFrom("TechDraw::DrawProjGroupItem"):
         return False
     group = parent_group(item)
@@ -674,53 +717,566 @@ def view_box(view):
     return (x - w * s / 2.0, y - h * s / 2.0, x + w * s / 2.0, y + h * s / 2.0)
 
 
-def add_section(page, base, letter=None, direction="Right"):
-    """Section through the middle of ``base``'s part, auto-lettered."""
+def _section_vectors(base, direction):
+    """TechDraw's rules (DrawViewSection::getCSFromBase) for a named direction."""
+    d, right, up = view_axes(base)
+    if direction == "Right":
+        return -right, d
+    if direction == "Left":
+        return right, -d
+    if direction == "Up":
+        return -up, right
+    return up, right  # Down
+
+
+def _new_section(page, base, letter, type_id="TechDraw::DrawViewSection"):
     doc = page.Document
     letter = letter or next_free_letter(used_letters(doc))
-    shape = source_shape(base.Source)
-
-    d = App.Vector(base.Direction)
-    d.normalize()
-    right = App.Vector(base.XDirection)
-    right.normalize()
-    up = d.cross(right)
-    if direction == "Right":
-        sec_dir, sec_x = -right, d
-    elif direction == "Left":
-        sec_dir, sec_x = right, -d
-    elif direction == "Up":
-        sec_dir, sec_x = -up, right
-    else:  # Down
-        sec_dir, sec_x = up, right
-
-    sec = doc.addObject("TechDraw::DrawViewSection", "SectionView")
+    sec = doc.addObject(type_id, "SectionView")
     page.addView(sec)
     sec.BaseView = base
     sec.Source = base.Source
     sec.SectionSymbol = letter
     sec.Label = "Section %s-%s" % (letter, letter)
     sec.Caption = "SECTION %s-%s" % (letter, letter)
-    sec.SectionOrigin = shape.BoundBox.Center
+    sec.ScaleType = "Page"
+    sec.Scale = page.Scale
+    return sec
+
+
+def add_section(page, base, letter=None, direction="Right", origin=None, place=None):
+    """Straight section of ``base``, auto-lettered.
+
+    ``origin`` is a 3D point on the cut plane (default: the part's middle).
+    ``place`` is the page position (x, y) for the section view; by default
+    it goes beside the base view on the side the arrows point to.
+    """
+    shape = source_shape(base.Source)
+    sec = _new_section(page, base, letter)
+    sec.SectionOrigin = origin if origin is not None else shape.BoundBox.Center
     sec.SectionDirection = direction
+    sec_dir, sec_x = _section_vectors(base, direction)
     sec.Direction = sec_dir
     sec.SectionNormal = sec_dir
     sec.XDirection = sec_x
-    sec.ScaleType = "Page"
-    sec.Scale = page.Scale
+    _place_section(page, base, sec, direction, shape, place)
     sec.touch()
+    return sec
 
-    # Put it beside the base view (right for left/right cuts, below for up/down).
+
+def _place_section(page, base, sec, direction, shape, place):
+    bx, by = view_center(base)
+    if place is not None:
+        # keep it lined up with the base view, like a projected view
+        if direction in ("Right", "Left"):
+            sec.X, sec.Y = float(place[0]), by
+        else:
+            sec.X, sec.Y = bx, float(place[1])
+        return
     x0, y0, x1, y1 = view_box(base)
     w, h = extra_view_size(sec, shape)
     s = float(page.Scale)
-    if direction in ("Right", "Left"):
-        sec.X = x1 + GAP + w * s / 2.0
-        sec.Y = (y0 + y1) / 2.0
+    if direction == "Right":
+        sec.X, sec.Y = x1 + GAP + w * s / 2.0, by
+    elif direction == "Left":
+        sec.X, sec.Y = x0 - GAP - w * s / 2.0, by
+    elif direction == "Up":
+        sec.X, sec.Y = bx, y1 + GAP + h * s / 2.0
     else:
-        sec.X = (x0 + x1) / 2.0
-        sec.Y = y0 - GAP - h * s / 2.0
+        sec.X, sec.Y = bx, y0 - GAP - h * s / 2.0
+
+
+def snap_cut_points(points):
+    """Snap each segment of a clicked cut line to horizontal or vertical.
+
+    ``points`` are page (x, y). Returns new points; each segment keeps its
+    larger component, so the line turns at right angles (stepped section).
+    """
+    if not points:
+        return []
+    out = [tuple(map(float, points[0]))]
+    for x, y in points[1:]:
+        px, py = out[-1]
+        if abs(x - px) >= abs(y - py):
+            nxt = (float(x), py)
+        else:
+            nxt = (px, float(y))
+        if abs(nxt[0] - px) > 1e-6 or abs(nxt[1] - py) > 1e-6:
+            out.append(nxt)
+    return out
+
+
+def cut_orientation(points, place):
+    """Which way the section looks: 'Right', 'Left', 'Up' or 'Down'.
+
+    The first cut segment decides whether the cut is vertical or
+    horizontal (a single click: where the view is placed decides). The
+    section view sits on the side the arrows point to.
+    """
+    px, py = place
+    if len(points) >= 2:
+        (x0, y0), (x1, y1) = points[0], points[1]
+        vertical = abs(y1 - y0) > abs(x1 - x0)
+    else:
+        x0, y0 = points[0]
+        vertical = abs(px - x0) >= abs(py - y0)
+    if vertical:
+        mid = sum(p[0] for p in points) / len(points)
+        return "Right" if px >= mid else "Left"
+    mid = sum(p[1] for p in points) / len(points)
+    return "Up" if py >= mid else "Down"
+
+
+def check_cut_crosses(points):
+    """A stepped cut must cross the part: its main segments (parallel to the
+    first one) all run the same way. TechDraw cannot cut a U-shaped line."""
+    if len(points) < 3:
+        return
+    (x0, y0), (x1, y1) = points[0], points[1]
+    vertical = abs(y1 - y0) > abs(x1 - x0)
+    sign = None
+    for (ax, ay), (bx, by) in zip(points, points[1:]):
+        d = (by - ay) if vertical else (bx - ax)
+        if abs(d) < 1e-9:
+            continue
+        s = d > 0
+        if sign is None:
+            sign = s
+        elif s != sign:
+            raise ValueError(
+                "A stepped cut has to go across the part from one side to the "
+                "other: keep going %s, and use sideways steps to reach each "
+                "feature. It can't turn back." % (
+                    ("down" if not sign else "up") if vertical
+                    else ("left" if not sign else "right")))
+
+
+def _past_outline(point, direction, shape, margin):
+    """Move ``point`` along ``direction`` to just outside the part's box."""
+    u = App.Vector(direction)
+    u.normalize()
+    bb = shape.BoundBox
+    corners = [App.Vector(x, y, z) for x in (bb.XMin, bb.XMax)
+               for y in (bb.YMin, bb.YMax) for z in (bb.ZMin, bb.ZMax)]
+    reach = max((c - point).dot(u) for c in corners)
+    return point + u * (max(reach, 0.0) + margin)
+
+
+def add_cut_section(page, base, points, place, letter=None):
+    """Section along a cut line clicked on ``base`` (page coordinates).
+
+    One point, or a straight line: an ordinary section through that point.
+    A line with steps: a TechDraw complex (offset) section following it.
+    """
+    pts = snap_cut_points(points)
+    if not pts:
+        raise ValueError("Click at least one point for the cut")
+    check_cut_crosses(pts)
+    direction = cut_orientation(pts, place)
+    shape = source_shape(base.Source)
+    model = [page_to_model(base, x, y) for x, y in pts]
+    if len(pts) <= 2:
+        return add_section(page, base, letter, direction, origin=model[0], place=place)
+
+    # Stepped line: run the end segments just past the part's outline (as a
+    # drawn cutting line does). TechDraw extends the profile itself for the
+    # cut; overlong ends make its extension go wrong and the cut fails.
+    margin = 5.0 / view_scale(base)
+    first = _past_outline(model[0], model[0] - model[1], shape, margin)
+    last = _past_outline(model[-1], model[-1] - model[-2], shape, margin)
+    wire_pts = [first] + model[1:-1] + [last]
+    import Part
+    doc = page.Document
+    sec = _new_section(page, base, letter, "TechDraw::DrawComplexSection")
+    tool = doc.addObject("Part::Feature", "CutLine_%s" % sec.SectionSymbol)
+    tool.Label = "Cut line %s-%s" % (sec.SectionSymbol, sec.SectionSymbol)
+    tool.Shape = Part.makePolygon(wire_pts)
+    if App.GuiUp and tool.ViewObject is not None:
+        tool.ViewObject.Visibility = False
+    sec.CuttingToolWireObject = tool
+    sec.ProjectionStrategy = "Offset"
+    sec.SectionOrigin = model[0]
+    sec.SectionDirection = "Aligned"
+    sec_dir, sec_x = _section_vectors(base, direction)
+    sec.Direction = sec_dir
+    sec.SectionNormal = sec_dir
+    sec.XDirection = sec_x
+    _place_section(page, base, sec, direction, shape, place)
+    sec.touch()
     return sec
+
+
+# ---------------------------------------------------------------------------
+# View geometry: page <-> model coordinates
+# ---------------------------------------------------------------------------
+def view_axes(view):
+    """(direction, right, up) unit vectors of a part view."""
+    d = App.Vector(view.Direction)
+    d.normalize()
+    x = App.Vector(view.XDirection)
+    x = x - d * x.dot(d)
+    x.normalize()
+    return d, x, d.cross(x)
+
+
+def view_center(view):
+    """Page position (x, y) of the view's centre (group items included)."""
+    x, y = float(view.X), float(view.Y)
+    if view.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+        group = parent_group(view)
+        if group is not None:
+            x += float(group.X)
+            y += float(group.Y)
+    return x, y
+
+
+def view_scale(view):
+    return float(view.getScale()) if hasattr(view, "getScale") else float(view.Scale)
+
+
+def model_to_local(view, point, shape=None):
+    """3D point -> unscaled view coordinates (Y up), as cosmetic lines want.
+
+    TechDraw centres a view on the bounding-box centre of its source shape.
+    """
+    shape = shape or source_shape(view.Source)
+    d, right, up = view_axes(view)
+    v = App.Vector(point) - shape.BoundBox.Center
+    return v.dot(right), v.dot(up)
+
+
+def model_to_page(view, point, shape=None):
+    lx, ly = model_to_local(view, point, shape)
+    cx, cy = view_center(view)
+    s = view_scale(view)
+    return cx + lx * s, cy + ly * s
+
+
+def page_to_model(view, px, py, shape=None):
+    """Page point -> 3D point on the plane through the part's middle."""
+    shape = shape or source_shape(view.Source)
+    d, right, up = view_axes(view)
+    cx, cy = view_center(view)
+    s = view_scale(view)
+    return shape.BoundBox.Center + right * ((px - cx) / s) + up * ((py - cy) / s)
+
+
+# ---------------------------------------------------------------------------
+# Projected views by pointing
+# ---------------------------------------------------------------------------
+_TYPE_FOR_SIDE = {
+    (1, 0): "Right", (-1, 0): "Left", (0, 1): "Top", (0, -1): "Bottom",
+    (1, 1): "FrontTopRight", (-1, 1): "FrontTopLeft",
+    (1, -1): "FrontBottomRight", (-1, -1): "FrontBottomLeft",
+}
+
+
+def placement_side(base_xy, point):
+    """Which of 8 directions the point is from the base view: (sx, sy)."""
+    dx, dy = point[0] - base_xy[0], point[1] - base_xy[1]
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return (1, 0)
+    t = 2.414  # tan(67.5 deg): 45-degree sectors centred on the axes
+    if abs(dx) > t * abs(dy):
+        return (1 if dx > 0 else -1, 0)
+    if abs(dy) > t * abs(dx):
+        return (0, 1 if dy > 0 else -1)
+    return (1 if dx > 0 else -1, 1 if dy > 0 else -1)
+
+
+def snapped_position(base_xy, point, side):
+    """Keep orthogonal projections lined up with their base view."""
+    if side[1] == 0:
+        return float(point[0]), float(base_xy[1])
+    if side[0] == 0:
+        return float(base_xy[0]), float(point[1])
+    return float(point[0]), float(point[1])
+
+
+def projected_directions(direction, xdirection, side):
+    """Direction and X direction of the view showing ``side`` of the base.
+
+    ``side`` is (sx, sy) in the base view: (1, 0) = its right-hand side.
+    Matches TechDraw's projection group (third-angle names).
+    """
+    d = App.Vector(direction)
+    d.normalize()
+    x = App.Vector(xdirection)
+    x = x - d * x.dot(d)
+    x.normalize()
+    up = d.cross(x)
+    sx, sy = side
+    if sy == 0:
+        return (x * sx, -d * sx)
+    if sx == 0:
+        return (up * sy, x)
+    nd = (d + x * sx + up * sy)
+    nd.normalize()
+    nx = x - d * sx
+    nx = nx - nd * nx.dot(nd)
+    nx.normalize()
+    return nd, nx
+
+
+def shown_side(placed_side, first_angle):
+    """In first angle a view placed on the right shows the LEFT side."""
+    if first_angle:
+        return (-placed_side[0], -placed_side[1])
+    return placed_side
+
+
+def page_first_angle(page):
+    return str(page.ProjectionType).lower().startswith("first")
+
+
+def projection_preview(page, base, point):
+    """(x, y, w, h) on the page of the view that a click at ``point`` makes."""
+    base_xy = view_center(base)
+    side = placement_side(base_xy, point)
+    group = parent_group(base) if base.isDerivedFrom("TechDraw::DrawProjGroupItem") else None
+    first = is_first_angle(group) if group is not None else page_first_angle(page)
+    d, x = projected_directions(base.Direction, base.XDirection, shown_side(side, first))
+    w, h = projected_extent(source_shape(base.Source), d, x)
+    px, py = snapped_position(base_xy, point, side)
+    s = view_scale(base)
+    return px, py, w * s, h * s
+
+
+PARENT_PROP = "Draw2DParent"
+AXIS_PROP = "Draw2DAxis"
+
+
+def same(a, b):
+    """True if a and b are the same document object.
+
+    Two Python handles to one FreeCAD object do not always compare equal
+    with ==, so compare document and object names.
+    """
+    if a is None or b is None:
+        return False
+    try:
+        return a.Document.Name == b.Document.Name and a.Name == b.Name
+    except Exception:
+        return False
+
+
+def add_projected_view(page, base, point):
+    """Project a new view from ``base`` towards the clicked page ``point``.
+
+    From the Front view of a projection group it becomes part of the group;
+    from any other view it is a separate view that stays lined up with it.
+    """
+    doc = page.Document
+    base_xy = view_center(base)
+    side = placement_side(base_xy, point)
+    px, py = snapped_position(base_xy, point, side)
+    group = parent_group(base) if base.isDerivedFrom("TechDraw::DrawProjGroupItem") else None
+
+    if group is not None and same(group.Anchor, base):
+        vtype = _TYPE_FOR_SIDE[shown_side(side, is_first_angle(group))]
+        if any(v.Type == vtype for v in group.Views):
+            raise ValueError("This group already has a %s view" % vtype)
+        if not is_aligned(group):
+            make_aligned(group, True)
+        item = group.addProjection(vtype)
+        item.X, item.Y = px - float(group.X), py - float(group.Y)
+        item.touch()
+        return item
+
+    first = is_first_angle(group) if group is not None else page_first_angle(page)
+    d, x = projected_directions(base.Direction, base.XDirection, shown_side(side, first))
+    view = doc.addObject("TechDraw::DrawViewPart", "View")
+    page.addView(view)
+    view.Source = base.Source
+    view.Direction = d
+    view.XDirection = x
+    view.ScaleType = "Page"
+    view.Scale = page.Scale
+    view.X, view.Y = px, py
+    view.Label = "View from %s" % base.Label
+    view.addProperty("App::PropertyLink", PARENT_PROP, "Draw2D",
+                     "View this one was projected from; it stays lined up with it")
+    view.addProperty("App::PropertyString", AXIS_PROP, "Draw2D",
+                     "H: stays level with the parent view, V: stays above/below it")
+    setattr(view, PARENT_PROP, base)
+    setattr(view, AXIS_PROP, "H" if side[1] == 0 else ("V" if side[0] == 0 else ""))
+    view.touch()
+    return view
+
+
+def linked_children(view):
+    """Views projected from ``view`` (Draw2D links)."""
+    return [o for o in view.InList if same(getattr(o, PARENT_PROP, None), view)]
+
+
+def follow_parent(view):
+    """Snap a linked view back in line with its parent. True if it moved."""
+    parent = getattr(view, PARENT_PROP, None)
+    axis = getattr(view, AXIS_PROP, "")
+    if parent is None or axis not in ("H", "V"):
+        return False
+    px, py = view_center(parent)
+    if axis == "H" and abs(float(view.Y) - py) > 1e-6:
+        view.Y = py
+        return True
+    if axis == "V" and abs(float(view.X) - px) > 1e-6:
+        view.X = px
+        return True
+    return False
+
+
+def realign_children(obj):
+    """After ``obj`` moved, bring the views projected from it back in line."""
+    views = [obj]
+    if obj.isDerivedFrom("TechDraw::DrawProjGroup"):
+        views = list(obj.Views)
+    moved = False
+    for v in views:
+        for child in linked_children(v):
+            moved = follow_parent(child) or moved
+    return moved
+
+
+# ---------------------------------------------------------------------------
+# Centre marks and centre lines
+# ---------------------------------------------------------------------------
+MARKS_PROP = "Draw2DCenterMarks"
+CENTER_LINE_STYLE = 4      # dash-dot (centre line)
+CENTER_LINE_WEIGHT = 0.25  # thin line
+OVERSHOOT = 3.0            # paper mm the lines stick out past the circle/edge
+
+
+def _round_faces(shape):
+    """Cylindrical faces that are a hole or a boss (at least half round)."""
+    import math
+    out = []
+    for face in shape.Faces:
+        surf = face.Surface
+        if surf.TypeId != "Part::GeomCylinder":
+            continue
+        u0, u1 = face.ParameterRange[0], face.ParameterRange[1]
+        if u1 - u0 < math.pi - 1e-3:
+            continue  # fillet or partial round: no centre mark
+        out.append(face)
+    return out
+
+
+def center_features(view, shape=None):
+    """Centre marks and centre lines to draw on ``view``.
+
+    Returns (marks, lines): marks are (lx, ly, half_length) crosses for
+    round features seen end-on; lines are ((lx0, ly0), (lx1, ly1)) along
+    the axes of round features seen from the side. All in unscaled view
+    coordinates, Y up; overshoot already added.
+    """
+    shape = shape or source_shape(view.Source)
+    d, right, up = view_axes(view)
+    s = view_scale(view)
+    over = OVERSHOOT / s
+    marks, lines = {}, {}
+    for face in _round_faces(shape):
+        axis = App.Vector(face.Surface.Axis)
+        axis.normalize()
+        centre = face.Surface.Center
+        radius = face.Surface.Radius
+        if abs(abs(axis.dot(d)) - 1.0) < 1e-6:
+            lx, ly = model_to_local(view, centre, shape)
+            key = (round(lx, 4), round(ly, 4))
+            marks[key] = max(marks.get(key, 0.0), radius + over)
+        elif abs(axis.dot(d)) < 1e-6:
+            # extent of the face along its axis
+            ts = [(App.Vector(v.Point) - centre).dot(axis) for v in face.Vertexes]
+            if not ts:
+                bb = face.BoundBox
+                ts = [(App.Vector(bb.XMin, bb.YMin, bb.ZMin) - centre).dot(axis),
+                      (App.Vector(bb.XMax, bb.YMax, bb.ZMax) - centre).dot(axis)]
+            p0 = model_to_local(view, centre + axis * min(ts), shape)
+            p1 = model_to_local(view, centre + axis * max(ts), shape)
+            # the axis line is the same for coaxial faces: merge them
+            ax = model_to_local(view, centre + axis, shape)
+            dirx, diry = ax[0] - model_to_local(view, centre, shape)[0], \
+                ax[1] - model_to_local(view, centre, shape)[1]
+            n = (dirx ** 2 + diry ** 2) ** 0.5
+            dirx, diry = dirx / n, diry / n
+            if dirx < -1e-9 or (abs(dirx) < 1e-9 and diry < 0):
+                dirx, diry = -dirx, -diry
+            # offset of the line from the view origin, measured across it
+            off = -p0[0] * diry + p0[1] * dirx
+            key = (round(dirx, 4), round(diry, 4), round(off, 4))
+            t0 = p0[0] * dirx + p0[1] * diry
+            t1 = p1[0] * dirx + p1[1] * diry
+            lo, hi = min(t0, t1), max(t0, t1)
+            if key in lines:
+                lo, hi = min(lo, lines[key][0]), max(hi, lines[key][1])
+            lines[key] = (lo, hi)
+    mark_list = [(k[0], k[1], half) for k, half in marks.items()]
+    line_list = []
+    for (dx, dy, off), (lo, hi) in lines.items():
+        lo, hi = lo - over, hi + over
+        bx, by = -dy * off, dx * off  # foot point of the line
+        line_list.append(((bx + dx * lo, by + dy * lo), (bx + dx * hi, by + dy * hi)))
+    return mark_list, line_list
+
+
+def _visible_circle_centres(view):
+    """Centres (unscaled, Y up) of circles TechDraw drew as visible."""
+    out = []
+    s = view_scale(view)
+    for e in view.getVisibleEdges():
+        c = getattr(e, "Curve", None)
+        if c is not None and c.TypeId in ("Part::GeomCircle", "Part::GeomArcOfCircle"):
+            # visible edges are scaled and Y-down
+            out.append((c.Center.x / s, -c.Center.y / s))
+    return out
+
+
+def clear_center_marks(view):
+    tags = list(getattr(view, MARKS_PROP, []) or [])
+    for tag in tags:
+        try:
+            view.removeCosmeticEdge(tag)
+        except Exception:
+            pass
+    if MARKS_PROP in view.PropertiesList:
+        setattr(view, MARKS_PROP, [])
+    return len(tags)
+
+
+def add_center_marks(view):
+    """(Re)draw Draw2D centre marks and centre lines on a view. Returns count."""
+    if not view.isDerivedFrom("TechDraw::DrawViewPart"):
+        return 0
+    clear_center_marks(view)
+    marks, lines = center_features(view)
+    visible = _visible_circle_centres(view)
+    segs = []
+    for lx, ly, half in marks:
+        # skip holes hidden behind material in this view
+        if visible and not any(abs(lx - cx) < 1e-3 and abs(ly - cy) < 1e-3 for cx, cy in visible):
+            continue
+        segs.append(((lx - half, ly), (lx + half, ly)))
+        segs.append(((lx, ly - half), (lx, ly + half)))
+    segs.extend(lines)
+    tags = []
+    for (x0, y0), (x1, y1) in segs:
+        tag = view.makeCosmeticLine(App.Vector(x0, y0, 0), App.Vector(x1, y1, 0),
+                                    CENTER_LINE_STYLE, CENTER_LINE_WEIGHT)
+        if tag:
+            tags.append(tag)
+    if MARKS_PROP not in view.PropertiesList:
+        view.addProperty("App::PropertyStringList", MARKS_PROP, "Draw2D",
+                         "Cosmetic lines Draw2D made as centre marks (replaced on refresh)")
+    setattr(view, MARKS_PROP, tags)
+    return len(tags)
+
+
+def refresh_center_marks(views):
+    """Redraw marks on views that had them (after the scale changed)."""
+    n = 0
+    for v in views:
+        if getattr(v, MARKS_PROP, None):
+            n += add_center_marks(v)
+    return n
 
 
 # ---------------------------------------------------------------------------
