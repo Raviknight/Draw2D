@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Headless tests for Draw2D. Run with: freecadcmd tests/run_tests.py"""
+"""Headless tests for DrawingKit. Run with: freecadcmd tests/run_tests.py"""
 
 import unittest
 
 import FreeCAD as App
 
-from Draw2DTools import core
+from DrawingKitTools import core
+
+# the model's own front view (most tests are written against it)
+FRONT = core.STANDARD_DIRECTIONS["Front"]
 
 
 def make_box(doc, length=400, width=300, height=50):
@@ -81,10 +84,10 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(title[:3], (230, 10, 410))
         self.assertGreaterEqual(title[3], 58)
 
-    def test_draw2d_template_every_size_both_ways(self):
+    def test_drawingkit_template_every_size_both_ways(self):
         import tempfile
         import xml.etree.ElementTree as ET
-        from Draw2DTools import templates as d2t
+        from DrawingKitTools import templates as d2t
         out = tempfile.mkdtemp()
         for size in d2t.SIZES:
             for orient in d2t.ORIENTATIONS:
@@ -99,8 +102,8 @@ class TestTemplates(unittest.TestCase):
                     # A4 portrait: the title block is as wide as the frame
                     self.assertGreaterEqual(len(core.free_regions(frame, title)), 1)
 
-    def test_draw2d_template_fields(self):
-        from Draw2DTools import templates as d2t
+    def test_drawingkit_template_fields(self):
+        from DrawingKitTools import templates as d2t
         text = d2t.make_svg("A3", "Landscape", True)
         for name in ("title", "scale", "drawing_number", "part_material", "creator",
                      "date_of_issue", "sheet_number", "revision_index"):
@@ -113,7 +116,7 @@ class TestTemplates(unittest.TestCase):
 
 class DocTest(unittest.TestCase):
     def setUp(self):
-        self.doc = App.newDocument("Draw2DTest")
+        self.doc = App.newDocument("DrawingKitTest")
         self.box = make_box(self.doc)
 
     def tearDown(self):
@@ -122,14 +125,14 @@ class DocTest(unittest.TestCase):
 
 class TestPages(DocTest):
     def test_create_every_page_size(self):
-        from Draw2DTools import templates as d2t
+        from DrawingKitTools import templates as d2t
         for size in d2t.SIZES:
             for orient in d2t.ORIENTATIONS:
                 page = core.create_page(self.doc, size, orient)
                 self.doc.recompute()
                 w, h = core.page_size(page)
                 self.assertEqual((w, h), d2t.page_size(size, orient))
-                self.assertIn("Draw2D_", page.Template.Template)
+                self.assertIn("DrawingKit_", page.Template.Template)
                 self.assertIn("scale", page.Template.EditableTexts)
 
     def test_projection_symbol_follows_page(self):
@@ -138,7 +141,7 @@ class TestPages(DocTest):
         self.assertTrue(page.Template.Template.endswith(want))
 
     def test_freecad_template_still_available(self):
-        page = core.create_page(self.doc, "A3", "Landscape", draw2d_template=False)
+        page = core.create_page(self.doc, "A3", "Landscape", drawingkit_template=False)
         self.assertTrue(page.Template.Template.endswith("A3_Landscape_ISO5457_minimal.svg"))
 
     def test_missing_template_raises(self):
@@ -149,7 +152,7 @@ class TestPages(DocTest):
 class TestViews(DocTest):
     def test_400x300_part_fits_a3_at_1_2(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box], isometric=False)
+        group = core.add_standard_views(page, [self.box], isometric=False, front=FRONT)
         self.doc.recompute()
         self.assertEqual(page.Scale, 0.5)
         self.assertEqual(sorted(v.Type for v in group.Views), ["Front", "Right", "Top"])
@@ -159,7 +162,7 @@ class TestViews(DocTest):
 
     def test_isometric_added_and_smaller_scale(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box], isometric=True)
+        group = core.add_standard_views(page, [self.box], isometric=True, front=FRONT)
         self.doc.recompute()
         self.assertIn("FrontTopRight", [v.Type for v in group.Views])
         self.assertLess(page.Scale, 0.5)
@@ -168,14 +171,14 @@ class TestViews(DocTest):
     def test_small_part_on_a4_is_enlarged(self):
         small = make_box(self.doc, 20, 10, 5)
         page = core.create_page(self.doc, "A4", "Portrait")
-        core.add_standard_views(page, [small])
+        core.add_standard_views(page, [small], front=FRONT)
         self.assertGreaterEqual(page.Scale, 2.0)
 
     def test_layout_matches_techdraw_placement(self):
         # With TechDraw's own AutoDistribute on, it must place every view
-        # exactly where Draw2D's layout puts them when it is off.
+        # exactly where DrawingKit's layout puts them when it is off.
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box], isometric=True)
+        group = core.add_standard_views(page, [self.box], isometric=True, front=FRONT)
         ours = {v.Name: (float(v.X), float(v.Y)) for v in group.Views}
         core.make_aligned(group, False)
         self.doc.recompute()
@@ -186,7 +189,7 @@ class TestViews(DocTest):
     def test_every_view_drawn_at_page_scale(self):
         # The bug Ravi saw: views kept their first (1:1) drawing.
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box])
+        group = core.add_standard_views(page, [self.box], front=FRONT)
         self.doc.recompute()
         import Part
         s = page.Scale
@@ -199,7 +202,7 @@ class TestViews(DocTest):
 
     def test_standard_directions_match_techdraw(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box], isometric=True)
+        group = core.add_standard_views(page, [self.box], isometric=True, front=FRONT)
         self.doc.recompute()
         for v in group.Views:
             d, x = core.STANDARD_DIRECTIONS[v.Type]
@@ -212,7 +215,7 @@ class TestViews(DocTest):
         part = self.doc.addObject("Part::Feature", "Plain")
         part.Shape = Part.makeBox(100, 80, 60)
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [part])
+        group = core.add_standard_views(page, [part], front=FRONT)
         self.doc.recompute()
         views = core.part_views(page)
         self.assertEqual(core.stale_views(views), [])
@@ -225,12 +228,12 @@ class TestViews(DocTest):
 
     def test_title_block_shows_scale(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        core.add_standard_views(page, [self.box])
+        core.add_standard_views(page, [self.box], front=FRONT)
         self.assertEqual(page.Template.EditableTexts["scale"], "1 : 2")
 
     def test_views_slide_on_one_axis_only(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box], isometric=True)
+        group = core.add_standard_views(page, [self.box], isometric=True, front=FRONT)
         self.doc.recompute()
         self.assertTrue(core.is_aligned(group))
         self.assertFalse(group.AutoDistribute)
@@ -258,7 +261,7 @@ class TestViews(DocTest):
 
     def test_alignment_off_leaves_views_alone(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box])
+        group = core.add_standard_views(page, [self.box], front=FRONT)
         core.make_aligned(group, False)
         right = group.getItemByLabel("Right")
         right.Y = 40.0
@@ -266,7 +269,7 @@ class TestViews(DocTest):
 
     def test_first_angle_detected(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        group = core.add_standard_views(page, [self.box])
+        group = core.add_standard_views(page, [self.box], front=FRONT)
         self.doc.recompute()
         right = group.getItemByLabel("Right")
         # First angle puts the right view on the left of the front view.
@@ -286,7 +289,7 @@ class TestSectionsAndFit(DocTest):
     def setUp(self):
         super().setUp()
         self.page = core.create_page(self.doc, "A3", "Landscape")
-        self.group = core.add_standard_views(self.page, [self.box])
+        self.group = core.add_standard_views(self.page, [self.box], front=FRONT)
         self.doc.recompute()
         self.front = self.group.getItemByLabel("Front")
 
@@ -348,7 +351,7 @@ class TestProjectedViews(DocTest):
     def setUp(self):
         super().setUp()
         self.page = core.create_page(self.doc, "A3", "Landscape")
-        self.group = core.add_standard_views(self.page, [self.box])
+        self.group = core.add_standard_views(self.page, [self.box], front=FRONT)
         self.doc.recompute()
         self.front = self.group.Anchor
 
@@ -416,7 +419,7 @@ class TestCenterMarks(DocTest):
         super().setUp()
         self.block = block_with_hole(self.doc)
         self.page = core.create_page(self.doc, "A3", "Landscape")
-        self.group = core.add_standard_views(self.page, [self.block])
+        self.group = core.add_standard_views(self.page, [self.block], front=FRONT)
         self.doc.recompute()
 
     def test_hole_gets_cross_in_top_and_axis_in_front(self):
@@ -457,7 +460,7 @@ class TestCenterMarks(DocTest):
         obj = self.doc.addObject("Part::Feature", "Fillet")
         obj.Shape = filleted
         page = core.create_page(self.doc, "A4", "Landscape")
-        g = core.add_standard_views(page, [obj])
+        g = core.add_standard_views(page, [obj], front=FRONT)
         self.doc.recompute()
         self.assertEqual(core.center_features(g.getItemByLabel("Top")), ([], []))
 
@@ -467,7 +470,7 @@ class TestCutSections(DocTest):
         super().setUp()
         self.block = block_with_hole(self.doc)
         self.page = core.create_page(self.doc, "A3", "Landscape")
-        self.group = core.add_standard_views(self.page, [self.block])
+        self.group = core.add_standard_views(self.page, [self.block], front=FRONT)
         self.doc.recompute()
         self.top = self.group.getItemByLabel("Top")
 
@@ -520,10 +523,245 @@ class TestCutSections(DocTest):
         self.assertIn("across the part", str(cm.exception))
 
 
+def coupon(doc):
+    """Disc r25 x 6 thick: centre bore r8 THRU, 3 x r3.2 THRU on a 17 mm
+    pitch circle, one blind hole r2 x 4 deep at (-17, 0)."""
+    import math
+    import Part
+    shp = Part.makeCylinder(25, 6).cut(Part.makeCylinder(8, 20, App.Vector(0, 0, -5)))
+    for k in range(3):
+        a = math.radians(90 + 120 * k)
+        shp = shp.cut(Part.makeCylinder(3.2, 20, App.Vector(17 * math.cos(a), 17 * math.sin(a), -5)))
+    shp = shp.cut(Part.makeCylinder(2, 4.01, App.Vector(0, -20, 2)))  # blind from the top
+    obj = doc.addObject("Part::Feature", "Coupon")
+    obj.Shape = shp
+    doc.recompute()
+    return obj
+
+
+class TestHoles(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import holes
+        self.holes = holes
+        self.part = coupon(self.doc)
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        self.group = core.add_standard_views(self.page, [self.part], front=FRONT)
+        self.doc.recompute()
+        self.top = self.group.getItemByLabel("Top")
+
+    def test_finds_through_and_blind_holes(self):
+        hs = self.holes.find_holes(self.part.Shape)
+        self.assertEqual(len(hs), 5)
+        bolt = [h for h in hs if abs(h.radius - 3.2) < 1e-6]
+        self.assertEqual(len(bolt), 3)
+        self.assertTrue(all(h.through for h in bolt))
+        blind = [h for h in hs if abs(h.radius - 2) < 1e-6][0]
+        self.assertFalse(blind.through)
+        self.assertAlmostEqual(blind.depth, 4.0, places=2)
+
+    def test_callout_texts(self):
+        groups = self.holes.group_holes(self.holes.find_holes(self.part.Shape))
+        texts = sorted(self.holes.callout_text(g) for g in groups)
+        self.assertIn("3X ⌀%.2f THRU", texts)
+        self.assertIn("⌀%.2f THRU", texts)
+        self.assertTrue(any(t.startswith("⌀%.2f ↧ 4.0") for t in texts), texts)
+
+    def test_callouts_on_top_view(self):
+        dims = self.holes.add_callouts(self.page, self.top)
+        self.doc.recompute()
+        self.assertEqual(len(dims), 3)          # bolt holes, bore, blind hole
+        texts = [d.FormatSpec for d in dims]
+        self.assertIn("3X ⌀%.2f THRU", texts)
+        for d in dims:
+            self.assertEqual(d.Type, "Diameter")
+            self.assertIn("Up-to-date", d.State)
+        bolt = [d for d in dims if d.FormatSpec.startswith("3X")][0]
+        self.assertAlmostEqual(bolt.getRawValue(), 6.4, places=6)
+
+    def test_callout_labels_stay_on_the_drawing_area(self):
+        dims = self.holes.add_callouts(self.page, self.top)
+        cx, cy = core.view_center(self.top)
+        regions = core.page_regions(self.page)
+        spots = []
+        for d in dims:
+            x, y = cx + float(d.X), cy + float(d.Y)
+            self.assertTrue(any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in regions),
+                            d.FormatSpec)
+            spots.append((x, y))
+        # no two labels on top of each other
+        for i in range(len(spots)):
+            for j in range(i + 1, len(spots)):
+                self.assertGreater(abs(spots[i][0] - spots[j][0]) + abs(spots[i][1] - spots[j][1]), 10)
+
+    def test_selected_edge_expands_to_its_group(self):
+        h = [h for h in self.holes.holes_seen_end_on(self.top) if abs(h.radius - 3.2) < 1e-6][0]
+        edge = self.holes.circle_edge_name(self.top, h)
+        self.assertIsNotNone(edge)
+        self.assertEqual(len(self.holes.holes_for_edges(self.top, [edge])), 3)
+
+    def test_bolt_circle_detection(self):
+        import math
+        bc = self.holes.bolt_circles
+        tri = [(10 * math.cos(math.radians(90 + 120 * k)), 10 * math.sin(math.radians(90 + 120 * k)))
+               for k in range(3)]
+        found = bc(tri)
+        self.assertEqual(len(found), 1)
+        self.assertAlmostEqual(found[0][1], 10, places=6)
+        self.assertEqual(bc([(-20, -10), (20, -10), (20, 10), (-20, 10)]), [])   # rectangle
+        self.assertEqual(bc([(-10, -10), (10, -10), (10, 10), (-10, 10)]), [])   # square grid
+        self.assertEqual(len(bc([(10, 0), (0, 10), (-10, 0), (0, -10)])), 1)     # on axes
+
+    def test_centre_marks_draw_pitch_circle(self):
+        marks, _ = core.center_features(self.top, with_radius=True)
+        segs, circles = core.plan_center_marks(marks, 1.0)
+        self.assertEqual(len(circles), 1)
+        self.assertAlmostEqual(circles[0][2], 17, places=3)
+        # 3 radial lines + centre cross (2) + blind hole cross (2)
+        self.assertEqual(len(segs), 3 + 2 + 2)
+        self.assertGreater(core.add_center_marks(self.top), len(segs))  # lines + circle
+
+
+class TestGdt(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import gdt
+        self.gdt = gdt
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+
+    def test_every_characteristic_draws(self):
+        import xml.etree.ElementTree as ET
+        for key, _ in self.gdt.CHARACTERISTICS:
+            svg, w, h = self.gdt.frame_svg(key, "0.05", key == "position", "MMC", ["A", "B"])
+            ET.fromstring(svg)
+            self.assertEqual(h, 7.0)
+            self.assertAlmostEqual(w, 7 + (4 * 2.2 + 3 + (3.4 if key == "position" else 0) + 4.2) + 14)
+
+    def test_frame_and_datum_symbols(self):
+        f = self.gdt.add_frame(self.page, 200, 150, "position", "0.05", True, "", ["A", "B"])
+        a = self.gdt.add_datum(self.page, 100, 100)
+        b = self.gdt.add_datum(self.page, 120, 100)
+        self.doc.recompute()
+        self.assertIn("Up-to-date", f.State)
+        self.assertEqual((a.Label, b.Label), ("Datum A", "Datum B"))
+        self.assertEqual(self.gdt.next_datum_letter(self.doc), "C")
+        self.assertIn("0.05", list(f.EditableTexts))
+        # no view near (100, 100): flag stands up, triangle base on the point
+        self.assertAlmostEqual(float(a.Y) - a_half_height(a), 100.0, places=6)
+
+    def test_datum_points_away_from_the_view(self):
+        g = self.gdt
+        box = (100, 100, 200, 150)
+        self.assertEqual(g.datum_side(box, 150, 100.5), "down")   # bottom edge
+        self.assertEqual(g.datum_side(box, 150, 149.5), "up")
+        self.assertEqual(g.datum_side(box, 100.5, 120), "left")
+        self.assertEqual(g.datum_side(box, 199.5, 120), "right")
+        for side in ("up", "down", "left", "right"):
+            svg, w, h, (dx, dy) = g.datum_svg("A", side)
+            # the triangle base is on the symbol's outer edge on the feature side
+            if side == "up":
+                self.assertAlmostEqual(dy, -h / 2.0)
+            if side == "down":
+                self.assertAlmostEqual(dy, h / 2.0)
+            if side == "left":
+                self.assertAlmostEqual(dx, w / 2.0)
+            if side == "right":
+                self.assertAlmostEqual(dx, -w / 2.0)
+
+
+def spin_event_loop(seconds):
+    """Give TechDraw's worker threads time to finish (headless FreeCAD has
+    no running Qt event loop, so just wait)."""
+    import time
+    time.sleep(seconds)
+
+
+def a_half_height(sym):
+    import re
+    m = re.search(r'height="([\d.]+)mm"', sym.Symbol)
+    return float(m.group(1)) / 2.0
+
+
+class TestDetail(DocTest):
+    def test_scale_choice(self):
+        self.assertEqual(core.detail_scale(1.0, 5), 5.0)     # 10 mm circle -> 5:1 (50 mm)
+        self.assertEqual(core.detail_scale(1.0, 50), 2.0)    # big area: at least 2x
+        self.assertEqual(core.detail_scale(0.5, 10), 2.0)    # 20 mm circle -> 2:1 (40 mm)
+
+    def test_detail_of_a_hole(self):
+        part = coupon(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = g.getItemByLabel("Top")
+        hx, hy = core.model_to_page(top, App.Vector(0, 17, 6))   # top bolt hole
+        r = 6 * core.view_scale(top)
+        det = core.add_detail(page, top, (hx, hy), r, (300, 200))
+        self.doc.recompute()
+        spin_event_loop(3.0)   # detail cut runs in a thread, finished via Qt signals
+        self.assertEqual(det.Reference, "A")
+        self.assertAlmostEqual(det.Radius, 6, places=6)
+        self.assertAlmostEqual(det.AnchorPoint.y, 17, places=6)
+        self.assertIn("Up-to-date", det.State)
+        circles = [e for e in det.getVisibleEdges() if "Circle" in e.Curve.TypeId]
+        hole = [c for c in circles if abs(c.Curve.Radius - 3.2 * det.Scale) < 1e-3]
+        self.assertEqual(len(hole), 1)
+        self.assertLess(hole[0].Curve.Center.Length, 1e-3)    # hole in the middle
+        # the next section/detail letter skips A
+        self.assertEqual(core.next_free_letter(core.used_letters(self.doc)), "B")
+
+
+class TestBestFront(DocTest):
+    def test_flat_flange_shows_its_round_face(self):
+        import Part
+        flange = self.doc.addObject("Part::Feature", "Flange")
+        flange.Shape = Part.makeCylinder(40, 10)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [flange])
+        self.doc.recompute()
+        self.assertTrue(App.Vector(g.Anchor.Direction).normalize().isEqual(App.Vector(0, 0, 1), 1e-9))
+        import Part as P
+        front = P.makeCompound(g.Anchor.getVisibleEdges()).BoundBox
+        self.assertAlmostEqual(front.XLength, front.YLength, places=3)   # a circle
+        # the side view stands upright next to it (thin and tall)
+        right = g.getItemByLabel("Right")
+        rb = P.makeCompound(right.getVisibleEdges()).BoundBox
+        self.assertLess(rb.XLength, rb.YLength)
+        self.assertAlmostEqual(float(right.Y), 0.0)            # level with the front view
+
+    def test_plate_front_is_its_big_face_longest_side_across(self):
+        d, x = core.best_front(self.box.Shape)                   # 400 x 300 x 50
+        w, h = core.projected_extent(self.box.Shape, d, x)
+        self.assertEqual((round(w), round(h)), (400, 300))
+
+    def test_tall_part_is_turned_upright(self):
+        import Part
+        post = Part.makeBox(20, 30, 200)       # tallest along Z
+        d, x = core.best_front(post)
+        w, h = core.projected_extent(post, d, x)
+        self.assertGreaterEqual(w, h)          # longest side across the page
+        self.assertEqual(round(w), 200)
+
+    def test_group_directions_match_techdraw_for_any_front(self):
+        import Part
+        flange = self.doc.addObject("Part::Feature", "Flange")
+        flange.Shape = Part.makeCylinder(40, 10)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [flange], isometric=True)
+        self.doc.recompute()
+        d, x = g.Anchor.Direction, g.Anchor.XDirection
+        for v in g.Views:
+            if v.Type == "Front":
+                continue
+            ed, ex = core.projected_directions(d, x, core._GRID[v.Type])
+            self.assertTrue(App.Vector(v.Direction).normalize().isEqual(ed, 1e-9), v.Type)
+            self.assertTrue(App.Vector(v.XDirection).normalize().isEqual(ex, 1e-9), v.Type)
+
+
 class TestSpeed(DocTest):
     def test_toggle(self):
         page = core.create_page(self.doc, "A3", "Landscape")
-        core.add_standard_views(page, [self.box])
+        core.add_standard_views(page, [self.box], front=FRONT)
         self.doc.recompute()
         self.assertFalse(core.is_fast(page))
         core.set_fast(page, True)

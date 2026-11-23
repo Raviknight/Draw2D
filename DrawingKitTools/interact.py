@@ -128,6 +128,11 @@ class PagePicker(QtCore.QObject):
                 item = QtWidgets.QGraphicsRectItem(tl.x(), tl.y(), w * rez(), h * rez())
                 item.setPen(_pen("#1f77b4"))
                 item.setBrush(QtGui.QBrush(QtGui.QColor(31, 119, 180, 30)))
+            elif shape[0] == "circle":
+                _, x, y, r = shape
+                tl = to_scene(x - r, y + r)
+                item = QtWidgets.QGraphicsEllipseItem(tl.x(), tl.y(), 2 * r * rez(), 2 * r * rez())
+                item.setPen(_pen("#d62728", dashed=True, width=0.5))
             else:
                 pts = shape[1]
                 if len(pts) < 2:
@@ -189,7 +194,7 @@ class PagePicker(QtCore.QObject):
                     self.finish()
                     return True
         except Exception as e:
-            App.Console.PrintError("Draw2D: %s\n" % e)
+            App.Console.PrintError("DrawingKit: %s\n" % e)
             self.cancel()
             return True
         return False
@@ -212,8 +217,8 @@ class PagePicker(QtCore.QObject):
             try:
                 self.on_done(list(self.points))
             except Exception as e:
-                App.Console.PrintError("Draw2D: %s\n" % e)
-                QtWidgets.QMessageBox.warning(Gui.getMainWindow(), "Draw2D", str(e))
+                App.Console.PrintError("DrawingKit: %s\n" % e)
+                QtWidgets.QMessageBox.warning(Gui.getMainWindow(), "DrawingKit", str(e))
 
     def cancel(self):
         self._stop()
@@ -304,7 +309,7 @@ class DragAnywhere(QtCore.QObject):
                     QtCore.QTimer.singleShot(0, Gui.Selection.clearSelection)
                 return False
         except Exception as e:
-            App.Console.PrintWarning("Draw2D drag: %s\n" % e)
+            App.Console.PrintWarning("DrawingKit drag: %s\n" % e)
             self.press, self.dragging = None, False
         return False
 

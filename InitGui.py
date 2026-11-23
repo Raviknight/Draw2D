@@ -5,18 +5,18 @@
 import FreeCADGui as Gui
 
 
-class Draw2DWorkbench(Gui.Workbench):
-    MenuText = "Draw2D"
-    ToolTip = "Quicker TechDraw drawings: sized sheets, fitted views, auto-lettered sections"
+class DrawingKitWorkbench(Gui.Workbench):
+    MenuText = "DrawingKit"
+    ToolTip = "Quicker TechDraw drawings: sheets, fitted and projected views, sections, details, hole callouts, GD&T"
 
     def __init__(self):
         import os
-        import Draw2DTools
-        self.__class__.Icon = os.path.join(os.path.dirname(Draw2DTools.__file__),
-                                           "Resources", "icons", "Draw2D.svg")
+        import DrawingKitTools
+        self.__class__.Icon = os.path.join(os.path.dirname(DrawingKitTools.__file__),
+                                           "Resources", "icons", "DrawingKit.svg")
 
     # TechDraw's own tools, so you can dimension and annotate without
-    # leaving Draw2D (names from FreeCAD 1.1's TechDraw workbench).
+    # leaving DrawingKit (names from FreeCAD 1.1's TechDraw workbench).
     TECHDRAW_TOOLBARS = [
         ("TechDraw views", ["TechDraw_View", "TechDraw_ActiveView", "TechDraw_DetailView",
                             "TechDraw_BrokenView", "TechDraw_ClipGroup"]),
@@ -43,9 +43,9 @@ class Draw2DWorkbench(Gui.Workbench):
 
     def Initialize(self):
         import TechDrawGui  # noqa: F401  (page display, and registers TechDraw's commands)
-        from Draw2DTools import commands
-        self.appendToolbar("Draw2D", commands.COMMAND_NAMES)
-        self.appendMenu("Draw2D", commands.COMMAND_NAMES)
+        from DrawingKitTools import commands
+        self.appendToolbar("DrawingKit", commands.COMMAND_NAMES)
+        self.appendMenu("DrawingKit", commands.COMMAND_NAMES)
         known = set(Gui.listCommands())
         for name, cmds in self.TECHDRAW_TOOLBARS:
             cmds = [c for c in cmds if c in known]
@@ -62,20 +62,20 @@ class Draw2DWorkbench(Gui.Workbench):
         return "Gui::PythonWorkbench"
 
 
-Gui.addWorkbench(Draw2DWorkbench())
+Gui.addWorkbench(DrawingKitWorkbench())
 
 
-class Draw2DInTechDraw:
-    """Also show the Draw2D buttons in the TechDraw workbench.
+class DrawingKitInTechDraw:
+    """Also show the DrawingKit buttons in the TechDraw workbench.
 
     FreeCAD switches to TechDraw when you click on a page, which would hide
-    the Draw2D toolbar; this puts the same buttons at the end of TechDraw's
+    the DrawingKit toolbar; this puts the same buttons at the end of TechDraw's
     'TechDraw Pages' toolbar.
     """
 
     def modifyToolBars(self):
         try:
-            from Draw2DTools import commands
+            from DrawingKitTools import commands
         except Exception:
             return []
         items = [{"append": "Separator", "toolBar": "TechDraw Pages"}]
@@ -85,4 +85,4 @@ class Draw2DInTechDraw:
 
 
 if hasattr(Gui, "addWorkbenchManipulator"):
-    Gui.addWorkbenchManipulator(Draw2DInTechDraw())
+    Gui.addWorkbenchManipulator(DrawingKitInTechDraw())

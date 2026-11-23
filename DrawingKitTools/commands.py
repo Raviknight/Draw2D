@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Draw2D toolbar commands (GUI only)."""
+"""DrawingKit toolbar commands (GUI only)."""
 
 import os
 
@@ -22,16 +22,16 @@ def icon(name):
 
 
 def say(text):
-    App.Console.PrintMessage("Draw2D: %s\n" % text)
+    App.Console.PrintMessage("DrawingKit: %s\n" % text)
     try:
-        Gui.getMainWindow().statusBar().showMessage("Draw2D: " + text, 8000)
+        Gui.getMainWindow().statusBar().showMessage("DrawingKit: " + text, 8000)
     except Exception:
         pass
 
 
 def warn(text):
-    App.Console.PrintWarning("Draw2D: %s\n" % text)
-    QtWidgets.QMessageBox.warning(Gui.getMainWindow(), "Draw2D", text)
+    App.Console.PrintWarning("DrawingKit: %s\n" % text)
+    QtWidgets.QMessageBox.warning(Gui.getMainWindow(), "DrawingKit", text)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ def show_page(page):
 
 
 class RedrawWatcher:
-    """For a few seconds after a Draw2D action, redraw views that came out
+    """For a few seconds after a DrawingKit action, redraw views that came out
     at the wrong size (see core.stale_views)."""
 
     def __init__(self, page, seconds=20.0, interval_ms=400, retry_s=2.0):
@@ -172,7 +172,7 @@ class RedrawWatcher:
                     self.last_redraw[v.Name] = self.tick_no
                     v.recompute()
         except Exception as e:
-            App.Console.PrintWarning("Draw2D redraw check: %s\n" % e)
+            App.Console.PrintWarning("DrawingKit redraw check: %s\n" % e)
             self.stop()
 
 
@@ -201,7 +201,7 @@ def run_in_transaction(doc, name, func):
 # Dialogs
 # ---------------------------------------------------------------------------
 def all_sheets():
-    """Every paper size Draw2D can make, in both orientations."""
+    """Every paper size DrawingKit can make, in both orientations."""
     from . import templates as d2t
     return {(s, o): None for s in d2t.SIZES for o in d2t.ORIENTATIONS}
 
@@ -215,7 +215,7 @@ class SheetDialog(QtWidgets.QDialog):
     def __init__(self, templates, parent=None):
         super().__init__(parent)
         self.templates = templates
-        self.setWindowTitle("Draw2D - New drawing sheet")
+        self.setWindowTitle("DrawingKit - New drawing sheet")
         form = QtWidgets.QFormLayout(self)
         self.size = QtWidgets.QComboBox()
         sizes = [s for s in core.ISO_SIZES + core.ANSI_SIZES
@@ -259,7 +259,7 @@ class SheetDialog(QtWidgets.QDialog):
 
 def ask_isometric():
     box = QtWidgets.QMessageBox(Gui.getMainWindow())
-    box.setWindowTitle("Draw2D - Standard views")
+    box.setWindowTitle("DrawingKit - Standard views")
     box.setText("Add front, top and right views.\nInclude an isometric view as well?")
     yes = box.addButton("With isometric", QtWidgets.QMessageBox.YesRole)
     box.addButton("Without", QtWidgets.QMessageBox.NoRole)
@@ -276,7 +276,7 @@ def ask_isometric():
 # ---------------------------------------------------------------------------
 class NewSheet:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_NewSheet.svg"),
+        return {"Pixmap": icon("DrawingKit_NewSheet.svg"),
                 "MenuText": "New drawing sheet",
                 "ToolTip": "Create a TechDraw page: pick ISO A4-A0 or ANSI A-E and "
                            "the orientation. With a part selected, standard views "
@@ -299,7 +299,7 @@ class NewSheet:
                 core.add_standard_views(page, parts, iso)
             return page
 
-        page = run_in_transaction(doc, "Draw2D new sheet", work)
+        page = run_in_transaction(doc, "DrawingKit new sheet", work)
         doc.recompute()
         show_page(page)
         watch_redraw(page)
@@ -311,7 +311,7 @@ class NewSheet:
 
 class StandardViews:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_StandardViews.svg"),
+        return {"Pixmap": icon("DrawingKit_StandardViews.svg"),
                 "MenuText": "Add standard views, fitted",
                 "ToolTip": "Select a 3D part (and the page, if there are several). "
                            "Adds front, top and right views (+ optional isometric) "
@@ -338,13 +338,13 @@ class StandardViews:
                 return
             size, orient, _, iso = dlg.choice()
             page = run_in_transaction(
-                doc, "Draw2D new sheet",
+                doc, "DrawingKit new sheet",
                 lambda: core.create_page(doc, size, orient))
         else:
             iso = ask_isometric()
             if iso is None:
                 return
-        run_in_transaction(doc, "Draw2D standard views",
+        run_in_transaction(doc, "DrawingKit standard views",
                            lambda: core.add_standard_views(page, parts, iso))
         doc.recompute()
         show_page(page)
@@ -354,7 +354,7 @@ class StandardViews:
 
 class FitToPage:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_FitToPage.svg"),
+        return {"Pixmap": icon("DrawingKit_FitToPage.svg"),
                 "MenuText": "Fit to page",
                 "ToolTip": "Re-pick the standard scale of the page so the views "
                            "and sections fit the drawing area, and re-centre them."}
@@ -369,7 +369,7 @@ class FitToPage:
             warn("Select the page (or a view on it) first.")
             return
         try:
-            scale = run_in_transaction(doc, "Draw2D fit to page",
+            scale = run_in_transaction(doc, "DrawingKit fit to page",
                                        lambda: core.fit_page(page))
         except ValueError as e:
             warn(str(e))
@@ -381,7 +381,7 @@ class FitToPage:
 
 class Section:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_Section.svg"),
+        return {"Pixmap": icon("DrawingKit_Section.svg"),
                 "MenuText": "Section by cut line",
                 "ToolTip": "Select a view. Click on it where the cut goes: one point "
                            "for a straight cut, or several points for a stepped "
@@ -438,18 +438,18 @@ class Section:
                     return
                 doc = page.Document
                 sec = run_in_transaction(
-                    doc, "Draw2D section",
+                    doc, "DrawingKit section",
                     lambda: core.add_cut_section(page, base, cut, places[-1]))
                 doc.recompute()
                 watch_redraw(page)
                 say("%s added" % sec.Label)
 
-            interact.PagePicker(page, "Draw2D: click where the section view goes "
+            interact.PagePicker(page, "DrawingKit: click where the section view goes "
                                       "(Esc to cancel)",
                                 on_move=on_move_place, on_click=lambda pt, pts: True,
                                 on_done=on_place_done, finish_on_right_click=False)
 
-        interact.PagePicker(page, "Draw2D: click the cut line on the view (one point = "
+        interact.PagePicker(page, "DrawingKit: click the cut line on the view (one point = "
                                   "straight cut, more = stepped). Right-click or Enter "
                                   "when done, Esc to cancel.",
                             on_move=on_move_cut, on_click=lambda pt, pts: False,
@@ -459,7 +459,7 @@ class Section:
 
 class SpeedToggle:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_Speed.svg"),
+        return {"Pixmap": icon("DrawingKit_Speed.svg"),
                 "MenuText": "Fast editing on/off",
                 "ToolTip": "On: the page stops updating itself and views use Coarse "
                            "View, so edits don't freeze FreeCAD. Off: full-quality "
@@ -475,7 +475,7 @@ class SpeedToggle:
             warn("Select the page (or a view on it) first.")
             return
         fast = not core.is_fast(page)
-        run_in_transaction(doc, "Draw2D fast editing",
+        run_in_transaction(doc, "DrawingKit fast editing",
                            lambda: core.set_fast(page, fast))
         if not fast:
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
@@ -503,7 +503,7 @@ def _base_view_and_page():
 
 class ProjectedView:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_ProjectedView.svg"),
+        return {"Pixmap": icon("DrawingKit_ProjectedView.svg"),
                 "MenuText": "Projected view by pointing",
                 "ToolTip": "Select a view, then move the mouse to where the new view "
                            "should go and click: right, left, above, below or a corner "
@@ -535,7 +535,7 @@ class ProjectedView:
                 return
             try:
                 view = run_in_transaction(
-                    doc, "Draw2D projected view",
+                    doc, "DrawingKit projected view",
                     lambda: core.add_projected_view(page, base, points[-1]))
             except ValueError as e:
                 warn(str(e))
@@ -546,7 +546,7 @@ class ProjectedView:
             # keep going from the same base view until Esc
             QtCore.QTimer.singleShot(0, lambda: self._pick(page, base))
 
-        interact.PagePicker(page, "Draw2D: click where the projected view goes "
+        interact.PagePicker(page, "DrawingKit: click where the projected view goes "
                                   "(Esc to stop)",
                             on_move=on_move, on_click=lambda pt, pts: True,
                             on_done=on_done, finish_on_right_click=False)
@@ -554,7 +554,7 @@ class ProjectedView:
 
 class CenterMarks:
     def GetResources(self):
-        return {"Pixmap": icon("Draw2D_CenterMarks.svg"),
+        return {"Pixmap": icon("DrawingKit_CenterMarks.svg"),
                 "MenuText": "Centre marks and centre lines",
                 "ToolTip": "Adds centre marks to holes and round features seen end-on, "
                            "and centre lines along their axes seen from the side. "
@@ -580,19 +580,278 @@ class CenterMarks:
                 return
             views = [v for v in core.part_views(page)
                      if not v.isDerivedFrom("TechDraw::DrawViewDetail")]
-        total = run_in_transaction(doc, "Draw2D centre marks",
+        total = run_in_transaction(doc, "DrawingKit centre marks",
                                    lambda: sum(core.add_center_marks(v) for v in views))
         say("%d centre line(s) on %d view(s)" % (total, len(views)))
 
 
+class DetailView:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_DetailView.svg"),
+                "MenuText": "Detail view by clicking",
+                "ToolTip": "Click the centre of the area to enlarge on a view, move out "
+                           "and click to set the circle, then click where the detail "
+                           "goes. Letter and a standard scale are picked for you."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import interact
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select a view on it) first.")
+            return
+        show_page(page)
+        Gui.updateGui()
+        Gui.Selection.clearSelection()
+        state = {}
+
+        def dist(a, b):
+            return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+        def on_move(pt, points):
+            if not points:
+                return [("circle", pt[0], pt[1], 1.0)]
+            if len(points) == 1:
+                return [("circle", points[0][0], points[0][1], max(dist(points[0], pt), 0.5))]
+            c, r = points[0], dist(points[0], points[1])
+            scale = core.detail_scale(core.view_scale(state["base"]),
+                                      r / core.view_scale(state["base"]))
+            zoom = scale / core.view_scale(state["base"])
+            return [("circle", c[0], c[1], r), ("line", [c, pt]),
+                    ("circle", pt[0], pt[1], r * zoom)]
+
+        def on_click(pt, points):
+            if len(points) == 1:
+                base = interact._view_under(page, pt[0], pt[1], margin=0.0)
+                if base is None or base.isDerivedFrom("TechDraw::DrawViewDetail"):
+                    points.pop()
+                    say("Click inside a view for the detail's centre")
+                    return False
+                state["base"] = base
+                return False
+            if len(points) == 2:
+                if dist(points[0], points[1]) < 1.0:
+                    points.pop()
+                return False
+            return True
+
+        def on_done(points):
+            if len(points) < 3:
+                return
+            doc = page.Document
+            det = run_in_transaction(
+                doc, "DrawingKit detail view",
+                lambda: core.add_detail(page, state["base"], points[0],
+                                        dist(points[0], points[1]), points[2]))
+            doc.recompute()
+            say("%s added at %s" % (det.Label, core.scale_text(det.Scale)))
+
+        interact.PagePicker(page, "DrawingKit: click the centre of the detail, then its edge, "
+                                  "then where the detail goes (Esc to cancel)",
+                            on_move=on_move, on_click=on_click, on_done=on_done,
+                            finish_on_right_click=False)
+
+
+class HoleCallout:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_HoleCallout.svg"),
+                "MenuText": "Hole callouts",
+                "ToolTip": "Labels holes like '3X ⌀ 6.40 THRU' or '⌀ 5 ↧ 10'. "
+                           "Select hole circles on a view for just those, or a view "
+                           "(or the page) for every kind of hole seen end-on."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import holes
+        doc = App.ActiveDocument
+        jobs = []   # (page, view, holes or None)
+        for sel in Gui.Selection.getSelectionEx():
+            obj = sel.Object
+            if not obj.isDerivedFrom("TechDraw::DrawViewPart"):
+                continue
+            edges = [n for n in sel.SubElementNames if n.startswith("Edge")]
+            page = parent_page(obj)
+            if edges:
+                picked = holes.holes_for_edges(obj, edges)
+                if picked:
+                    jobs.append((page, obj, picked))
+            else:
+                jobs.append((page, obj, None))
+        if not jobs:
+            page = target_page()
+            if page is None:
+                warn("Select hole circles, a view, or the page first.")
+                return
+            jobs = [(page, v, None) for v in core.part_views(page)
+                    if not v.isDerivedFrom("TechDraw::DrawViewSection")
+                    and not v.isDerivedFrom("TechDraw::DrawViewDetail")]
+
+        def work():
+            made = []
+            for page, view, hs in jobs:
+                made.extend(holes.add_callouts(page, view, hs))
+            return made
+
+        made = run_in_transaction(doc, "DrawingKit hole callouts", work)
+        doc.recompute()
+        say("%d hole callout(s) added" % len(made) if made
+            else "No holes seen end-on in the selected views")
+
+
+class FrameDialog(QtWidgets.QDialog):
+    """Feature control frame: characteristic, tolerance, modifier, datums."""
+
+    last = {"char": "position", "tol": "0.05", "dia": True, "mod": "", "datums": ["A", "B", ""]}
+
+    def __init__(self, parent=None):
+        from . import gdt
+        super().__init__(parent)
+        self.setWindowTitle("DrawingKit - Geometric tolerance")
+        form = QtWidgets.QFormLayout(self)
+        self.char = QtWidgets.QComboBox()
+        for key, label in gdt.CHARACTERISTICS:
+            self.char.addItem(label, key)
+        self.char.setCurrentIndex(max(0, [k for k, _ in gdt.CHARACTERISTICS].index(self.last["char"])))
+        self.dia = QtWidgets.QCheckBox("Diameter zone (⌀)")
+        self.dia.setChecked(self.last["dia"])
+        self.tol = QtWidgets.QLineEdit(self.last["tol"])
+        self.mod = QtWidgets.QComboBox()
+        self.mod.addItems(["", "MMC", "LMC"])
+        self.mod.setCurrentText(self.last["mod"])
+        self.datums = [QtWidgets.QLineEdit(d) for d in self.last["datums"]]
+        for d in self.datums:
+            d.setMaxLength(3)
+        form.addRow("Characteristic", self.char)
+        form.addRow("Tolerance", self.tol)
+        form.addRow("", self.dia)
+        form.addRow("Material condition", self.mod)
+        row = QtWidgets.QHBoxLayout()
+        for d in self.datums:
+            row.addWidget(d)
+        form.addRow("Datums (primary, secondary, tertiary)", row)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def choice(self):
+        c = {"char": self.char.currentData(), "tol": self.tol.text().strip() or "0.05",
+             "dia": self.dia.isChecked(), "mod": self.mod.currentText(),
+             "datums": [d.text().strip().upper() for d in self.datums]}
+        FrameDialog.last = dict(c)
+        return c
+
+
+def _place_symbol(page, hint, make, preview_size):
+    from . import interact
+    w, h = preview_size
+
+    def on_done(points):
+        if not points:
+            return
+        doc = page.Document
+        sym = run_in_transaction(doc, "DrawingKit symbol", lambda: make(points[-1]))
+        doc.recompute()
+        say("%s placed; double-click it to edit the texts" % sym.Label)
+
+    interact.PagePicker(page, hint,
+                        on_move=lambda pt, _p: [("rect", pt[0], pt[1], w, h)],
+                        on_click=lambda pt, pts: True, on_done=on_done,
+                        finish_on_right_click=False)
+
+
+class ToleranceFrame:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_ToleranceFrame.svg"),
+                "MenuText": "Geometric tolerance frame",
+                "ToolTip": "Pick the characteristic, tolerance and datums, then click "
+                           "where the frame goes. Drag it like any view; edit the value "
+                           "and datum letters in its Editable Texts."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import gdt
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select a view on it) first.")
+            return
+        dlg = FrameDialog(Gui.getMainWindow())
+        if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
+            return
+        c = dlg.choice()
+        _, w, h = gdt.frame_svg(c["char"], c["tol"], c["dia"], c["mod"], c["datums"])
+        show_page(page)
+        Gui.updateGui()
+        _place_symbol(page, "DrawingKit: click where the tolerance frame goes (Esc to cancel)",
+                      lambda pt: gdt.add_frame(page, pt[0], pt[1], c["char"], c["tol"],
+                                               c["dia"], c["mod"], c["datums"]),
+                      (w, h))
+
+
+class DatumFlag:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Datum.svg"),
+                "MenuText": "Datum flag",
+                "ToolTip": "Click on the edge or surface line that is the datum; the "
+                           "flag's triangle sits there. Lettered A, B, C... automatically."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import gdt
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select a view on it) first.")
+            return
+        letter = gdt.next_datum_letter(page.Document)
+        letter, ok = QtWidgets.QInputDialog.getText(
+            Gui.getMainWindow(), "DrawingKit - Datum", "Datum letter:", text=letter)
+        if not ok or not letter.strip():
+            return
+        show_page(page)
+        Gui.updateGui()
+        from . import interact
+
+        def on_move(pt, _p):
+            side = gdt.datum_placement(page, pt[0], pt[1])
+            _, w, h, (dx, dy) = gdt.datum_svg(letter, side)
+            return [("rect", pt[0] - dx, pt[1] - dy, w, h)]
+
+        def on_done(points):
+            if not points:
+                return
+            doc = page.Document
+            sym = run_in_transaction(doc, "DrawingKit datum",
+                                     lambda: gdt.add_datum(page, points[-1][0], points[-1][1],
+                                                           letter))
+            doc.recompute()
+            say("%s placed" % sym.Label)
+
+        interact.PagePicker(page, "DrawingKit: click the datum edge (Esc to cancel)",
+                            on_move=on_move, on_click=lambda pt, pts: True,
+                            on_done=on_done, finish_on_right_click=False)
+
+
 COMMANDS = [
-    ("Draw2D_NewSheet", NewSheet()),
-    ("Draw2D_StandardViews", StandardViews()),
-    ("Draw2D_ProjectedView", ProjectedView()),
-    ("Draw2D_Section", Section()),
-    ("Draw2D_CenterMarks", CenterMarks()),
-    ("Draw2D_FitToPage", FitToPage()),
-    ("Draw2D_SpeedToggle", SpeedToggle()),
+    ("DrawingKit_NewSheet", NewSheet()),
+    ("DrawingKit_StandardViews", StandardViews()),
+    ("DrawingKit_ProjectedView", ProjectedView()),
+    ("DrawingKit_Section", Section()),
+    ("DrawingKit_DetailView", DetailView()),
+    ("DrawingKit_CenterMarks", CenterMarks()),
+    ("DrawingKit_HoleCallout", HoleCallout()),
+    ("DrawingKit_Datum", DatumFlag()),
+    ("DrawingKit_ToleranceFrame", ToleranceFrame()),
+    ("DrawingKit_FitToPage", FitToPage()),
+    ("DrawingKit_SpeedToggle", SpeedToggle()),
 ]
 
 for _name, _cmd in COMMANDS:
@@ -628,7 +887,7 @@ class AlignmentObserver:
             if obj is not None:
                 core.enforce_alignment(obj)
         except Exception as e:  # never break FreeCAD over a layout nicety
-            App.Console.PrintWarning("Draw2D alignment: %s\n" % e)
+            App.Console.PrintWarning("DrawingKit alignment: %s\n" % e)
 
 
 # This module is imported once per FreeCAD session, so one observer.
@@ -639,6 +898,6 @@ try:
     from . import interact as _interact
     _interact.start_watching()
 except Exception as _e:  # drag-anywhere is a convenience; never block loading
-    App.Console.PrintWarning("Draw2D: drag-anywhere not available: %s\n" % _e)
+    App.Console.PrintWarning("DrawingKit: drag-anywhere not available: %s\n" % _e)
 
 COMMAND_NAMES = [n for n, _ in COMMANDS]

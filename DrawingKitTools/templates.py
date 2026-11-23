@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Draw2D's own drawing templates (frame + title block), made as SVG.
+"""DrawingKit's own drawing templates (frame + title block), made as SVG.
 
 ISO 5457 frame (20 mm binding margin on the left, 10 mm elsewhere, centring
 marks, zone grid) and a 180 x 36 mm title block in the bottom-right corner
@@ -122,7 +122,7 @@ def projection_symbol(cx, cy, first_angle, h=7.0):
 
 
 def make_svg(size, orientation, first_angle=True):
-    """SVG text of a Draw2D template."""
+    """SVG text of a DrawingKit template."""
     W, H = page_size(size, orientation)
     left, other = 20.0, 10.0
     fx0, fy0, fx1, fy1 = left, other, W - other, H - other       # drawing frame
@@ -133,9 +133,9 @@ def make_svg(size, orientation, first_angle=True):
     a('<svg xmlns="http://www.w3.org/2000/svg" '
       'xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace" '
       'version="1.1" width="%gmm" height="%gmm" viewBox="0 0 %g %g">' % (W, H, W, H))
-    a('<!-- Draw2D template: %s %s, %s angle projection -->'
+    a('<!-- DrawingKit template: %s %s, %s angle projection -->'
       % (size, orientation, "first" if first_angle else "third"))
-    a('<g id="draw2d_frame" style="fill:none;stroke:#000000;stroke-linecap:round;'
+    a('<g id="drawingkit_frame" style="fill:none;stroke:#000000;stroke-linecap:round;'
       'stroke-linejoin:round">')
     a('<rect id="grid_reference_border" x="%g" y="%g" width="%g" height="%g" '
       'style="stroke-width:0.35"/>' % (gx0, gy0, gx1 - gx0, gy1 - gy0))
@@ -156,7 +156,7 @@ def make_svg(size, orientation, first_angle=True):
         ticks.append("M %g,%g H %g M %g,%g H %g" % (gx0, y, fx0, fx1, y, gx1))
     a('<path style="stroke-width:0.35" d="%s"/>' % " ".join(ticks))
     a('</g>')
-    a('<g id="draw2d_zones" style="font-size:3.5px;font-family:osifont;text-anchor:middle;'
+    a('<g id="drawingkit_zones" style="font-size:3.5px;font-family:osifont;text-anchor:middle;'
       'fill:#000000;stroke:none">')
     for i, (x0, x1) in enumerate(zip(xs, xs[1:])):
         lab = _zone_labels(len(xs) - 1, False)[i]
@@ -206,14 +206,14 @@ def make_svg(size, orientation, first_angle=True):
 
 
 def template_dir():
-    return os.path.join(App.getUserAppDataDir(), "Draw2D", "Templates")
+    return os.path.join(App.getUserAppDataDir(), "DrawingKit", "Templates")
 
 
 def template_path(size, orientation, first_angle=True, out_dir=None):
-    """Write (if changed) and return the path of a Draw2D template."""
+    """Write (if changed) and return the path of a DrawingKit template."""
     out_dir = out_dir or template_dir()
     os.makedirs(out_dir, exist_ok=True)
-    name = "Draw2D_%s_%s_%s.svg" % (size.replace(" ", ""), orientation,
+    name = "DrawingKit_%s_%s_%s.svg" % (size.replace(" ", ""), orientation,
                                     "1st" if first_angle else "3rd")
     path = os.path.join(out_dir, name)
     text = make_svg(size, orientation, first_angle)

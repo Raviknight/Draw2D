@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Draw2D core logic.
+"""DrawingKit core logic.
 
 Everything in here works without the FreeCAD GUI, so it can be tested with
 freecadcmd. The GUI commands in ``commands.py`` are thin wrappers around it.
@@ -222,22 +222,22 @@ def free_regions(frame, title, pad=5.0):
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
-def create_page(doc, size, orientation, templates=None, draw2d_template=True):
+def create_page(doc, size, orientation, templates=None, drawingkit_template=True):
     """New page of the given paper size.
 
-    Uses Draw2D's own frame and title block (any size, both orientations,
-    projection symbol to match the page). With ``draw2d_template=False``, or
+    Uses DrawingKit's own frame and title block (any size, both orientations,
+    projection symbol to match the page). With ``drawingkit_template=False``, or
     if that fails, FreeCAD's bundled template for the size is used.
     """
     page = doc.addObject("TechDraw::DrawPage", "Page")
     tpl = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
     path = None
-    if draw2d_template:
+    if drawingkit_template:
         try:
             from . import templates as d2t
             path = d2t.template_path(size, orientation, page_first_angle(page))
         except Exception as e:
-            App.Console.PrintWarning("Draw2D template failed, using FreeCAD's: %s\n" % e)
+            App.Console.PrintWarning("DrawingKit template failed, using FreeCAD's: %s\n" % e)
     if path is None:
         templates = templates or available_templates()
         if (size, orientation) not in templates:
@@ -595,18 +595,18 @@ def set_title_block_scale(page, scale):
 # ---------------------------------------------------------------------------
 # Projected views that slide along their alignment axis
 # ---------------------------------------------------------------------------
-# TechDraw's AutoDistribute locks every view of a group in place. Draw2D turns
+# TechDraw's AutoDistribute locks every view of a group in place. DrawingKit turns
 # it off and keeps each view aligned with the Front view on one axis only:
 # side views (Left/Right/Rear) move left-right, Top/Bottom move up-down,
 # isometric/corner views move freely, and moving the Front view moves all.
-ALIGN_PROP = "Draw2DAligned"
+ALIGN_PROP = "DrawingKitAligned"
 _SLIDE_X = {"Right", "Left", "Rear"}       # keep Y = 0, X free
 _SLIDE_Y = {"Top", "Bottom"}               # keep X = 0, Y free
 
 
 def make_aligned(group, on=True):
     if ALIGN_PROP not in group.PropertiesList:
-        group.addProperty("App::PropertyBool", ALIGN_PROP, "Draw2D",
+        group.addProperty("App::PropertyBool", ALIGN_PROP, "DrawingKit",
                           "Projected views stay aligned with the Front view on one "
                           "axis but can be dragged along the other")
     setattr(group, ALIGN_PROP, on)
@@ -667,10 +667,40 @@ def _enforce_group_item(item):
 # ---------------------------------------------------------------------------
 # Standard views
 # ---------------------------------------------------------------------------
-def add_standard_views(page, objs, isometric=False):
-    """Front/Top/Right (+ iso) projection group, scaled to fit. Returns group."""
+def best_front(shape):
+    """(direction, x direction) for the most descriptive front view.
+
+    The drafting rule: the front view shows the part's biggest face, with
+    its longest side across the page. Of the model's front, top and right
+    directions, the one with the largest projected outline wins (ties keep
+    the model's own front). A flange lying flat gets its round face as the
+    front view instead of a thin strip.
+    """
+    front = STANDARD_DIRECTIONS["Front"]
+    candidates = [front, STANDARD_DIRECTIONS["Top"], STANDARD_DIRECTIONS["Right"]]
+    best, best_area = None, -1.0
+    for d, x in candidates:
+        w, h = projected_extent(shape, d, x)
+        if w * h > best_area * 1.02:   # clearly bigger: earlier ones win ties
+            best, best_area = (d, x), w * h
+    d, x = best
+    w, h = projected_extent(shape, d, x)
+    if h > w * 1.02:
+        # turn the view so its longest side runs across the page
+        dd = App.Vector(d)
+        dd.normalize()
+        x = dd.cross(App.Vector(x))
+    return App.Vector(d), App.Vector(x)
+
+
+def add_standard_views(page, objs, isometric=False, front=None):
+    """Front/Top/Right (+ iso) projection group, scaled to fit. Returns group.
+
+    ``front`` is (direction, x direction) for the front view; by default the
+    most descriptive one is picked (see best_front)."""
     doc = page.Document
-    source_shape(objs)  # fail early if nothing usable
+    shape = source_shape(objs)  # fails early if nothing usable
+    d, x = front or best_front(shape)
     group = doc.addObject("TechDraw::DrawProjGroup", "ProjGroup")
     page.addView(group)
     group.Source = list(objs)
@@ -682,16 +712,19 @@ def add_standard_views(page, objs, isometric=False):
     # drawing in a background thread as soon as it is added; a view first
     # drawn at 1:1 kept that drawing even after the scale changed.
     _, extras = page_content(page)
-    specs = [(t, t) + STANDARD_DIRECTIONS[t] for t in types]
-    layout = group_layout(group, specs=specs)
+    specs = []
+    for t in types:
+        dirs = (d, x) if t == "Front" else projected_directions(d, x, _GRID[t])
+        specs.append((t, t) + tuple(dirs))
+    layout = group_layout(group, shape=shape, specs=specs)
     scale, positions = plan_page(page, group, extras, layout)
     page.Scale = scale
     group.Scale = scale
 
     group.addProjection("Front")
-    group.Anchor.Direction = STANDARD_DIRECTIONS["Front"][0]
-    group.Anchor.XDirection = STANDARD_DIRECTIONS["Front"][1]
-    group.Anchor.RotationVector = STANDARD_DIRECTIONS["Front"][1]
+    group.Anchor.Direction = d
+    group.Anchor.XDirection = x
+    group.Anchor.RotationVector = x
     for t in types[1:]:
         group.addProjection(t)
     apply_plan(page, group, extras, scale, positions)
@@ -1042,8 +1075,8 @@ def projection_preview(page, base, point):
     return px, py, w * s, h * s
 
 
-PARENT_PROP = "Draw2DParent"
-AXIS_PROP = "Draw2DAxis"
+PARENT_PROP = "DrawingKitParent"
+AXIS_PROP = "DrawingKitAxis"
 
 
 def same(a, b):
@@ -1094,9 +1127,9 @@ def add_projected_view(page, base, point):
     view.Scale = page.Scale
     view.X, view.Y = px, py
     view.Label = "View from %s" % base.Label
-    view.addProperty("App::PropertyLink", PARENT_PROP, "Draw2D",
+    view.addProperty("App::PropertyLink", PARENT_PROP, "DrawingKit",
                      "View this one was projected from; it stays lined up with it")
-    view.addProperty("App::PropertyString", AXIS_PROP, "Draw2D",
+    view.addProperty("App::PropertyString", AXIS_PROP, "DrawingKit",
                      "H: stays level with the parent view, V: stays above/below it")
     setattr(view, PARENT_PROP, base)
     setattr(view, AXIS_PROP, "H" if side[1] == 0 else ("V" if side[0] == 0 else ""))
@@ -1105,7 +1138,7 @@ def add_projected_view(page, base, point):
 
 
 def linked_children(view):
-    """Views projected from ``view`` (Draw2D links)."""
+    """Views projected from ``view`` (DrawingKit links)."""
     return [o for o in view.InList if same(getattr(o, PARENT_PROP, None), view)]
 
 
@@ -1138,9 +1171,58 @@ def realign_children(obj):
 
 
 # ---------------------------------------------------------------------------
+# Detail views by clicking
+# ---------------------------------------------------------------------------
+DETAIL_TARGET = 60.0   # aim for a detail about this big on paper (mm)
+
+
+def detail_scale(base_scale, radius_model, target=DETAIL_TARGET):
+    """Standard scale for a detail: at least 2x the base view, sized so the
+    detail circle comes out about ``target`` mm across."""
+    want = target / (2.0 * radius_model) if radius_model > 0 else base_scale * 2
+    values = sorted(scale_value(r) for r in STANDARD_SCALES)
+    floor = base_scale * 2.0 - 1e-9
+    fitting = [v for v in values if floor <= v <= want + 1e-9]
+    if fitting:
+        return fitting[-1]
+    bigger = [v for v in values if v >= floor]
+    return bigger[0] if bigger else values[-1]
+
+
+def add_detail(page, base, centre, radius, place, letter=None, scale=None):
+    """Detail view of the circle (page ``centre``, page ``radius`` in mm) on
+    ``base``, placed at page point ``place``. Auto-lettered and scaled."""
+    doc = page.Document
+    s = view_scale(base)
+    cx, cy = view_center(base)
+    r_model = float(radius) / s
+    if r_model <= 0:
+        raise ValueError("Drag out a circle for the detail")
+    letter = letter or next_free_letter(used_letters(doc))
+    scale = scale or detail_scale(s, r_model)
+    det = doc.addObject("TechDraw::DrawViewDetail", "Detail")
+    page.addView(det)
+    det.BaseView = base
+    det.Source = base.Source
+    det.Direction = base.Direction
+    det.XDirection = base.XDirection
+    # anchor: unscaled base-view coordinates, Y up, from the view centre
+    det.AnchorPoint = App.Vector((centre[0] - cx) / s, (centre[1] - cy) / s, 0)
+    det.Radius = r_model
+    det.Reference = letter
+    det.ScaleType = "Custom"
+    det.Scale = scale
+    det.X, det.Y = float(place[0]), float(place[1])
+    det.Label = "Detail %s" % letter
+    det.Caption = "DETAIL %s (%s)" % (letter, scale_text(scale).replace(":", " : "))
+    det.touch()
+    return det
+
+
+# ---------------------------------------------------------------------------
 # Centre marks and centre lines
 # ---------------------------------------------------------------------------
-MARKS_PROP = "Draw2DCenterMarks"
+MARKS_PROP = "DrawingKitCenterMarks"
 CENTER_LINE_STYLE = 4      # dash-dot (centre line)
 CENTER_LINE_WEIGHT = 0.25  # thin line
 OVERSHOOT = 3.0            # paper mm the lines stick out past the circle/edge
@@ -1161,10 +1243,11 @@ def _round_faces(shape):
     return out
 
 
-def center_features(view, shape=None):
+def center_features(view, shape=None, with_radius=False):
     """Centre marks and centre lines to draw on ``view``.
 
-    Returns (marks, lines): marks are (lx, ly, half_length) crosses for
+    Returns (marks, lines): marks are (lx, ly, half_length) crosses (plus the
+    feature radius as a 4th item with ``with_radius``) for
     round features seen end-on; lines are ((lx0, ly0), (lx1, ly1)) along
     the axes of round features seen from the side. All in unscaled view
     coordinates, Y up; overshoot already added.
@@ -1173,7 +1256,7 @@ def center_features(view, shape=None):
     d, right, up = view_axes(view)
     s = view_scale(view)
     over = OVERSHOOT / s
-    marks, lines = {}, {}
+    marks, lines, radii = {}, {}, {}
     for face in _round_faces(shape):
         axis = App.Vector(face.Surface.Axis)
         axis.normalize()
@@ -1183,6 +1266,7 @@ def center_features(view, shape=None):
             lx, ly = model_to_local(view, centre, shape)
             key = (round(lx, 4), round(ly, 4))
             marks[key] = max(marks.get(key, 0.0), radius + over)
+            radii[key] = min(radii.get(key, radius), radius)  # innermost (the hole)
         elif abs(axis.dot(d)) < 1e-6:
             # extent of the face along its axis
             ts = [(App.Vector(v.Point) - centre).dot(axis) for v in face.Vertexes]
@@ -1209,7 +1293,10 @@ def center_features(view, shape=None):
             if key in lines:
                 lo, hi = min(lo, lines[key][0]), max(hi, lines[key][1])
             lines[key] = (lo, hi)
-    mark_list = [(k[0], k[1], half) for k, half in marks.items()]
+    if with_radius:
+        mark_list = [(k[0], k[1], half, radii[k]) for k, half in marks.items()]
+    else:
+        mark_list = [(k[0], k[1], half) for k, half in marks.items()]
     line_list = []
     for (dx, dy, off), (lo, hi) in lines.items():
         lo, hi = lo - over, hi + over
@@ -1242,20 +1329,60 @@ def clear_center_marks(view):
     return len(tags)
 
 
-def add_center_marks(view):
-    """(Re)draw Draw2D centre marks and centre lines on a view. Returns count."""
-    if not view.isDerivedFrom("TechDraw::DrawViewPart"):
-        return 0
-    clear_center_marks(view)
-    marks, lines = center_features(view)
-    visible = _visible_circle_centres(view)
-    segs = []
-    for lx, ly, half in marks:
-        # skip holes hidden behind material in this view
-        if visible and not any(abs(lx - cx) < 1e-3 and abs(ly - cy) < 1e-3 for cx, cy in visible):
+def plan_center_marks(marks, over):
+    """Turn marks (lx, ly, half, radius) into line segments and circles.
+
+    Holes of the same size lying on a circle (a bolt circle) get the pitch
+    circle plus a short radial centre line each, instead of separate crosses,
+    as on a typical flange drawing. The bolt circle's centre gets a cross if
+    nothing is marked there already.
+    """
+    from . import holes as _holes
+    segs, circles = [], []
+    by_radius = {}
+    for i, m in enumerate(marks):
+        by_radius.setdefault(round(m[3], 4), []).append(i)
+    on_bolt_circle = set()
+    for idxs in by_radius.values():
+        pts = [(marks[i][0], marks[i][1]) for i in idxs]
+
+        def centre_marked(x, y):
+            return any(abs(m[0] - x) < 1e-3 and abs(m[1] - y) < 1e-3 for m in marks)
+
+        for (cx, cy), R, members in _holes.bolt_circles(pts, centre_marked=centre_marked):
+            circles.append((cx, cy, R))
+            for j in members:
+                i = idxs[j]
+                on_bolt_circle.add(i)
+                lx, ly, half, r = marks[i]
+                ux, uy = (lx - cx) / R, (ly - cy) / R
+                a, b = R - r - over, R + r + over
+                segs.append(((cx + ux * a, cy + uy * a), (cx + ux * b, cy + uy * b)))
+            if not any(abs(m[0] - cx) < 1e-3 and abs(m[1] - cy) < 1e-3 for m in marks):
+                half = R * 0.15 + over
+                segs.append(((cx - half, cy), (cx + half, cy)))
+                segs.append(((cx, cy - half), (cx, cy + half)))
+    for i, (lx, ly, half, r) in enumerate(marks):
+        if i in on_bolt_circle:
             continue
         segs.append(((lx - half, ly), (lx + half, ly)))
         segs.append(((lx, ly - half), (lx, ly + half)))
+    return segs, circles
+
+
+def add_center_marks(view):
+    """(Re)draw DrawingKit centre marks, bolt circles and centre lines on a view.
+    Returns the number of cosmetic lines/circles made."""
+    if not view.isDerivedFrom("TechDraw::DrawViewPart"):
+        return 0
+    clear_center_marks(view)
+    marks, lines = center_features(view, with_radius=True)
+    visible = _visible_circle_centres(view)
+    if visible:
+        # skip holes hidden behind material in this view
+        marks = [m for m in marks
+                 if any(abs(m[0] - cx) < 1e-3 and abs(m[1] - cy) < 1e-3 for cx, cy in visible)]
+    segs, circles = plan_center_marks(marks, OVERSHOOT / view_scale(view))
     segs.extend(lines)
     tags = []
     for (x0, y0), (x1, y1) in segs:
@@ -1263,9 +1390,14 @@ def add_center_marks(view):
                                     CENTER_LINE_STYLE, CENTER_LINE_WEIGHT)
         if tag:
             tags.append(tag)
+    for cx, cy, R in circles:
+        tag = view.makeCosmeticCircle(App.Vector(cx, cy, 0), R,
+                                      CENTER_LINE_STYLE, CENTER_LINE_WEIGHT)
+        if tag:
+            tags.append(tag)
     if MARKS_PROP not in view.PropertiesList:
-        view.addProperty("App::PropertyStringList", MARKS_PROP, "Draw2D",
-                         "Cosmetic lines Draw2D made as centre marks (replaced on refresh)")
+        view.addProperty("App::PropertyStringList", MARKS_PROP, "DrawingKit",
+                         "Cosmetic lines DrawingKit made as centre marks (replaced on refresh)")
     setattr(view, MARKS_PROP, tags)
     return len(tags)
 
