@@ -13,6 +13,7 @@ except ImportError:  # older FreeCAD PySide shim keeps widgets in QtGui
     QtWidgets = QtGui
 
 from . import core
+from . import ui
 
 ICONS = os.path.join(os.path.dirname(__file__), "Resources", "icons")
 
@@ -206,69 +207,48 @@ def all_sheets():
     return {(s, o): None for s in d2t.SIZES for o in d2t.ORIENTATIONS}
 
 
-class SheetDialog(QtWidgets.QDialog):
-    """Pick a sheet size and orientation."""
+class SheetDialog(ui.Popover):
+    """Sheet size + orientation in one row; views options only with a part."""
 
     last_size = "A3"
     last_orient = "Landscape"
 
     def __init__(self, templates, parent=None):
-        super().__init__(parent)
+        super().__init__("New sheet", parent)
         self.templates = templates
-        self.setWindowTitle("DrawingKit - New drawing sheet")
-        form = QtWidgets.QFormLayout(self)
-        self.size = QtWidgets.QComboBox()
         sizes = [s for s in core.ISO_SIZES + core.ANSI_SIZES
                  if any((s, o) in templates for o in core.ORIENTATIONS)]
-        self.size.addItems(sizes)
-        self.orient = QtWidgets.QComboBox()
-        form.addRow("Sheet size", self.size)
-        form.addRow("Orientation", self.orient)
-        self.views = QtWidgets.QCheckBox("Add standard views of the selected part")
-        self.iso = QtWidgets.QCheckBox("Include an isometric view")
-        self.views.setChecked(bool(selected_parts()))
-        self.views.setEnabled(bool(selected_parts()))
-        self.iso.setEnabled(self.views.isChecked())
+        self.size = ui.combo([(s, s) for s in sizes], self.last_size, 80)
+        self.land = ui.toggle("▭ Landscape", self.last_orient == "Landscape")
+        self.port = ui.toggle("▯ Portrait", self.last_orient == "Portrait")
+        group = QtWidgets.QButtonGroup(self)
+        group.setExclusive(True)
+        group.addButton(self.land)
+        group.addButton(self.port)
+        self.add_row(self.size, self.land, self.port)
+        has_part = bool(selected_parts())
+        self.views = ui.toggle("+ Views", has_part, "Add front, top and right views of the selected part")
+        self.iso = ui.toggle("+ Isometric", False, "Add an isometric view too")
         self.views.toggled.connect(self.iso.setEnabled)
-        form.addRow(self.views)
-        form.addRow(self.iso)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-        self.size.currentTextChanged.connect(self._fill_orientations)
-        if self.last_size in sizes:
-            self.size.setCurrentText(self.last_size)
-        self._fill_orientations(self.size.currentText())
+        self.iso.setEnabled(has_part)
+        self.views.setVisible(has_part)
+        self.iso.setVisible(has_part)
+        if has_part:
+            self.add_row(self.views, self.iso, stretch=True)
 
-    def _fill_orientations(self, size):
-        current = self.orient.currentText() or self.last_orient
-        self.orient.clear()
-        options = [o for o in core.ORIENTATIONS if (size, o) in self.templates]
-        self.orient.addItems(options)
-        if current in options:
-            self.orient.setCurrentText(current)
+    def exec_(self):
+        return self.run()
 
     def choice(self):
-        SheetDialog.last_size = self.size.currentText()
-        SheetDialog.last_orient = self.orient.currentText()
-        return (self.size.currentText(), self.orient.currentText(),
-                self.views.isChecked(), self.iso.isChecked())
+        orient = "Portrait" if self.port.isChecked() else "Landscape"
+        SheetDialog.last_size = self.size.currentData()
+        SheetDialog.last_orient = orient
+        return (self.size.currentData(), orient, self.views.isChecked(), self.iso.isChecked())
 
 
 def ask_isometric():
-    box = QtWidgets.QMessageBox(Gui.getMainWindow())
-    box.setWindowTitle("DrawingKit - Standard views")
-    box.setText("Add front, top and right views.\nInclude an isometric view as well?")
-    yes = box.addButton("With isometric", QtWidgets.QMessageBox.YesRole)
-    box.addButton("Without", QtWidgets.QMessageBox.NoRole)
-    cancel = box.addButton(QtWidgets.QMessageBox.Cancel)
-    box.exec_() if hasattr(box, "exec_") else box.exec()
-    clicked = box.clickedButton()
-    if clicked == cancel:
-        return None
-    return clicked == yes
+    return ui.choose("Standard views", [(False, "Front · Top · Right"),
+                                        (True, "+ Isometric")])
 
 
 # ---------------------------------------------------------------------------
@@ -702,107 +682,81 @@ class HoleCallout:
             else "No holes seen end-on in the selected views")
 
 
-class FrameDialog(QtWidgets.QDialog):
-    """Feature control frame: characteristic, tolerance, modifiers, datums."""
+GDT_SYMBOLS = {
+    "position": "⌖", "flatness": "⏥", "straightness": "⏤",
+    "circularity": "○", "cylindricity": "⌭", "perpendicularity": "⟂",
+    "parallelism": "∥", "angularity": "∠", "profile_line": "⌒",
+    "profile_surface": "⌓", "concentricity": "◎", "symmetry": "⌯",
+    "circular_runout": "↗", "total_runout": "⌰",
+}
+
+
+class _SegmentRow:
+    """One frame row: symbol | ⌀ tol Ⓜ | A Ⓜ | B Ⓜ | C Ⓜ"""
+
+    def __init__(self, seg, show_char=True):
+        from . import gdt
+        self.char = ui.combo([(k, "%s  %s" % (GDT_SYMBOLS.get(k, ""), lab))
+                              for k, lab in gdt.CHARACTERISTICS], seg.get("char", "position"), 150)
+        self.char.setVisible(show_char)
+        self.dia = ui.toggle("⌀", seg.get("dia", True), "Diameter (cylindrical) zone")
+        self.tol = ui.field(seg.get("tol", "0.05"), 52, tip="Tolerance")
+        self.mod = ui.mmc_button(seg.get("mod", ""))
+        self.datums, self.dmods = [], []
+        for i in range(3):
+            d = ui.field((seg.get("datums") or ["", "", ""])[i], 26, "–",
+                         ("Primary", "Secondary", "Tertiary")[i] + " datum")
+            d.setMaxLength(3)
+            self.datums.append(d)
+            self.dmods.append(ui.mmc_button((seg.get("datum_mods") or ["", "", ""])[i]))
+
+    def widgets(self):
+        w = [self.char, self.dia, self.tol, self.mod]
+        for d, m in zip(self.datums, self.dmods):
+            w += [d, m]
+        return w
+
+    def value(self, char=None):
+        return {"char": char or self.char.currentData(), "tol": self.tol.text().strip() or "0.05",
+                "dia": self.dia.isChecked(), "mod": self.mod.value(),
+                "datums": [d.text().strip().upper() for d in self.datums],
+                "datum_mods": [m.value() for m in self.dmods]}
+
+
+class FrameDialog(ui.Popover):
+    """Feature control frame as one compact row, like the frame itself.
+    '+ Segment' adds a composite or stacked second row."""
 
     last = {"char": "position", "tol": "0.05", "dia": True, "mod": "",
             "datums": ["A", "B", ""], "datum_mods": ["", "", ""], "count": ""}
 
     def __init__(self, parent=None, count=""):
-        from . import gdt
-        super().__init__(parent)
-        self.setWindowTitle("DrawingKit - Geometric tolerance")
-        form = QtWidgets.QFormLayout(self)
-        self.char = QtWidgets.QComboBox()
-        for key, label in gdt.CHARACTERISTICS:
-            self.char.addItem(label, key)
-        self.char.setCurrentIndex(max(0, [k for k, _ in gdt.CHARACTERISTICS].index(self.last["char"])))
-        self.dia = QtWidgets.QCheckBox("Diameter zone (⌀)")
-        self.dia.setChecked(self.last["dia"])
-        self.tol = QtWidgets.QLineEdit(self.last["tol"])
-        self.mod = QtWidgets.QComboBox()
-        self.mod.addItems(["", "MMC", "LMC"])
-        self.mod.setCurrentText(self.last["mod"])
-        self.count = QtWidgets.QLineEdit(count or self.last.get("count", ""))
-        self.count.setPlaceholderText("e.g. 6X  (filled in when you click a hole)")
-        form.addRow("Characteristic", self.char)
-        form.addRow("Tolerance", self.tol)
-        form.addRow("", self.dia)
-        form.addRow("Material condition", self.mod)
-        self.datums, self.dmods = [], []
-        for i, name in enumerate(("Primary datum", "Secondary datum", "Tertiary datum")):
-            row = QtWidgets.QHBoxLayout()
-            d = QtWidgets.QLineEdit(self.last["datums"][i])
-            d.setMaxLength(3)
-            m = QtWidgets.QComboBox()
-            m.addItems(["", "MMC", "LMC"])
-            m.setCurrentText(self.last["datum_mods"][i])
-            row.addWidget(d)
-            row.addWidget(m)
-            form.addRow(name, row)
-            self.datums.append(d)
-            self.dmods.append(m)
-        form.addRow("Count above frame", self.count)
+        super().__init__("Tolerance frame", parent)
+        self.row1 = _SegmentRow(self.last)
+        self.add_row(*self.row1.widgets())
+        self.count = ui.field(count or self.last.get("count", ""), 40, "6X",
+                              "Count above the frame (filled in when you click one of several holes)")
+        self.more = ui.toggle("+ Segment", False, "Second row: composite or stacked frame")
+        self.add_row("Count", self.count, self.more, stretch=True)
+        self.kind = ui.combo([(True, "Composite"), (False, "Stacked")], True, 100)
+        self.row2 = _SegmentRow({"tol": "0.02", "dia": True, "datums": ["A", "", ""]}, show_char=False)
+        self.seg2 = self.add_row(self.kind, *self.row2.widgets())
+        self.seg2.setVisible(False)
+        self.kind.currentIndexChanged.connect(
+            lambda _i: self.row2.char.setVisible(not self.kind.currentData()))
+        self.more.toggled.connect(lambda on: (self.seg2.setVisible(on), self.adjustSize()))
 
-        # optional second segment: composite (shared symbol) or stacked
-        self.seg2 = QtWidgets.QGroupBox("Second segment")
-        self.seg2.setCheckable(True)
-        self.seg2.setChecked(False)
-        f2 = QtWidgets.QFormLayout(self.seg2)
-        self.mode2 = QtWidgets.QComboBox()
-        self.mode2.addItem("Composite (one symbol for both rows)", True)
-        self.mode2.addItem("Stacked (each row its own symbol)", False)
-        self.char2 = QtWidgets.QComboBox()
-        for key, label in gdt.CHARACTERISTICS:
-            self.char2.addItem(label, key)
-        self.tol2 = QtWidgets.QLineEdit("0.02")
-        self.dia2 = QtWidgets.QCheckBox("Diameter zone (⌀)")
-        self.dia2.setChecked(True)
-        self.mod2 = QtWidgets.QComboBox()
-        self.mod2.addItems(["", "MMC", "LMC"])
-        self.datums2, self.dmods2 = [], []
-        row2 = QtWidgets.QHBoxLayout()
-        for txt in ("A", "", ""):
-            d = QtWidgets.QLineEdit(txt)
-            d.setMaxLength(3)
-            m = QtWidgets.QComboBox()
-            m.addItems(["", "MMC", "LMC"])
-            row2.addWidget(d)
-            row2.addWidget(m)
-            self.datums2.append(d)
-            self.dmods2.append(m)
-        f2.addRow("Kind", self.mode2)
-        f2.addRow("Characteristic (stacked)", self.char2)
-        f2.addRow("Tolerance", self.tol2)
-        f2.addRow("", self.dia2)
-        f2.addRow("Material condition", self.mod2)
-        f2.addRow("Datums", row2)
-        self.mode2.currentIndexChanged.connect(
-            lambda _i: self.char2.setEnabled(not self.mode2.currentData()))
-        self.char2.setEnabled(False)
-        form.addRow(self.seg2)
-
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+    def exec_(self):
+        return self.run()
 
     def choice(self):
-        c = {"char": self.char.currentData(), "tol": self.tol.text().strip() or "0.05",
-             "dia": self.dia.isChecked(), "mod": self.mod.currentText(),
-             "datums": [d.text().strip().upper() for d in self.datums],
-             "datum_mods": [m.currentText() for m in self.dmods],
-             "count": self.count.text().strip()}
+        first = self.row1.value()
+        c = dict(first)
+        c["count"] = self.count.text().strip()
         FrameDialog.last = dict(c)
-        if self.seg2.isChecked():
-            composite = bool(self.mode2.currentData())
-            first = {k: c[k] for k in ("char", "tol", "dia", "mod", "datums", "datum_mods")}
-            second = {"char": c["char"] if composite else self.char2.currentData(),
-                      "tol": self.tol2.text().strip() or "0.02", "dia": self.dia2.isChecked(),
-                      "mod": self.mod2.currentText(),
-                      "datums": [d.text().strip().upper() for d in self.datums2],
-                      "datum_mods": [m.currentText() for m in self.dmods2]}
+        if self.more.isChecked():
+            composite = bool(self.kind.currentData())
+            second = self.row2.value(first["char"] if composite else None)
             c["rows"] = [first, second]
             c["composite"] = composite
         return c
@@ -920,9 +874,8 @@ class DatumFlag:
             warn("Open the page (or select a view on it) first.")
             return
         letter = annot.next_datum_letter(page.Document)
-        letter, ok = QtWidgets.QInputDialog.getText(
-            Gui.getMainWindow(), "DrawingKit - Datum", "Datum letter:", text=letter)
-        if not ok or not letter.strip():
+        letter = ui.ask_text("Datum", "Letter", letter, 34)
+        if not letter or not letter.strip():
             return
         doc = page.Document
         if dims:
@@ -962,15 +915,13 @@ class DatumTarget:
         if page is None:
             warn("Open the page (or select a view on it) first.")
             return
-        label, ok = QtWidgets.QInputDialog.getText(
-            Gui.getMainWindow(), "DrawingKit - Datum target", "Target (e.g. A1):", text="A1")
-        if not ok or not label.strip():
+        pop = ui.Popover("Datum target")
+        lab_f = ui.field("A1", 40, tip="Target, e.g. A1")
+        size_f = ui.field("", 60, "point", "Target area size, e.g. ⌀3 (blank for a point)")
+        pop.add_row(lab_f, "Area", size_f, stretch=True)
+        if not pop.run() or not lab_f.text().strip():
             return
-        size, ok = QtWidgets.QInputDialog.getText(
-            Gui.getMainWindow(), "DrawingKit - Datum target",
-            "Target area size (blank for a point, e.g. ⌀3):", text="")
-        if not ok:
-            return
+        label, size = lab_f.text(), size_f.text()
         show_page(page)
         Gui.updateGui()
         doc = page.Document
@@ -1175,14 +1126,13 @@ class AddRevision:
         if page is None:
             warn("Open the page (or select a view on it) first.")
             return
-        desc, ok = QtWidgets.QInputDialog.getText(
-            Gui.getMainWindow(), "DrawingKit - Revision", "What changed:", text="Initial release")
-        if not ok:
+        pop = ui.Popover("New revision")
+        desc_f = ui.field("Initial release", 200, tip="What changed")
+        who_f = ui.field("", 50, "by", "Approved by")
+        pop.add_row(desc_f, who_f)
+        if not pop.run():
             return
-        who, ok = QtWidgets.QInputDialog.getText(
-            Gui.getMainWindow(), "DrawingKit - Revision", "Approved by:", text="")
-        if not ok:
-            return
+        desc, who = desc_f.text(), who_f.text()
         doc = page.Document
         run_in_transaction(doc, "DrawingKit revision",
                            lambda: tables.add_revision(page, desc.strip(), who.strip()))
@@ -1190,66 +1140,67 @@ class AddRevision:
         say("Revision added")
 
 
-class DimensionDialog(QtWidgets.QDialog):
-    """Onshape-style dimension pop-up: text before/after, decimals,
-    tolerance, basic, reference."""
+def _num(text):
+    try:
+        return float(text.replace(",", "."))
+    except ValueError:
+        return 0.0
 
-    def __init__(self, settings, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("DrawingKit - Edit dimension")
-        form = QtWidgets.QFormLayout(self)
-        self.before = QtWidgets.QLineEdit(settings["before"])
-        self.before.setPlaceholderText("e.g. 3X  (⌀ or R stay as they are)")
-        self.after = QtWidgets.QLineEdit(settings["after"])
-        self.after.setPlaceholderText("e.g.  THRU  or  H7")
-        self.decimals = QtWidgets.QSpinBox()
-        self.decimals.setRange(0, 6)
-        self.decimals.setValue(settings["decimals"])
-        self.tol = QtWidgets.QComboBox()
-        self.tol.addItem("No tolerance", "none")
-        self.tol.addItem("Symmetric  ±", "symmetric")
-        self.tol.addItem("Deviation  +upper / −lower", "deviation")
-        self.tol.setCurrentIndex(["none", "symmetric", "deviation"].index(settings["tol"]))
-        self.upper = QtWidgets.QDoubleSpinBox()
-        self.lower = QtWidgets.QDoubleSpinBox()
-        for sb, v in ((self.upper, settings["upper"]), (self.lower, settings["lower"])):
-            sb.setDecimals(4)
-            sb.setRange(-1000, 1000)
-            sb.setSingleStep(0.01)
-            sb.setValue(v)
-        self.basic = QtWidgets.QCheckBox("Basic (boxed, theoretically exact) - e.g. locating "
-                                         "holes under a position tolerance")
-        self.basic.setChecked(settings["basic"])
-        self.reference = QtWidgets.QCheckBox("Reference (in parentheses)")
-        self.reference.setChecked(settings["reference"])
-        form.addRow("Text before", self.before)
-        form.addRow("Text after", self.after)
-        form.addRow("Decimals", self.decimals)
-        form.addRow("Tolerance", self.tol)
-        form.addRow("Upper (or ±)", self.upper)
-        form.addRow("Lower", self.lower)
-        form.addRow(self.basic)
-        form.addRow(self.reference)
+
+class DimensionDialog(ui.Popover):
+    """Onshape-style dimension pop-up:
+         [before] 12.00 [after]
+         [tol ▾] [+upper] [-lower]
+         [.00 ▾] [x] basic  (x) reference
+    """
+
+    def __init__(self, settings, parent=None, value=None):
+        super().__init__("Dimension", parent)
+        self.before = ui.field(settings["before"], 50, "3X", "Text before, e.g. 3X")
+        self.after = ui.field(settings["after"], 60, "H7", "Text after, e.g. THRU or H7")
+        self.value = QtWidgets.QLabel("" if value is None else "%.*f" % (settings["decimals"], value))
+        self.value.setMinimumWidth(48)
+        self.value.setAlignment(QtCore.Qt.AlignCenter)
+        self.add_row(self.before, self.value, self.after)
+        self.tol = ui.combo([("none", "No tol."), ("symmetric", "±"),
+                             ("deviation", "+ / −")], settings["tol"], 80)
+        def fmt(v):
+            return ("%g" % abs(v)) if abs(v) > 1e-12 else ""
+        self.upper = ui.field(fmt(settings["upper"]), 56, "0.05", "Upper (or ±) tolerance")
+        self.lower = ui.field(fmt(settings["lower"]), 56, "0.05", "Lower tolerance (minus)")
+        validator = QtGui.QDoubleValidator(0.0, 1000.0, 6)
+        validator.setNotation(QtGui.QDoubleValidator.StandardNotation)
+        validator.setLocale(QtCore.QLocale.c())
+        self.upper.setValidator(validator)
+        self.lower.setValidator(validator)
+        self.add_row(self.tol, self.upper, self.lower, stretch=True)
+        self.decimals = ui.combo([(0, "0"), (1, ".0"), (2, ".00"), (3, ".000"), (4, ".0000")],
+                                 settings["decimals"], 70)
+        self.basic = ui.toggle("[x] Basic", settings["basic"],
+                               "Basic (theoretically exact, boxed) - no tolerance")
+        self.reference = ui.toggle("(x) Ref", settings["reference"], "Reference (in parentheses)")
+        self.add_row(self.decimals, self.basic, self.reference, stretch=True)
 
         def sync(*_):
             basic = self.basic.isChecked()
             t = self.tol.currentData()
             self.tol.setEnabled(not basic)
-            self.upper.setEnabled(not basic and t != "none")
-            self.lower.setEnabled(not basic and t == "deviation")
+            self.upper.setVisible(not basic and t != "none")
+            self.lower.setVisible(not basic and t == "deviation")
+            if value is not None:
+                self.value.setText("%.*f" % (self.decimals.currentData(), value))
         self.basic.toggled.connect(sync)
         self.tol.currentIndexChanged.connect(sync)
+        self.decimals.currentIndexChanged.connect(sync)
         sync()
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+
+    def exec_(self):
+        return self.run()
 
     def choice(self):
         return {"before": self.before.text(), "after": self.after.text(),
-                "decimals": self.decimals.value(), "tol": self.tol.currentData(),
-                "upper": self.upper.value(), "lower": self.lower.value(),
+                "decimals": int(self.decimals.currentData()), "tol": self.tol.currentData(),
+                "upper": _num(self.upper.text()), "lower": _num(self.lower.text()),
                 "basic": self.basic.isChecked(), "reference": self.reference.isChecked()}
 
 
@@ -1271,7 +1222,11 @@ class EditDimension:
         if not dims:
             warn("Select one or more dimensions on the page first.")
             return
-        dlg = DimensionDialog(dimsmod.read_dimension(dims[0]), Gui.getMainWindow())
+        try:
+            raw = dims[0].getRawValue()
+        except Exception:
+            raw = None
+        dlg = DimensionDialog(dimsmod.read_dimension(dims[0]), Gui.getMainWindow(), raw)
         if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
             return
         c = dlg.choice()
@@ -1282,6 +1237,258 @@ class EditDimension:
         say("%d dimension(s) updated" % len(dims))
 
 
+class SmartDimension:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Dimension.svg"),
+                "MenuText": "Dimension",
+                "ToolTip": "Dimension like in the Sketcher: hover lights up a line, circle, "
+                           "point or circle centre; click one or two of them, move the mouse "
+                           "(above/below: horizontal, left/right: vertical, diagonal: true "
+                           "distance) and click to place. Two circles give centre-to-centre. "
+                           "Stays on until Esc."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import annot, interact, smartdim
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        show_page(page)
+        Gui.updateGui()
+        Gui.Selection.clearSelection()
+        st = {"view": None, "picks": [], "ents": {}, "hover": None}
+
+        def ents_of(view):
+            if view.Name not in st["ents"]:
+                st["ents"][view.Name] = smartdim.entities(view)
+            return st["ents"][view.Name]
+
+        def highlight(view, e, color):
+            s = core.view_scale(view)
+            if e.kind == "line":
+                return ("hl_line", [annot.view_point(view, e.pts[0]),
+                                    annot.view_point(view, e.pts[1])], color)
+            if e.kind in ("circle", "arc"):
+                return ("hl_circle", annot.view_point(view, e.point), e.radius * s, color)
+            return ("hl_point", annot.view_point(view, e.point), 1.6, color)
+
+        def same(a, b):
+            return a.kind == b.kind and a.index == b.index
+
+        def on_move(pt, _points):
+            return _on_move(pt, _points)
+
+        def _on_move(pt, _points):
+            view = st["view"] or interact._view_under(page, pt[0], pt[1], margin=3.0)
+            st["hover"] = None
+            if view is None:
+                return []
+            local = annot.page_to_local(view, *pt)
+            try:
+                hov = smartdim.pick(view, local, ents_of(view))
+            except Exception:
+                hov = None
+            st["hover"] = (view, hov) if hov is not None else None
+            shapes = [highlight(st["view"], p, "#1f77b4") for p in st["picks"]]
+            if hov is not None and not any(same(hov, p) for p in st["picks"]):
+                shapes.append(highlight(view, hov, "#ff7f0e"))
+            if st["picks"]:
+                txt = smartdim.preview_value(st["picks"], local)
+                if txt:
+                    shapes.append(("text", pt[0] + 2.0, pt[1] + 2.0, txt))
+            return shapes
+
+        def on_click(pt, points):
+            points.clear()
+            hov = st["hover"]
+            if hov is not None and len(st["picks"]) < 2 and \
+                    (st["view"] is None or core.same(hov[0], st["view"])) and \
+                    not any(same(hov[1], p) for p in st["picks"]):
+                st["view"] = hov[0]
+                st["picks"].append(hov[1])
+                return False
+            if st["picks"]:
+                view = st["view"]
+                local = annot.page_to_local(view, *pt)
+                t, _, why = smartdim.plan(st["picks"], local)
+                if t is None:
+                    say(why)
+                    return False
+                doc = page.Document
+                try:
+                    dim = run_in_transaction(
+                        doc, "DrawingKit dimension",
+                        lambda: smartdim.add_dimension(page, view, st["picks"], local, pt))
+                    doc.recompute()
+                    if dim.Type in ("Diameter", "Radius"):
+                        from . import holes
+                        holes.set_horizontal_text(dim)
+                    say("%s dimension added - pick the next, Esc to finish" % dim.Type)
+                except Exception as e:
+                    warn(str(e))
+                st["view"], st["picks"] = None, []
+                st["ents"].clear()
+            return False
+
+        interact.PagePicker(page, "DrawingKit dimension: click a line, circle or point (one or "
+                                  "two), move to choose, click to place. Esc to finish.",
+                            on_move=on_move, on_click=on_click, finish_on_right_click=False)
+
+
+def _one_click(page, hint, preview, done):
+    """Click once to place (Esc cancels)."""
+    from . import interact
+
+    def on_click(pt, points):
+        return len(points) >= 1
+
+    def on_done(points):
+        if points:
+            done(points[0])
+
+    interact.PagePicker(page, hint + "  (Esc: cancel)", on_move=lambda pt, pts: preview(pt),
+                        on_click=on_click, on_done=on_done, finish_on_right_click=False)
+
+
+class NoteDialog(ui.Popover):
+    """Text (several lines), size, font and leader on/off in one small pop-up."""
+
+    def __init__(self, text="", size=3.5, font="osifont", leader=False, editing=False):
+        super().__init__("Edit note" if editing else "Note")
+        self.text = QtWidgets.QPlainTextEdit(text)
+        # tall enough for the note's lines (3 to 8 rows), then it scrolls
+        rows = min(8, max(3, len(text.splitlines()) + 1))
+        lh = self.text.fontMetrics().lineSpacing()
+        self.text.setFixedSize(280, rows * lh + 12)
+        self.text.setTabChangesFocus(True)
+        self.text.setPlaceholderText("Note text (Enter for a new line)")
+        self.add_row(self.text)
+        self.style = ui.TextStyleRow(size, font)
+        row = self.style.widgets()
+        self.leader = None
+        if not editing:
+            self.leader = ui.toggle("↗ Leader", leader, "Leader with arrow to a feature")
+            row = row + [self.leader]
+        self.add_row(*row, stretch=True)
+        self.focus_on = self.text
+
+    def choice(self):
+        size, font = self.style.value()
+        return {"text": self.text.toPlainText().rstrip("\n"), "size": size, "font": font,
+                "leader": bool(self.leader and self.leader.isChecked())}
+
+
+class Note:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Note.svg"),
+                "MenuText": "Note",
+                "ToolTip": "Add a note: type the text (several lines are fine), pick its size "
+                           "and font, then click where it goes. With Leader on, click the "
+                           "feature first, then the place for the text. Select a note and "
+                           "run this again to edit it."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import annot
+        notes = [o for o in Gui.Selection.getSelection() if annot.is_note(o)]
+        if notes:
+            sym = notes[0]
+            size, font = annot.text_style(sym)
+            dlg = NoteDialog(annot.note_text(sym), size, font, editing=True)
+            if not dlg.run():
+                return
+            c = dlg.choice()
+            doc = sym.Document
+
+            def edit():
+                annot.set_note_text(sym, c["text"])
+                annot.set_text_style(sym, c["size"], c["font"])
+            run_in_transaction(doc, "DrawingKit edit note", edit)
+            doc.recompute()
+            say("Note updated")
+            return
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select a view on it) first.")
+            return
+        dlg = NoteDialog(size=annot.default_size(), font=annot.default_font())
+        if not dlg.run():
+            return
+        c = dlg.choice()
+        if not c["text"].strip():
+            return
+        lines = c["text"].splitlines()
+        h = (c["size"] or 3.5) * (1.6 * (len(lines) - 1) + 1.0)
+        w = max(len(ln) for ln in lines) * (c["size"] or 3.5) * 0.6
+        show_page(page)
+        Gui.updateGui()
+        doc = page.Document
+
+        def place(box, anchor=None):
+            sym = run_in_transaction(doc, "DrawingKit note", lambda: annot.add_note(
+                page, box, lines, anchor=anchor, size=c["size"], font=c["font"]))
+            doc.recompute()
+            say("%s placed; drag it to move, select it and run Note again to edit" % sym.Label)
+
+        if c["leader"]:
+            def preview(anchor, pt):
+                return [("line", [anchor, pt]), ("rect", pt[0], pt[1], w, h)]
+
+            def done(anchor, box):
+                place(box or (anchor[0] + w / 2 + 10, anchor[1] + 10), anchor)
+            _two_click(page, "Click the feature,", "click where the text goes.", preview, done)
+        else:
+            _one_click(page, "Click where the note goes.",
+                       lambda pt: [("rect", pt[0], pt[1], w, h)], lambda pt: place(pt))
+
+
+class TextStyle:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_TextStyle.svg"),
+                "MenuText": "Text size and font",
+                "ToolTip": "Change the text height and font of the selected dimensions, notes, "
+                           "datums, tolerance frames and tables (symbols grow with their "
+                           "text). With nothing selected it sets the size and font for new "
+                           "DrawingKit notes and symbols."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None
+
+    def Activated(self):
+        from . import annot
+        objs = [o for o in Gui.Selection.getSelection() if annot.text_style(o) is not None]
+        if Gui.Selection.getSelection() and not objs:
+            warn("The selection has no text. Select dimensions, notes or DrawingKit symbols "
+                 "(or nothing, to set the defaults).")
+            return
+        if objs:
+            size, font = annot.text_style(objs[0])
+            title = "Text of %d item%s" % (len(objs), "" if len(objs) == 1 else "s")
+        else:
+            size, font = annot.default_size(), annot.default_font()
+            title = "Default text for new notes and symbols"
+        pop = ui.Popover(title)
+        row = ui.TextStyleRow(size, font)
+        pop.add_row(*row.widgets(), stretch=True)
+        if not pop.run():
+            return
+        size, font = row.value()
+        if not objs:
+            annot.set_defaults(size, font)
+            say("New notes and symbols: %g mm %s" % (size or annot.default_size(), font))
+            return
+        doc = objs[0].Document
+        run_in_transaction(doc, "DrawingKit text size and font",
+                           lambda: [annot.set_text_style(o, size, font) for o in objs])
+        doc.recompute()
+        say("Text updated on %d item(s)" % len(objs))
+
+
 COMMANDS = [
     ("DrawingKit_NewSheet", NewSheet()),
     ("DrawingKit_StandardViews", StandardViews()),
@@ -1290,12 +1497,15 @@ COMMANDS = [
     ("DrawingKit_AlignedSection", AlignedSection()),
     ("DrawingKit_DetailView", DetailView()),
     ("DrawingKit_AuxView", AuxiliaryView()),
+    ("DrawingKit_Dimension", SmartDimension()),
     ("DrawingKit_CenterMarks", CenterMarks()),
     ("DrawingKit_HoleCallout", HoleCallout()),
     ("DrawingKit_EditDimension", EditDimension()),
     ("DrawingKit_Datum", DatumFlag()),
     ("DrawingKit_DatumTarget", DatumTarget()),
     ("DrawingKit_ToleranceFrame", ToleranceFrame()),
+    ("DrawingKit_Note", Note()),
+    ("DrawingKit_TextStyle", TextStyle()),
     ("DrawingKit_HoleTable", HoleTable()),
     ("DrawingKit_FillTitleBlock", FillTitleBlock()),
     ("DrawingKit_Revision", AddRevision()),
@@ -1312,10 +1522,11 @@ COMMAND_GROUPS = [
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
                           "DrawingKit_AlignedSection", "DrawingKit_DetailView",
                           "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_SpeedToggle"]),
-    ("DrawingKit annotation", ["DrawingKit_CenterMarks", "DrawingKit_HoleCallout",
+    ("DrawingKit annotation", ["DrawingKit_Dimension", "DrawingKit_CenterMarks", "DrawingKit_HoleCallout",
                                "DrawingKit_EditDimension",
                                "DrawingKit_Datum", "DrawingKit_DatumTarget",
-                               "DrawingKit_ToleranceFrame"]),
+                               "DrawingKit_ToleranceFrame", "DrawingKit_Note",
+                               "DrawingKit_TextStyle"]),
     ("DrawingKit tables", ["DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
                            "DrawingKit_Revision"]),
 ]

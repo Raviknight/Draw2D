@@ -866,6 +866,90 @@ class TestAnnotations(DocTest):
         groups = holes.group_holes(hs)
         self.assertIn(6, [len(g) for g in groups])
 
+    @staticmethod
+    def _svg_size(sym):
+        import re
+        w = float(re.search(r'width="([\d.]+)mm"', sym.Symbol).group(1))
+        h = float(re.search(r'height="([\d.]+)mm"', sym.Symbol).group(1))
+        return w, h
+
+    def test_plain_note_with_several_lines(self):
+        import xml.etree.ElementTree as ET
+        n = self.annot.add_note(self.page, (60, 60), ["ALL FILLETS R1", "BREAK SHARP EDGES"])
+        ET.fromstring(n.Symbol)
+        self.assertEqual(list(n.EditableTexts), ["ALL FILLETS R1", "BREAK SHARP EDGES"])
+        self.assertEqual(n.DrawingKitAnchorKind, "free")
+        self.assertNotIn("<path", n.Symbol)              # no leader
+        self.assertAlmostEqual(float(n.X), 60.0, delta=6)
+        self.assertTrue(self.annot.is_note(n))
+
+    def test_note_with_leader_follows_the_view(self):
+        x0, y0, x1, y1 = core.view_box(self.right)
+        n = self.annot.add_note(self.page, (x1 + 30, y1 + 10), ["CHAMFER 1X45°"],
+                                anchor=((x0 + x1) / 2, y1))
+        self.assertEqual(n.DrawingKitAnchorKind, "view")
+        self.assertIn("fill:#000000", n.Symbol)        # the arrow head
+        before = float(n.X)
+        self.group.X = float(self.group.X) + 10
+        self.annot.refresh(self.annot.attached_to(self.group))
+        self.assertAlmostEqual(float(n.X) - before, 10.0, places=6)
+
+    def test_edit_note_text(self):
+        n = self.annot.add_note(self.page, (60, 60), ["ONE"])
+        self.annot.set_note_text(n, "FIRST LINE\nSECOND LINE\nTHIRD")
+        self.assertEqual(list(n.EditableTexts), ["FIRST LINE", "SECOND LINE", "THIRD"])
+        self.assertEqual(self.annot.note_text(n), "FIRST LINE\nSECOND LINE\nTHIRD")
+
+    def test_note_size_and_font(self):
+        n = self.annot.add_note(self.page, (60, 60), ["NOTE"], size=7, font="DejaVu Sans")
+        self.assertEqual(self.annot.text_style(n), (7.0, "DejaVu Sans"))
+        self.assertIn("font-size:7px", n.Symbol)
+        self.assertIn("DejaVu Sans", n.Symbol)
+
+    def test_frame_grows_with_its_text(self):
+        fr = self.annot.add_frame(self.page, (300, 230),
+                                  {"char": "flatness", "tol": "0.05", "datums": ["", "", ""]})
+        self.annot.set_text_style(fr, size=3.5)
+        w1, h1 = self._svg_size(fr)
+        self.assertTrue(self.annot.set_text_style(fr, size=7.0, font="Arial"))
+        w2, h2 = self._svg_size(fr)
+        self.assertAlmostEqual((w2 - 2) / (w1 - 2), 2.0, delta=0.05)   # 1 mm margins
+        self.assertAlmostEqual((h2 - 2) / (h1 - 2), 2.0, delta=0.05)
+        self.assertIn("Arial", fr.Symbol)
+        self.assertEqual(list(fr.EditableTexts), ["0.05"])
+
+    def test_datum_and_target_scale(self):
+        x0, y0, x1, y1 = core.view_box(self.right)
+        d = self.annot.add_datum(self.page, (x0 + x1) / 2, y0)
+        self.annot.set_text_style(d, size=5.0)
+        self.assertIn("font-size:5px", d.Symbol)
+        self.assertEqual(list(d.EditableTexts), ["A"])
+        t = self.annot.add_target(self.page, (x0 + x1) / 2, y1, "A1", "⌀3")
+        self.annot.set_text_style(t, size=2.5)
+        self.assertEqual(sorted(t.EditableTexts), ["A1", "⌀3"])
+
+    def test_defaults_for_new_symbols(self):
+        g = App.ParamGet(self.annot.PREFS)
+        old = (g.GetFloat("TextSize", 0.0), g.GetString("Font", ""))
+        try:
+            self.annot.set_defaults(6.0, "DejaVu Sans")
+            n = self.annot.add_note(self.page, (60, 60), ["X"])
+            self.assertEqual(self.annot.text_style(n), (6.0, "DejaVu Sans"))
+        finally:
+            g.RemFloat("TextSize")
+            g.RemString("Font")
+            if old[0]:
+                g.SetFloat("TextSize", old[0])
+            if old[1]:
+                g.SetString("Font", old[1])
+
+    def test_techdraw_annotation_style(self):
+        a = self.doc.addObject("TechDraw::DrawViewAnnotation", "Anno")
+        self.page.addView(a)
+        a.Text = ["HELLO"]
+        self.assertTrue(self.annot.set_text_style(a, 6.0, "DejaVu Sans"))
+        self.assertEqual(self.annot.text_style(a), (6.0, "DejaVu Sans"))
+
 
 def math_dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
@@ -1021,6 +1105,92 @@ class TestEditDimension(DocTest):
         self.assertTrue(s["reference"])
         self.assertEqual(s["tol"], "symmetric")
         self.assertEqual(d.FormatSpec, "(%.1f)")
+
+
+def plate_two_holes(doc):
+    """80 x 50 x 10 plate, holes r5 at (20, 25) and (60, 25)."""
+    import Part
+    shp = Part.makeBox(80, 50, 10).cut(Part.makeCylinder(5, 30, App.Vector(20, 25, -5))) \
+        .cut(Part.makeCylinder(5, 30, App.Vector(60, 25, -5)))
+    obj = doc.addObject("Part::Feature", "Plate")
+    obj.Shape = shp
+    doc.recompute()
+    return obj
+
+
+class TestSmartDimension(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import smartdim
+        self.sd = smartdim
+        self.part = plate_two_holes(self.doc)
+        self.page = core.create_page(self.doc, "A4", "Landscape")
+        self.g = core.add_standard_views(self.page, [self.part])
+        self.doc.recompute()
+        self.v = self.g.Anchor            # looks at the 80 x 50 face (best front)
+        self.ents = self.sd.entities(self.v)
+
+    def find(self, kind, near):
+        return self.sd.pick(self.v, near, [e for e in self.ents if e.kind == kind], tol=1.0)
+
+    def test_two_circles_centre_to_centre(self):
+        a = self.find("circle", (-20 + 5, 0))     # hole edges (view centre is the plate middle)
+        b = self.find("circle", (20 + 5, 0))
+        self.assertIsNotNone(a)
+        self.assertIsNotNone(b)
+        t, ents, _ = self.sd.plan([a, b], (0, 10))
+        self.assertEqual(t, "DistanceX")
+        self.assertEqual(self.sd.preview_value([a, b], (0, 10)), "40.00")
+        d = self.sd.add_dimension(self.page, self.v, [a, b], (0, 10))
+        self.doc.recompute()
+        self.assertAlmostEqual(d.getRawValue(), 40.0, places=6)
+        self.assertIn("Up-to-date", d.State)
+
+    def test_circle_gives_diameter(self):
+        a = self.find("circle", (-15, 0))
+        d = self.sd.add_dimension(self.page, self.v, [a], (-30, 20))
+        self.doc.recompute()
+        self.assertEqual(d.Type, "Diameter")
+        self.assertAlmostEqual(d.getRawValue(), 10.0, places=6)
+
+    def test_line_length_and_mouse_choice(self):
+        top = self.find("line", (0, 25))
+        self.assertEqual(self.sd.plan([top], (0, 40))[0], "DistanceX")
+        d = self.sd.add_dimension(self.page, self.v, [top], (0, 40))
+        self.doc.recompute()
+        self.assertAlmostEqual(d.getRawValue(), 80.0, places=6)
+
+    def test_points_horizontal_vertical_true(self):
+        p = self.sd.Ent("vertex", 0, [(0.0, 0.0)])
+        q = self.sd.Ent("vertex", 1, [(30.0, 40.0)])
+        self.assertEqual(self.sd.plan([p, q], (15, 60))[0], "DistanceX")   # above
+        self.assertEqual(self.sd.plan([p, q], (50, 20))[0], "DistanceY")   # right
+        self.assertEqual(self.sd.plan([p, q], (50, 60))[0], "Distance")    # diagonal
+        self.assertEqual(self.sd.preview_value([p, q], (50, 60)), "50.00")
+
+    def test_circle_to_line_and_parallel_lines_and_angle(self):
+        hole = self.find("circle", (-15, 0))
+        top = self.find("line", (0, 25))
+        bottom = self.find("line", (0, -25))
+        left = self.find("line", (-40, 0))
+        d = self.sd.add_dimension(self.page, self.v, [hole, top], (-30, 10))
+        self.doc.recompute()
+        self.assertAlmostEqual(d.getRawValue(), 25.0, places=6)
+        d2 = self.sd.add_dimension(self.page, self.v, [top, bottom], (45, 0))
+        self.doc.recompute()
+        self.assertAlmostEqual(d2.getRawValue(), 50.0, places=6)
+        self.assertEqual(self.sd.plan([top, left], (0, 0))[0], "Angle")
+        self.assertEqual(self.sd.preview_value([top, left], (0, 0)), "90.0°")
+
+    def test_hovering_a_circle_edge_picks_the_circle(self):
+        # the circle's seam point sits on its edge; it must not be picked
+        e = self.sd.pick(self.v, (-15.0, 0.0), self.ents)
+        self.assertEqual(e.kind, "circle")
+
+    def test_points_beat_edges_when_picking(self):
+        # right at a hole's centre: the centre is picked, not the circle edge
+        e = self.sd.pick(self.v, (-20, 0), self.ents, tol=6.0)
+        self.assertTrue(e.is_point())
 
 
 class TestSpeed(DocTest):

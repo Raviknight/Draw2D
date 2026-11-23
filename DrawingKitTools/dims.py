@@ -51,6 +51,8 @@ def set_dimension(dim, before="", after="", decimals=2, tol="none", upper=0.0, l
     tolerance (it is the theoretically exact value), so ``basic`` wins."""
     if tol not in TOL_TYPES:
         raise ValueError("Tolerance type must be one of %s" % ", ".join(TOL_TYPES))
+    if tol != "none" and abs(float(upper)) < 1e-12 and abs(float(lower)) < 1e-12:
+        tol = "none"   # a zero tolerance would print as '± 0.00'
     num = "%%.%df" % int(decimals)
     if reference:
         num = "(" + num + ")"

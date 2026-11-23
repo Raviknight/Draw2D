@@ -93,11 +93,12 @@ def symbol_paths(name, x0, y0, h=H):
     raise ValueError("Unknown characteristic %r" % name)
 
 
-def _text(x, y, txt, editable=None, anchor="middle", size=FONT):
+def _text(x, y, txt, editable=None, anchor="middle", size=FONT, font="osifont"):
     ed = ' freecad:editable="%s"' % editable if editable else ""
-    return ('<text x="%.3f" y="%.3f"%s style="font-size:%gpx;font-family:osifont;'
+    font = (font or "osifont").replace("'", "").replace('"', "").replace(";", "")
+    return ('<text x="%.3f" y="%.3f"%s style="font-size:%gpx;font-family:\'%s\';'
             'text-anchor:%s;fill:#000000;stroke:none"><tspan>%s</tspan></text>'
-            % (x, y, ed, size, anchor, _esc(txt)))
+            % (x, y, ed, size, _esc(font), anchor, _esc(txt)))
 
 
 def _diameter_sign(x, cy, d=2.6):

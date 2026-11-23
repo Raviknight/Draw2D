@@ -33,6 +33,49 @@ CENTRE = "DrawingKitCentre"     # Vector: where we last put the symbol centre
 H = gdt.H
 STROKE = gdt.STROKE
 ARROW = 3.0
+PREFS = "User parameter:BaseApp/Preferences/Mod/DrawingKit"
+SIZES = [2.5, 3.5, 5.0, 7.0, 10.0]
+
+
+def default_size():
+    """Text height (mm) used for new DrawingKit annotations and notes.
+    Until one is set, TechDraw's own dimension text size, so notes match."""
+    try:
+        v = App.ParamGet(PREFS).GetFloat("TextSize", 0.0)
+        if v > 0.5:
+            return v
+        v = App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/Dimensions").GetFloat("FontSize", 3.5)
+        return v if v > 0.5 else 3.5
+    except Exception:
+        return 3.5
+
+
+def default_font():
+    """Until one is set, TechDraw's label font."""
+    try:
+        f = App.ParamGet(PREFS).GetString("Font", "")
+        if f:
+            return f
+        return App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/Labels").GetString(
+            "LabelFont", "osifont") or "osifont"
+    except Exception:
+        return "osifont"
+
+
+def set_defaults(size=None, font=None):
+    g = App.ParamGet(PREFS)
+    if size:
+        g.SetFloat("TextSize", float(size))
+    if font:
+        g.SetString("Font", font)
+
+
+def text_scale(p):
+    """Everything in a symbol scales with its text: 3.5 mm text -> 1.0."""
+    try:
+        return max(0.2, float(p.get("tsize", 3.5)) / 3.5)
+    except (TypeError, ValueError):
+        return 1.0
 
 _busy = set()
 
@@ -137,9 +180,11 @@ def anchor_page(sym):
 # Drawing (page coordinates, Y up) -> SVG
 # ---------------------------------------------------------------------------
 class Sketch:
-    def __init__(self):
+    def __init__(self, k=1.0, font=None):
         self.items = []
         self.xs, self.ys = [], []
+        self.k = k                       # text size / 3.5 mm
+        self.font = font or "osifont"
 
     def _p(self, x, y):
         self.xs.append(x)
@@ -173,9 +218,15 @@ class Sketch:
         self.items.append(("raw", x0, ytop, fragment))
 
     def text(self, x, y, txt, size=gdt.FONT, anchor="middle", editable=None):
+        """``size`` is the size at 3.5 mm lettering; it is scaled by k."""
+        size = size * self.k
         w = len(txt) * size * 0.6
-        self._p(x - w, y - size * 0.4)
-        self._p(x + w, y + size * 0.7)
+        if anchor == "start":
+            self._p(x, y - size * 0.4)
+            self._p(x + w, y + size * 0.7)
+        else:
+            self._p(x - w, y - size * 0.4)
+            self._p(x + w, y + size * 0.7)
         self.items.append(("text", x, y, txt, size, anchor, editable))
 
     def svg(self):
@@ -213,7 +264,7 @@ class Sketch:
                            % (w, X(c[0]), Y(c[1]), r))
             else:
                 _, x, y, txt, size, anchor, ed = it
-                texts.append(gdt._text(X(x), Y(y) + size * 0.36, txt, ed, anchor, size))
+                texts.append(gdt._text(X(x), Y(y) + size * 0.36, txt, ed, anchor, size, self.font))
         out.append('</g>')
         out.extend(texts)
         out.append('</svg>')
@@ -229,9 +280,11 @@ def _box_edge_towards(cx, cy, w, h, px, py):
 
 
 def draw_datum(sk, anchor, sdir, box_centre, letter):
+    k = sk.k
+    Hk = H * k
     ax, ay = anchor
     sx, sy = sdir
-    tri = gdt.DATUM_TRI
+    tri = gdt.DATUM_TRI * k
     th = tri * 0.87
     nx, ny = -sy, sx
     base0 = (ax + nx * tri / 2, ay + ny * tri / 2)
@@ -239,10 +292,10 @@ def draw_datum(sk, anchor, sdir, box_centre, letter):
     apex = (ax + sx * th, ay + sy * th)
     sk.poly([base0, base1, apex], fill=True)
     bx, by = box_centre
-    sk.rect(bx - H / 2, by - H / 2, bx + H / 2, by + H / 2)
+    sk.rect(bx - Hk / 2, by - Hk / 2, bx + Hk / 2, by + Hk / 2)
     sk.text(bx, by, letter, editable="datum")
-    end = _box_edge_towards(bx, by, H, H, apex[0], apex[1])
-    knee = (apex[0] + sx * 2.0, apex[1] + sy * 2.0)
+    end = _box_edge_towards(bx, by, Hk, Hk, apex[0], apex[1])
+    knee = (apex[0] + sx * 2.0 * k, apex[1] + sy * 2.0 * k)
     # straight out of the triangle first, then to the box
     if math.hypot(end[0] - knee[0], end[1] - knee[1]) > 0.5:
         sk.line(apex, knee)
@@ -256,9 +309,10 @@ def draw_arrow(sk, tip, frm):
     n = math.hypot(dx, dy) or 1.0
     ux, uy = dx / n, dy / n
     px, py = -uy, ux
-    back = (tip[0] - ux * ARROW, tip[1] - uy * ARROW)
-    sk.poly([tip, (back[0] + px * ARROW * 0.3, back[1] + py * ARROW * 0.3),
-             (back[0] - px * ARROW * 0.3, back[1] - py * ARROW * 0.3)], fill=True)
+    a = ARROW * sk.k
+    back = (tip[0] - ux * a, tip[1] - uy * a)
+    sk.poly([tip, (back[0] + px * a * 0.3, back[1] + py * a * 0.3),
+             (back[0] - px * a * 0.3, back[1] - py * a * 0.3)], fill=True)
 
 
 def frame_segments(p):
@@ -275,14 +329,15 @@ def _field(name, row):
     return name if row == 0 else "%s_%d" % (name, row + 1)
 
 
-def segment_cells(seg):
+def segment_cells(seg, k=1.0):
     """(tolerance cell width, [datum cell widths]) of one segment."""
     tol = seg.get("tol") or "0.05"
-    tol_w = len(tol) * 2.2 + 3.0 + (3.4 if seg.get("dia") else 0.0) + (4.2 if seg.get("mod") else 0.0)
+    tol_w = (len(tol) * 2.2 + 3.0 + (3.4 if seg.get("dia") else 0.0)
+             + (4.2 if seg.get("mod") else 0.0)) * k
     datum_ws = []
     for d, m in zip(seg.get("datums") or [], seg.get("datum_mods") or ["", "", ""]):
         if d:
-            datum_ws.append(H + (3.6 if m else 0.0) + max(0, len(d) - 1) * 2.2)
+            datum_ws.append((H + (3.6 if m else 0.0) + max(0, len(d) - 1) * 2.2) * k)
     return tol_w, datum_ws
 
 
@@ -297,11 +352,13 @@ def draw_frame(sk, anchor, box_centre, p, values):
     Several segments stack downwards. Composite: one characteristic box
     spans all rows (ASME Y14.5 composite tolerancing). Stacked: each row
     has its own characteristic."""
+    k = sk.k
+    H = gdt.H * k
     segs = frame_segments(p)
     composite = bool(p.get("composite")) and len(segs) > 1
     widths = []
     for seg in segs:
-        tol_w, datum_ws = segment_cells(seg)
+        tol_w, datum_ws = segment_cells(seg, k)
         widths.append(H + tol_w + sum(datum_ws))
     W = max(widths)
     n = len(segs)
@@ -315,36 +372,36 @@ def draw_frame(sk, anchor, box_centre, p, values):
         y1 = ytop - r * H
         y0 = y1 - H
         cy = (y0 + y1) / 2.0
-        tol_w, datum_ws = segment_cells(seg)
+        tol_w, datum_ws = segment_cells(seg, k)
         row_w = H + tol_w + sum(datum_ws)
         sk.rect(x0 + (H if composite else 0.0), y0, x0 + row_w, y1)
         x = x0 + H
         if not composite:
             sk.line((x, y0), (x, y1))
             _symbol(sk, seg.get("char", "position"), x0, y1)
-        tx = x + 1.5
+        tx = x + 1.5 * k
         if seg.get("dia"):
-            _dia(sk, tx, cy)
-            tx += 3.4
+            _dia(sk, tx, cy, 2.6 * k)
+            tx += 3.4 * k
         name = _field("tolerance", r)
         sk.text(tx, cy, values.get(name, seg.get("tol", "")), anchor="start", editable=name)
         x += tol_w
         if seg.get("mod"):
-            sk.circle((x - 2.4, cy), 1.8)
-            sk.text(x - 2.4, cy + 0.1, gdt.MODIFIERS[seg["mod"]], size=2.6)
+            sk.circle((x - 2.4 * k, cy), 1.8 * k)
+            sk.text(x - 2.4 * k, cy + 0.1 * k, gdt.MODIFIERS[seg["mod"]], size=2.6)
         pairs = [(d, m) for d, m in zip(seg.get("datums") or [], seg.get("datum_mods") or ["", "", ""]) if d]
         for i, ((d, m), w) in enumerate(zip(pairs, datum_ws)):
             sk.line((x, y0), (x, y1))
             name = _field("datum%d" % (i + 1), r)
-            sk.text(x + (w - (3.6 if m else 0.0)) / 2.0, cy, values.get(name, d), editable=name)
+            sk.text(x + (w - (3.6 * k if m else 0.0)) / 2.0, cy, values.get(name, d), editable=name)
             if m:
-                mx = x + w - 2.2
-                sk.circle((mx, cy), 1.5)
-                sk.text(mx, cy + 0.1, gdt.MODIFIERS[m], size=2.2)
+                mx = x + w - 2.2 * k
+                sk.circle((mx, cy), 1.5 * k)
+                sk.text(mx, cy + 0.1 * k, gdt.MODIFIERS[m], size=2.2)
             x += w
     count = values.get("count", p.get("count", ""))
     if count:
-        sk.text(x0, ytop + 2.5, count, anchor="start", editable="count")
+        sk.text(x0, ytop + 2.5 * k, count, anchor="start", editable="count")
     if anchor is not None:
         # leave from the left or right end of the first row, as usual
         first_cy = ytop - H / 2.0
@@ -356,7 +413,8 @@ def draw_frame(sk, anchor, box_centre, p, values):
 
 def _symbol(sk, name, x0, ytop):
     """Characteristic symbol in the frame's first H x H cell."""
-    sk.raw(x0, ytop, H, H, gdt.symbol_paths(name, 0, 0))
+    h = H * sk.k
+    sk.raw(x0, ytop, h, h, gdt.symbol_paths(name, 0, 0, h))
 
 
 def _dia(sk, x, cy, d=2.6):
@@ -368,19 +426,47 @@ def _dia(sk, x, cy, d=2.6):
 def draw_target(sk, anchor, box_centre, label, size_text):
     """Datum target: X at the point, leader to a divided circle."""
     ax, ay = anchor
-    k = 1.4
-    sk.line((ax - k, ay - k), (ax + k, ay + k), 0.5)
-    sk.line((ax - k, ay + k), (ax + k, ay - k), 0.5)
-    r = 5.0
+    s = sk.k
+    c = 1.4 * s
+    sk.line((ax - c, ay - c), (ax + c, ay + c), 0.5)
+    sk.line((ax - c, ay + c), (ax + c, ay - c), 0.5)
+    r = 5.0 * s
     bx, by = box_centre
     sk.circle((bx, by), r)
     sk.line((bx - r, by), (bx + r, by))
     if size_text:
-        sk.text(bx, by + 2.2, size_text, size=2.5, editable="size")
-    sk.text(bx, by - 2.4, label, size=3.0, editable="target")
+        sk.text(bx, by + 2.2 * s, size_text, size=2.5, editable="size")
+    sk.text(bx, by - 2.4 * s, label, size=3.0, editable="target")
     d = math.hypot(ax - bx, ay - by) or 1.0
     start = (bx + (ax - bx) / d * r, by + (ay - by) / d * r)
     sk.line(start, anchor)
+
+
+def note_lines(p, values):
+    lines = list(p.get("lines") or [""])
+    return [values.get("line%d" % (i + 1), ln) for i, ln in enumerate(lines)]
+
+
+def draw_note(sk, anchor, box_centre, lines):
+    """Left-aligned multi-line note centred on box_centre; with a leader
+    (horizontal shoulder, then to the arrow tip) when anchor is given."""
+    size = gdt.FONT * sk.k
+    pitch = size * 1.6
+    w = max(len(ln) for ln in lines) * size * 0.6 if lines else size
+    h = pitch * (len(lines) - 1)
+    bx, by = box_centre
+    x0 = bx - w / 2.0
+    ytop = by + h / 2.0
+    for i, ln in enumerate(lines):
+        sk.text(x0, ytop - i * pitch, ln, anchor="start", editable="line%d" % (i + 1))
+    if anchor is not None:
+        left = anchor[0] < bx
+        gap = size * 0.5
+        end = (x0 - gap if left else x0 + w + gap, ytop)
+        shoulder = (end[0] - size if left else end[0] + size, ytop)
+        sk.line(end, shoulder)
+        sk.line(shoulder, anchor)
+        draw_arrow(sk, anchor, shoulder)
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +497,7 @@ def render(sym):
         (ax, ay), sdir = anchor_page(sym)
         off = getattr(sym, OFFSET, App.Vector())
         box = (ax + off.x, ay + off.y)
-        sk = Sketch()
+        sk = Sketch(text_scale(p), p.get("font"))
         kind = getattr(sym, KIND)
         fields = []
         if kind == "datum":
@@ -423,8 +509,11 @@ def render(sym):
             draw_frame(sk, anchor, box, p, values)
         elif kind == "tag":
             sk.text(box[0], box[1], p.get("label", ""), size=2.5)
-            if math.hypot(off.x, off.y) > 8.0:
-                sk.line((box[0], box[1] - 1.5), (ax, ay), 0.25)
+            if math.hypot(off.x, off.y) > 8.0 * sk.k:
+                sk.line((box[0], box[1] - 1.5 * sk.k), (ax, ay), 0.25)
+        elif kind == "note":
+            anchor = None if getattr(sym, ANCHOR_KIND, "free") == "free" else (ax, ay)
+            draw_note(sk, anchor, box, note_lines(p, values))
         elif kind in ("holetable", "revtable"):
             from . import tables
             tables.draw_table(sk, box, p, values)
@@ -456,7 +545,7 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset):
     doc = page.Document
     sym = doc.addObject("TechDraw::DrawViewSymbol", {
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
-        "holetable": "HoleTable", "revtable": "RevisionTable"}[kind])
+        "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note"}[kind])
     page.addView(sym)
     sym.ScaleType = "Custom"
     sym.Scale = 1.0
@@ -476,6 +565,9 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset):
         setattr(sym, LINK, link)
     setattr(sym, ANCHOR, App.Vector(anchor[0], anchor[1], 0))
     setattr(sym, OFFSET, App.Vector(offset[0], offset[1], 0))
+    params = dict(params)
+    params.setdefault("tsize", default_size())
+    params.setdefault("font", default_font())
     setattr(sym, PARAMS, json.dumps(params))
     return render(sym)
 
@@ -676,3 +768,88 @@ def used_datum_letters(doc):
 
 def next_datum_letter(doc):
     return core.next_free_letter(used_datum_letters(doc))
+
+
+def add_note(page, box, lines, anchor=None, size=None, font=None):
+    """Note at page point ``box`` (its centre). With ``anchor`` a leader runs
+    to that page point, attached to the view under it."""
+    lines = [ln for ln in (lines if isinstance(lines, list) else str(lines).splitlines())] or [""]
+    p = {"lines": lines}
+    if size:
+        p["tsize"] = float(size)
+    if font:
+        p["font"] = font
+    label = "Note " + (lines[0][:20] if lines and lines[0] else "")
+    if anchor is None:
+        return _new(page, "note", label.strip(), p, "free", None, box, (0, 0))
+    kind, view, local, _ = attach_point(page, anchor[0], anchor[1])
+    if kind == "view":
+        hit = nearest_edge(view, local, max_dist=4.0 / core.view_scale(view))
+        if hit is not None:
+            local = hit[0]
+    return _new(page, "note", label.strip(), p, kind, view,
+                local if kind == "view" else anchor, (box[0] - anchor[0], box[1] - anchor[1]))
+
+
+def is_note(obj):
+    return getattr(obj, KIND, "") == "note"
+
+
+def note_text(sym):
+    return "\n".join(note_lines(_params(sym), _values(sym)))
+
+
+def set_note_text(sym, text):
+    lines = str(text).splitlines() or [""]
+    p = _params(sym)
+    p["lines"] = lines
+    p["fields"] = []      # forget the old texts; render writes the new ones
+    setattr(sym, PARAMS, json.dumps(p))
+    sym.Label = ("Note " + lines[0][:20]).strip()
+    return render(sym)
+
+
+def text_style(obj):
+    """(size mm, font) of a dimension, TechDraw annotation or DrawingKit symbol;
+    None if the object has no text."""
+    if is_annotation(obj):
+        p = _params(obj)
+        return float(p.get("tsize", 3.5)), p.get("font", "osifont")
+    if obj.isDerivedFrom("TechDraw::DrawViewDimension") or obj.isDerivedFrom("TechDraw::DrawViewBalloon"):
+        vo = getattr(obj, "ViewObject", None)
+        if vo is not None and hasattr(vo, "Fontsize"):
+            return float(getattr(vo.Fontsize, "Value", vo.Fontsize)), vo.Font
+        return None
+    if obj.isDerivedFrom("TechDraw::DrawViewAnnotation"):
+        return float(obj.TextSize), obj.Font
+    return None
+
+
+def set_text_style(obj, size=None, font=None):
+    """Change text height (mm) and/or font. Returns True if obj has text."""
+    if is_annotation(obj):
+        p = _params(obj)
+        if size:
+            p["tsize"] = float(size)
+        if font:
+            p["font"] = font
+        setattr(obj, PARAMS, json.dumps(p))
+        render(obj)
+        return True
+    if obj.isDerivedFrom("TechDraw::DrawViewDimension") or obj.isDerivedFrom("TechDraw::DrawViewBalloon"):
+        vo = getattr(obj, "ViewObject", None)
+        if vo is None or not hasattr(vo, "Fontsize"):
+            return False
+        if size:
+            vo.Fontsize = float(size)
+        if font:
+            vo.Font = font
+        obj.touch()
+        return True
+    if obj.isDerivedFrom("TechDraw::DrawViewAnnotation"):
+        if size:
+            obj.TextSize = float(size)
+        if font:
+            obj.Font = font
+        return True
+    return False

@@ -4,7 +4,7 @@ A FreeCAD 1.1 workbench that makes TechDraw drawings quicker, inspired by how On
 
 The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. The DrawingKit buttons are also added at the end of TechDraw's *TechDraw Pages* toolbar, for when you are in TechDraw. (Double-clicking a page in the tree still switches to TechDraw; that is TechDraw's own preference, *switch workbench on click*.)
 
-Status: early version (0.4.0), not yet in the Addon Manager.
+Status: early version (0.5.0), not yet in the Addon Manager.
 
 ## Commands
 
@@ -28,12 +28,15 @@ The buttons sit on three toolbars: **DrawingKit views**, **DrawingKit annotation
 
 | Button | What it does |
 |---|---|
+| **Dimension** | Works like the Sketcher's dimension tool. Hover lights up a line, circle, point or circle centre; click one or two, move the mouse to choose, click to place. A circle gives ⌀, an arc R, a line its length; two points or two circles give the distance between them (mouse above/below: horizontal, left/right: vertical, diagonal: true distance; two circles measure centre to centre); a point or circle and a line give the perpendicular distance; two parallel lines the distance between them; two other lines the angle. The value shows next to the mouse before you click. Stays on for the next dimension until Esc. |
 | **Centre marks and centre lines** | Centre marks on holes and round features seen end-on, centre lines along their axes seen from the side. Evenly spaced holes round a centre get a bolt circle (dashed pitch circle plus a short radial line through each hole). Run it again to refresh; fillets are left alone. |
 | **Hole callouts** | Labels holes as "6X ⌀4.00 THRU" or "⌀5.00 ↧ 10.00": identical holes are counted, through holes say THRU, blind holes get their depth. The text reads horizontally on a shoulder (TechDraw's *Referencing* style); switch a callout's *Standard And Style* property to *Oriented/Inlined* to have it along the leader instead. They are TechDraw diameter dimensions, so they follow model changes. |
 | **Edit dimension** | Select one or more dimensions for an Onshape-style pop-up: text before/after ("3X ", " H7"), decimals, tolerance (none, symmetric ±, deviation +/−), **basic** (boxed, theoretically exact) or **reference** (in parentheses). Basic dimensions carry no tolerance; use them for the dimensions that locate features under a position or profile tolerance. |
 | **Datum flag** | Click the datum edge, then where the letter box goes (Enter: straight out). The triangle stays on the edge when the view moves; drag the box anywhere and a leader keeps it connected. For an axis or centre-plane datum (a diameter, a slot's width), select its dimension first: the triangle goes on the dimension line. Lettered A, B, C … automatically. |
 | **Datum target** | Datum target point: an X on the part with a leader to the divided circle (e.g. A1, with an optional target-area size). Follows the view. |
 | **Geometric tolerance frame** | Pick the characteristic (all 14 ISO 1101 / ASME Y14.5 symbols), tolerance, ⌀ zone, MMC/LMC, and up to three datums each with their own MMC/LMC. Click the toleranced feature, then where the frame goes. Clicking one of several identical holes puts the count (e.g. "6X") above the frame. The leader stays on the feature when the view moves; drag the frame to move it. Tick **Second segment** for a composite frame (one characteristic box over two rows: pattern-locating above, feature-relating below) or a stacked one (each row its own characteristic). |
+| **Note** | Type the note (several lines are fine), pick its text size and font, then click where it goes. Turn on **Leader** to click the feature first: the arrow stays on it when the view moves. Drag the note to move it; select it and press Note again to change the text, size or font. |
+| **Text size and font** | Select dimensions, notes, datums, frames, targets or tables and set the text height (2.5 / 3.5 / 5 / 7 / 10 mm or any value) and font. DrawingKit symbols grow with their text, so a frame drawn at 5 mm keeps ISO proportions. With nothing selected it sets the size and font used for new notes and symbols. |
 
 ### Tables and title block
 
@@ -42,6 +45,8 @@ The buttons sit on three toolbars: **DrawingKit views**, **DrawingKit annotation
 | **Hole table** | Select a view: every hole seen end-on gets a tag (A1, A2 … one letter per size) that follows the view, and a table lists each tag's X / Y from the part's lower-left corner and its size. |
 | **Fill title block** | Fills empty title-block fields from the part (name, material, drawing number) and your FreeCAD author name, and numbers the sheets "1 / N". Fields you have typed in are kept. Also done automatically when you add standard views. |
 | **Add revision** | Adds the next revision (A, B, C …) with what changed, the date and who approved it to a revision table at the top right of the frame, and puts the letter in the title block. |
+
+Settings open in small pop-ups next to the mouse that show only what's needed (Enter = OK, Esc = cancel); extras such as a frame's second segment sit behind a toggle. In the Note pop-up Enter starts a new line; click ✓ to finish.
 
 Datums, frames, targets, tags and tables are TechDraw symbols drawn by DrawingKit: drag them like views, and edit their texts (datum letters, tolerance values, table cells) in their *Editable Texts* property.
 

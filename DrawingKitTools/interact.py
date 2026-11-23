@@ -133,6 +133,30 @@ class PagePicker(QtCore.QObject):
                 tl = to_scene(x - r, y + r)
                 item = QtWidgets.QGraphicsEllipseItem(tl.x(), tl.y(), 2 * r * rez(), 2 * r * rez())
                 item.setPen(_pen("#d62728", dashed=True, width=0.5))
+            elif shape[0] in ("hl_line", "hl_circle", "hl_point"):
+                # highlight of a pickable thing: solid; orange = hover, blue = picked
+                color = shape[-1]
+                if shape[0] == "hl_line":
+                    a, b = shape[1]
+                    path = QtGui.QPainterPath(to_scene(*a))
+                    path.lineTo(to_scene(*b))
+                    item = QtWidgets.QGraphicsPathItem(path)
+                else:
+                    x, y = shape[1]
+                    r = shape[2]
+                    tl = to_scene(x - r, y + r)
+                    item = QtWidgets.QGraphicsEllipseItem(tl.x(), tl.y(), 2 * r * rez(), 2 * r * rez())
+                    if shape[0] == "hl_point":
+                        item.setBrush(QtGui.QBrush(QtGui.QColor(color)))
+                item.setPen(_pen(color, dashed=False, width=0.7))
+            elif shape[0] == "text":
+                _, x, y, txt = shape
+                item = QtWidgets.QGraphicsSimpleTextItem(txt)
+                f = item.font()
+                f.setPointSizeF(3.5 * rez())
+                item.setFont(f)
+                item.setBrush(QtGui.QBrush(QtGui.QColor("#1f77b4")))
+                item.setPos(to_scene(x, y))
             else:
                 pts = shape[1]
                 if len(pts) < 2:
@@ -147,6 +171,14 @@ class PagePicker(QtCore.QObject):
             self.items.append(item)
 
     # -- events -------------------------------------------------------------
+    def _is_viewport(self, obj):
+        """True if the event came from the page's viewport. Compare the Qt
+        objects, not the Python wrappers (PySide can hand out a new wrapper)."""
+        try:
+            return obj == self.gview.viewport()
+        except Exception:
+            return False
+
     def _pt(self, event):
         pos = event.position() if hasattr(event, "position") else event.pos()
         return to_page(self.gview.mapToScene(pos.toPoint() if hasattr(pos, "toPoint") else pos))
@@ -154,11 +186,11 @@ class PagePicker(QtCore.QObject):
     def eventFilter(self, obj, event):
         t = event.type()
         try:
-            if t == QtCore.QEvent.MouseMove and obj is self.gview.viewport():
+            if t == QtCore.QEvent.MouseMove and self._is_viewport(obj):
                 if self.on_move:
                     self._draw(self.on_move(self._pt(event), self.points))
                 return False
-            if t == QtCore.QEvent.MouseButtonPress and obj is self.gview.viewport():
+            if t == QtCore.QEvent.MouseButtonPress and self._is_viewport(obj):
                 if event.button() == QtCore.Qt.LeftButton:
                     pt = self._pt(event)
                     self.points.append(pt)
@@ -174,7 +206,7 @@ class PagePicker(QtCore.QObject):
                     self._right = "finish" if (self.finish_on_right_click and self.points) \
                         else "cancel"
                     return True
-            if t == QtCore.QEvent.MouseButtonRelease and obj is self.gview.viewport() \
+            if t == QtCore.QEvent.MouseButtonRelease and self._is_viewport(obj) \
                     and event.button() == QtCore.Qt.RightButton:
                 action = getattr(self, "_right", None)
                 self._right = None
@@ -182,7 +214,7 @@ class PagePicker(QtCore.QObject):
                     QtCore.QTimer.singleShot(80, getattr(self, action))
                 return True
             if t in (QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.MouseButtonDblClick) \
-                    and obj is self.gview.viewport():
+                    and self._is_viewport(obj):
                 return True
             if t == QtCore.QEvent.ContextMenu:
                 return True  # right-click ends picking; no TechDraw menu

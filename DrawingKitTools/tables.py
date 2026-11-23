@@ -15,14 +15,17 @@ import FreeCAD as App
 
 from . import annot, core, holes
 
-ROW_H = 6.0
+ROW_H_ = 6.0
+ROW_H = ROW_H_
 FONT = 2.5
 
 
 def draw_table(sk, centre, p, values):
     """Grid table centred on page point ``centre``. Params: headers, rows,
     widths, title, editable (cell names 'rIcJ' for editable rows)."""
-    widths = p["widths"]
+    k = sk.k
+    ROW_H = ROW_H_ * k
+    widths = [w * k for w in p["widths"]]
     headers = p["headers"]
     rows = p.get("rows", [])
     title = p.get("title", "")
@@ -60,8 +63,10 @@ def draw_table(sk, centre, p, values):
 
 
 def table_size(p):
+    from .annot import text_scale
+    k = text_scale(p)
     rows = len(p.get("rows", [])) + 1 + (1 if p.get("title") else 0)
-    return sum(p["widths"]), rows * ROW_H
+    return sum(p["widths"]) * k, rows * ROW_H_ * k
 
 
 # ---------------------------------------------------------------------------

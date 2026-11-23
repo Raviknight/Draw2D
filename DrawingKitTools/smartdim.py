@@ -1,0 +1,273 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+"""Sketcher-style dimensioning on a drawing.
+
+Click one or two things in a view (a line, a circle or arc, a point, or a
+circle's centre), then move the mouse to choose the kind of dimension and
+click to place it:
+
+  circle            -> diameter          arc            -> radius
+  line              -> length (horizontal / vertical / true by mouse)
+  two points        -> distance (horizontal / vertical / true by mouse)
+  two circles       -> centre-to-centre distance
+  point/circle+line -> perpendicular distance
+  two parallel lines-> distance between them
+  two lines         -> angle
+
+Circle centres are referenced through a point at the centre (TechDraw's own
+centre vertex if it has one, otherwise a cosmetic vertex), which is why
+TechDraw's tool cannot do circle-to-circle on its own.
+"""
+
+import math
+
+import FreeCAD as App
+
+from . import core
+
+PICK_MM = 2.5   # pick distance on paper
+
+
+class Ent:
+    """A picked thing in a view, in unscaled view coordinates (Y up)."""
+
+    def __init__(self, kind, index, pts, radius=0.0):
+        self.kind = kind          # 'vertex', 'line', 'circle', 'arc', 'centre'
+        self.index = index        # vertex/edge index in the view
+        self.pts = pts            # vertex: [p]; line: [a, b]; circle/arc/centre: [centre]
+        self.radius = radius
+
+    @property
+    def point(self):
+        return self.pts[0]
+
+    def is_point(self):
+        return self.kind in ("vertex", "centre")
+
+    def __repr__(self):
+        return "Ent(%s, %s)" % (self.kind, self.index)
+
+
+def _edges(view):
+    out = []
+    i = 0
+    while i < 10000:
+        try:
+            e = view.getEdgeByIndex(i)
+        except Exception:
+            break
+        out.append((i, e))
+        i += 1
+    return out
+
+
+def _vertices(view):
+    out = []
+    i = 0
+    while i < 10000:
+        try:
+            v = view.getVertexByIndex(i)
+        except Exception:
+            break
+        out.append((i, (v.Point.x, v.Point.y)))
+        i += 1
+    return out
+
+
+def entities(view):
+    """Everything pickable in a view."""
+    ents = []
+    seams = []      # a full circle's start/end point is not a real corner
+    for i, e in _edges(view):
+        c = getattr(e, "Curve", None)
+        if c is None:
+            continue
+        t = c.TypeId
+        if "Circle" in t:
+            full = len(e.Vertexes) < 2 or e.Vertexes[0].Point.distanceToPoint(e.Vertexes[-1].Point) < 1e-6
+            kind = "circle" if full else "arc"
+            ents.append(Ent(kind, i, [(c.Center.x, c.Center.y)], c.Radius))
+            ents.append(Ent("centre", i, [(c.Center.x, c.Center.y)], c.Radius))
+            if full:
+                seams.extend((v.Point.x, v.Point.y) for v in e.Vertexes)
+        elif t in ("Part::GeomLine", "Part::GeomLineSegment") and len(e.Vertexes) >= 2:
+            a, b = e.Vertexes[0].Point, e.Vertexes[-1].Point
+            ents.append(Ent("line", i, [(a.x, a.y), (b.x, b.y)]))
+    centres = [e.point for e in ents if e.kind == "centre"]
+    for i, p in _vertices(view):
+        if any(abs(p[0] - s[0]) < 1e-6 and abs(p[1] - s[1]) < 1e-6 for s in seams):
+            continue
+        if any(abs(p[0] - c[0]) < 1e-6 and abs(p[1] - c[1]) < 1e-6 for c in centres):
+            continue   # the circle's 'centre' entity covers it
+        ents.append(Ent("vertex", i, [p]))
+    return ents
+
+
+def _dist_to(ent, p):
+    x, y = p
+    if ent.kind in ("vertex", "centre"):
+        return math.hypot(x - ent.point[0], y - ent.point[1])
+    if ent.kind in ("circle", "arc"):
+        return abs(math.hypot(x - ent.point[0], y - ent.point[1]) - ent.radius)
+    (ax, ay), (bx, by) = ent.pts
+    ex, ey = bx - ax, by - ay
+    L2 = ex * ex + ey * ey
+    t = max(0.0, min(1.0, ((x - ax) * ex + (y - ay) * ey) / L2)) if L2 > 0 else 0.0
+    return math.hypot(x - (ax + ex * t), y - (ay + ey * t))
+
+
+def pick(view, local, ents=None, tol=None):
+    """The thing under a local point: points beat edges (like the Sketcher)."""
+    ents = ents if ents is not None else entities(view)
+    tol = tol if tol is not None else PICK_MM / core.view_scale(view)
+    best = None
+    for e in ents:
+        d = _dist_to(e, local)
+        if d > tol:
+            continue
+        rank = 0 if e.is_point() else 1
+        if best is None or (rank, d) < (best[0], best[1]):
+            best = (rank, d, e)
+    return best[2] if best else None
+
+
+# ---------------------------------------------------------------------------
+# What dimension two picks and a mouse position make
+# ---------------------------------------------------------------------------
+def _parallel(l1, l2, tol=1e-6):
+    (a, b), (c, d) = l1.pts, l2.pts
+    u = (b[0] - a[0], b[1] - a[1])
+    v = (d[0] - c[0], d[1] - c[1])
+    cross = u[0] * v[1] - u[1] * v[0]
+    return abs(cross) <= tol * math.hypot(*u) * math.hypot(*v)
+
+
+def _axis_choice(p, q, mouse):
+    """Horizontal, vertical or true distance between p and q, chosen by
+    where the mouse is (like the Sketcher's smart dimension)."""
+    x0, x1 = sorted((p[0], q[0]))
+    y0, y1 = sorted((p[1], q[1]))
+    mx, my = mouse
+    if abs(p[1] - q[1]) < 1e-9:
+        return "DistanceX"
+    if abs(p[0] - q[0]) < 1e-9:
+        return "DistanceY"
+    inside_x = x0 <= mx <= x1
+    inside_y = y0 <= my <= y1
+    if inside_x and not inside_y:
+        return "DistanceX"     # mouse above/below: horizontal dimension
+    if inside_y and not inside_x:
+        return "DistanceY"     # mouse left/right: vertical dimension
+    return "Distance"
+
+
+def plan(picks, mouse):
+    """(Type, [Ent...] to reference, label) for picks and a local mouse point,
+    or (None, [], reason)."""
+    if not picks:
+        return None, [], "Click a line, circle or point"
+    if len(picks) == 1:
+        e = picks[0]
+        if e.kind == "circle":
+            return "Diameter", [e], "⌀ %.3g" % (2 * e.radius)
+        if e.kind == "arc":
+            return "Radius", [e], "R %.3g" % e.radius
+        if e.kind == "line":
+            t = _axis_choice(e.pts[0], e.pts[1], mouse)
+            return t, [e], "length"
+        return None, [], "Click a second point"
+    a, b = picks[0], picks[1]
+    pa = a.is_point() or a.kind in ("circle", "arc")
+    pb = b.is_point() or b.kind in ("circle", "arc")
+    if a.kind == "line" and b.kind == "line":
+        if _parallel(a, b):
+            return "Distance", [a, b], "distance between lines"
+        return "Angle", [a, b], "angle"
+    if pa and pb:
+        ca = a if a.is_point() else Ent("centre", a.index, a.pts, a.radius)
+        cb = b if b.is_point() else Ent("centre", b.index, b.pts, b.radius)
+        return _axis_choice(ca.point, cb.point, mouse), [ca, cb], "distance"
+    # point/circle + line: perpendicular distance from the point (centre)
+    pt, ln = (a, b) if pa else (b, a)
+    c = pt if pt.is_point() else Ent("centre", pt.index, pt.pts, pt.radius)
+    return "Distance", [c, ln], "distance to line"
+
+
+def _point_line(p, line):
+    (ax, ay), (bx, by) = line.pts
+    ex, ey = bx - ax, by - ay
+    L = math.hypot(ex, ey) or 1.0
+    return abs((p[0] - ax) * ey - (p[1] - ay) * ex) / L
+
+
+def preview_value(picks, mouse):
+    """Text of the dimension that would be placed now ('' if none)."""
+    t, ents, _ = plan(picks, mouse)
+    if t is None:
+        return ""
+    if t == "Diameter":
+        return "⌀%.2f" % (2 * ents[0].radius)
+    if t == "Radius":
+        return "R%.2f" % ents[0].radius
+    if t == "Angle":
+        (a, b), (c, d) = ents[0].pts, ents[1].pts
+        u = math.atan2(b[1] - a[1], b[0] - a[0])
+        v = math.atan2(d[1] - c[1], d[0] - c[0])
+        ang = abs(math.degrees(u - v)) % 180.0
+        return "%.1f°" % min(ang, 180.0 - ang)
+    if len(ents) == 1:                     # line length
+        p, q = ents[0].pts
+    elif ents[1].kind == "line" and ents[0].kind == "line":
+        return "%.2f" % _point_line(ents[0].pts[0], ents[1])
+    elif ents[1].kind == "line":
+        return "%.2f" % _point_line(ents[0].point, ents[1])
+    else:
+        p, q = ents[0].point, ents[1].point
+    if t == "DistanceX":
+        return "%.2f" % abs(q[0] - p[0])
+    if t == "DistanceY":
+        return "%.2f" % abs(q[1] - p[1])
+    return "%.2f" % math.hypot(q[0] - p[0], q[1] - p[1])
+
+
+# ---------------------------------------------------------------------------
+# Making the TechDraw dimension
+# ---------------------------------------------------------------------------
+def vertex_at(view, point, tol=1e-4):
+    """Name of a vertex at a local point, making a cosmetic one if needed."""
+    for i, p in _vertices(view):
+        if abs(p[0] - point[0]) < tol and abs(p[1] - point[1]) < tol:
+            return "Vertex%d" % i
+    view.makeCosmeticVertex(App.Vector(point[0], point[1], 0))
+    for i, p in _vertices(view):
+        if abs(p[0] - point[0]) < tol and abs(p[1] - point[1]) < tol:
+            return "Vertex%d" % i
+    raise ValueError("Could not add a point at the circle's centre")
+
+
+def ref_name(view, ent):
+    if ent.kind == "vertex":
+        return "Vertex%d" % ent.index
+    if ent.kind == "centre":
+        return vertex_at(view, ent.point)
+    return "Edge%d" % ent.index
+
+
+def add_dimension(page, view, picks, mouse_local, label_page=None):
+    """Create the dimension the picks + mouse describe. ``label_page`` is
+    where the text goes (page point); default: the mouse position."""
+    t, ents, why = plan(picks, mouse_local)
+    if t is None:
+        raise ValueError(why)
+    doc = page.Document
+    names = [ref_name(view, e) for e in ents]
+    dim = doc.addObject("TechDraw::DrawViewDimension", "Dimension")
+    dim.Type = t
+    dim.MeasureType = "Projected"
+    dim.References2D = [(view, names)]
+    page.addView(dim)
+    cx, cy = core.view_center(view)
+    s = core.view_scale(view)
+    if label_page is None:
+        label_page = (cx + mouse_local[0] * s, cy + mouse_local[1] * s)
+    dim.X, dim.Y = label_page[0] - cx, label_page[1] - cy
+    return dim
