@@ -482,13 +482,17 @@ def hatch_when_drawn(page, sec, tries=60, every_ms=250):
 
     def attempt(left):
         try:
-            if not hatching.drawn_vertices(sec):
+            if core.section_stale_factor(sec) != 1.0:   # not drawn, or at an old scale
                 if left > 0:
                     QtCore.QTimer.singleShot(every_ms, lambda: attempt(left - 1))
                 return
             sym, parts = hatching.hatch_by_part(page, sec)
+            # now TechDraw has drawn it, line the section up with its base
+            core.realign_sections(page, [sec])
+            from . import annot
+            annot.refresh_page(page)
+            page.Document.recompute()
             if sym is not None:
-                page.Document.recompute()
                 say("%s hatched part by part" % sec.Label)
         except Exception as e:
             App.Console.PrintWarning("DrawingKit hatching: %s\n" % e)

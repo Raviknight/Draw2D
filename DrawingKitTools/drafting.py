@@ -47,6 +47,39 @@ def _vertex_name(view, ent, near=None):
     return smartdim.vertex_at(view, ent_point(ent, near))
 
 
+def _row_obstacles(page, view, exclude=()):
+    """Texts, symbols and other views a new row of dimensions must miss."""
+    from . import clearance
+    obs = clearance.obstacles(page, exclude=exclude, views=False)
+    for v in core.part_views(page):
+        if not core.same(v, view):
+            try:
+                obs.append(core.view_box(v))
+            except Exception:
+                pass
+    return obs
+
+
+def _band_free(band, obs, gap=1.0):
+    return not any(band[0] < o[2] + gap and o[0] - gap < band[2] and
+                   band[1] < o[3] + gap and o[1] - gap < band[3] for o in obs)
+
+
+def free_row(page, view, axis, lo, hi, depth, start=0, exclude=(), most=12):
+    """First row number (from ``start``) whose strip beside the view is
+    clear: rows run above the view for axis 'x', right of it for 'y'.
+    ``lo``-``hi`` is the strip's page extent along the view edge and
+    ``depth`` how far it reaches out from the row line."""
+    x0, y0, x1, y1 = core.view_box(view)
+    obs = _row_obstacles(page, view, exclude)
+    for k in range(start, start + most):
+        at = (y1 if axis == "x" else x1) + ROW + k * STEP
+        band = (lo, at - 1.0, hi, at + depth) if axis == "x" else (at - 1.0, lo, at + depth, hi)
+        if _band_free(band, obs):
+            return k
+    return start
+
+
 # ---------------------------------------------------------------------------
 # Baseline and chain dimensions (TechDraw dimensions)
 # ---------------------------------------------------------------------------
@@ -68,6 +101,9 @@ def add_baseline(page, view, origin, features, axis="x", chain=False):
     names = [_vertex_name(view, origin)] + [_vertex_name(view, f, o) for _, f in pts]
     coords = [o] + [p for p, _ in pts]
     dims = []
+    # rows start where they miss callouts, ordinates and other views
+    span = sorted(c[i] * s + (cx if axis == "x" else cy) for c in coords)
+    k0 = free_row(page, view, axis, span[0] - 3.0, span[-1] + 3.0, 5.0)
     for n in range(1, len(coords)):
         a = 0 if not chain else n - 1
         dim = doc.addObject("TechDraw::DrawViewDimension", "Dimension")
@@ -75,7 +111,7 @@ def add_baseline(page, view, origin, features, axis="x", chain=False):
         dim.MeasureType = "Projected"
         dim.References2D = [(view, [names[a], names[n]])]
         page.addView(dim)
-        row = 0 if chain else n - 1
+        row = k0 + (0 if chain else n - 1)
         mid = (coords[a][i] + coords[n][i]) / 2.0 * s
         if axis == "x":
             dim.X, dim.Y = mid, (y1 - cy) + ROW + row * STEP
@@ -103,7 +139,10 @@ def add_ordinate(page, view, origin, features, axis="x"):
     x0, y0, x1, y1 = core.view_box(view)
     ox, oy = annot.view_point(view, o)
     # row position, kept as the annotation's offset (drag it to move the row)
-    off = (0.0, (y1 - oy) + ROW) if axis == "x" else ((x1 - ox) + ROW, 0.0)
+    s = core.view_scale(view)
+    alongs = [annot.view_point(view, q)[0 if axis == "x" else 1] for q in pts + [list(o)]]
+    k = free_row(page, view, axis, min(alongs) - 3.0, max(alongs) + 3.0, 12.0)
+    off = (0.0, (y1 - oy) + ROW + k * STEP) if axis == "x" else ((x1 - ox) + ROW + k * STEP, 0.0)
     p = {"axis": axis, "pts": pts, "radii": radii, "tsize": annot.default_size()}
     return annot._new(page, "ordinate", "Ordinate %s" % axis.upper(), p, "view", view, o, off)
 
@@ -127,7 +166,15 @@ def draw_ordinate(sk, view, origin_page, box, p):
     for q, r in zip(pts, radii):
         qp = annot.view_point(view, q)
         items.append(((qp[i] - origin_page[i]) / s, qp, r * s))
-    items.sort(key=lambda t: t[1][i])
+    # one value per distance: features in line share an extension line
+    # (from the one nearest the row)
+    j = 1 - i
+    merged = {}
+    for t in items:
+        key = round(t[0], 3)
+        if key not in merged or t[1][j] + t[2] > merged[key][1][j] + merged[key][2]:
+            merged[key] = t
+    items = sorted(merged.values(), key=lambda t: t[1][i])
     # spread value positions so neighbours are at least 1.4 text heights apart
     want = [t[1][i] for t in items]
     pos = list(want)

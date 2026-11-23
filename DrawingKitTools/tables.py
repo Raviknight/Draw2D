@@ -103,6 +103,59 @@ def hole_rows(view, shape=None):
     return out
 
 
+def _annotated_boxes(page):
+    """Each part view's box grown to take in its dimensions (texts and the
+    extension lines out to them) and the callouts and symbols on it."""
+    from . import clearance
+    boxes = {}
+    for v in core.part_views(page):
+        try:
+            boxes[v.Name] = list(core.view_box(v))
+        except Exception:
+            pass
+    for o in page.Views:
+        b, owner = None, None
+        try:
+            if o.isDerivedFrom("TechDraw::DrawViewDimension") and o.References2D:
+                owner, b = o.References2D[0][0], clearance.dimension_label_box(o)
+            elif o.isDerivedFrom("TechDraw::DrawViewSymbol"):
+                owner = getattr(o, annot.LINK, None)
+                if getattr(o, annot.KIND, "") in ("bom", "holetable", "revtable"):
+                    continue
+                b = clearance.symbol_box(o)
+        except Exception:
+            continue
+        if b is None or owner is None or owner.Name not in boxes:
+            continue
+        a = boxes[owner.Name]
+        boxes[owner.Name] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+    return [tuple(b) for b in boxes.values()]
+
+
+def free_table_spot(page, W, Ht, gap=3.0):
+    """Centre for a W x Ht table: above the title block if that is free,
+    otherwise the first free corner of the drawing area (views, their
+    dimensions and callouts, and other tables are kept clear)."""
+    from . import clearance
+    frame, title = core.drawing_area(page.Template.Template, *core.page_size(page))
+    obs = _annotated_boxes(page) + clearance.obstacles(page, views=False) + core.table_boxes(page)
+    x0, y0, x1, y1 = frame
+    cands = []
+    if title:
+        cands.append((title[2] - W / 2.0, title[3] + gap + Ht / 2.0))
+        cands.append((title[0] - gap - W / 2.0, y0 + gap + Ht / 2.0))   # left of the title block
+    cands += [(x1 - gap - W / 2.0, y1 - gap - Ht / 2.0),
+              (x0 + gap + W / 2.0, y1 - gap - Ht / 2.0),
+              (x0 + gap + W / 2.0, y0 + gap + Ht / 2.0)]
+    for cx, cy in cands:
+        box = (cx - W / 2, cy - Ht / 2, cx + W / 2, cy + Ht / 2)
+        if box[0] < x0 - 1e-6 or box[2] > x1 + 1e-6 or box[1] < y0 - 1e-6 or box[3] > y1 + 1e-6:
+            continue
+        if not clearance._hits(box, obs, gap=1.0):
+            return (cx, cy)
+    return cands[0]
+
+
 def add_hole_table(page, view, place=None):
     """Tags on every hole of ``view`` plus the table. Returns (table, tags)."""
     shape = core.source_shape(view.Source)
@@ -125,8 +178,7 @@ def add_hole_table(page, view, place=None):
     p["widths"][-1] = max(40.0, W - 54.0)
     W, Ht = table_size(p)
     if place is None:
-        frame, title = core.drawing_area(page.Template.Template, *core.page_size(page))
-        place = (title[2] - W / 2.0, title[3] + 3.0 + Ht / 2.0)
+        place = free_table_spot(page, W, Ht)
     table = annot._new(page, "holetable", "Hole table %s" % view.Label, p,
                        "free", None, place, (0, 0))
     return table, tags

@@ -282,23 +282,43 @@ def page_regions(page):
 
 
 def make_room_for_tables(page):
-    """If a view sits on a DrawingKit table, fit the page again (the fit
-    keeps views off tables). Returns True if it re-fitted."""
+    """If a view, or the dimensions and callouts around it, sits on a
+    DrawingKit table or runs off the drawing area, fit the page again (the
+    fit keeps views off tables), going down a scale while the annotations
+    still don't fit. Returns True if it re-fitted."""
     boxes = table_boxes(page, pad=0.0)
-    if not boxes:
+    group, _ = page_content(page)
+    if group is None:
         return False
-    for v in part_views(page):
-        try:
-            vb = view_box(v)
-        except Exception:
-            continue
-        if any(vb[0] < b[2] and b[0] < vb[2] and vb[1] < b[3] and b[1] < vb[3] for b in boxes):
-            group, _ = page_content(page)
-            if group is None:
-                return False
-            fit_page(page)
-            return True
-    return False
+    try:
+        from . import tables
+        frame, _t = drawing_area(page.Template.Template, *page_size(page))
+    except Exception:
+        return False
+
+    def clashes(annotated):
+        for vb in (tables._annotated_boxes(page) if annotated else
+                   [view_box(v) for v in part_views(page)]):
+            if any(vb[0] < b[2] and b[0] < vb[2] and vb[1] < b[3] and b[1] < vb[3] for b in boxes):
+                return True
+            if annotated and (vb[0] < frame[0] - 0.5 or vb[1] < frame[1] - 0.5 or
+                              vb[2] > frame[2] + 0.5 or vb[3] > frame[3] + 0.5):
+                return True
+        return False
+
+    if not clashes(False) and not clashes(True):
+        return False
+    scale = fit_page(page)
+    if clashes(True):
+        # one scale down, kept only if that clears the dimensions and
+        # callouts (they sit at fixed distances on paper, so going further
+        # down rarely helps)
+        smaller = [scale_value(r) for r in STANDARD_SCALES if scale_value(r) < scale - 1e-12]
+        if smaller:
+            fit_page(page, max_scale=max(smaller))
+            if clashes(True):
+                fit_page(page, max_scale=scale)
+    return True
 
 
 def table_boxes(page, pad=3.0):
@@ -529,6 +549,49 @@ def anchor_offset(layout, s):
 GAP = 15.0  # paper mm between the group and the extra views
 
 
+def drawn_extent(view):
+    """(x0, y0, x1, y1) of a view's drawn edges, unscaled local, or None
+    if nothing is drawn yet."""
+    bb = None
+    i = 0
+    while i < 20000:
+        try:
+            e = view.getEdgeByIndex(i)
+        except Exception:
+            break
+        i += 1
+        if e is None:
+            continue
+        b = e.BoundBox
+        if bb is None:
+            bb = [b.XMin, b.YMin, b.XMax, b.YMax]
+        else:
+            bb = [min(bb[0], b.XMin), min(bb[1], b.YMin), max(bb[2], b.XMax), max(bb[3], b.YMax)]
+    if bb is None or bb[2] - bb[0] < 1e-9:
+        return None
+    return tuple(bb)
+
+
+def section_stale_factor(sec, ext=None):
+    """Factor that brings a section's drawn (local) geometry to its current
+    scale: 1.0 when up to date, about old/new scale while TechDraw has not
+    redrawn it yet, None if nothing is drawn. Measured across the cut,
+    along the axis the section shares with its base view (never unfolded)."""
+    ext = ext if ext is not None else drawn_extent(sec)
+    if ext is None:
+        return None
+    try:
+        w, h = extra_view_size(sec)
+    except Exception:
+        return 1.0
+    side = section_side(sec)
+    drawn, want = (ext[2] - ext[0], w) if side in ("Up", "Down") else (ext[3] - ext[1], h)
+    if drawn < 1e-9 or want < 1e-9:
+        return 1.0
+    r = want / drawn
+    return 1.0 if abs(r - 1.0) < 0.25 else r
+
+
 def extra_view_size(view, shape=None):
     shape = shape or source_shape(view.Source)
     return projected_extent(shape, view.Direction, view.XDirection)
@@ -621,17 +684,20 @@ def page_content(page):
     return group, extras
 
 
-def fit_page(page):
-    """Re-pick the page scale so the main group and extra views fit. Returns scale."""
+def fit_page(page, max_scale=None):
+    """Re-pick the page scale so the main group and extra views fit
+    (no larger than ``max_scale``). Returns scale."""
     group, extras = page_content(page)
     if group is None:
         raise ValueError("This page has no projection group to fit")
     regions = page_regions(page)
-    max_scale = None
     for _ in range(len(STANDARD_SCALES)):
         scale, positions = plan_page(page, group, extras, max_scale=max_scale)
         apply_plan(page, group, extras, scale, positions)
-        realign_sections(page, extras)
+        for v in part_views(page):
+            follow_parent(v)     # projected/aux views back on their line
+        realign_sections(page, extras)   # sections first: they must stay in line
+        clear_all_linked(page)   # then slide projected/aux views off the others
         # sections kept in line with their views need room in that row or
         # column; if one ends up off the drawing area, try the next scale down
         if all(_inside_regions(view_box(v), regions) for v in part_views(page)
@@ -647,6 +713,13 @@ def fit_page(page):
     try:
         from . import hatching
         hatching.refresh_page(page)   # hatch spacing is set on paper
+        if App.GuiUp:
+            # aligned sections are drawn in the background: line them up
+            # and hatch them again once TechDraw has drawn them
+            from . import commands
+            for sec in extras:
+                if sec.isDerivedFrom("TechDraw::DrawViewSection") and hatching.is_aligned(sec):
+                    commands.hatch_when_drawn(page, sec)
     except Exception as e:
         App.Console.PrintWarning("DrawingKit hatching: %s\n" % e)
     return scale
@@ -687,30 +760,30 @@ def realign_sections(page, extras):
         side = section_side(sec)
         if side is None:
             continue
+        hold_snap()
         base = sec.BaseView
         bx, by = view_center(base)
-        x0, y0, x1, y1 = view_box(base)
-        try:
-            w, h = extra_view_size(sec)
-        except Exception:
-            continue
         s = view_scale(sec)
-        w, h = w * s, h * s
+        ox, oy = section_align_offset(sec)   # line the part up, not the boxes
+        bx, by = bx + ox * s, by + oy * s
+        x0, y0, x1, y1 = view_box(base)
+        sb = view_box(sec)
+        # the box around the view's centre (not always symmetric)
+        l, d_ = float(sec.X) - sb[0], float(sec.Y) - sb[1]
+        r, u = sb[2] - float(sec.X), sb[3] - float(sec.Y)
         if side in ("Right", "Left"):
-            x = max(float(sec.X), x1 + GAP + w / 2) if side == "Right" else \
-                min(float(sec.X), x0 - GAP - w / 2)
+            x = max(float(sec.X), x1 + GAP + l) if side == "Right" else                 min(float(sec.X), x0 - GAP - r)
             sec.X, sec.Y = x, by
         else:
-            y = max(float(sec.Y), y1 + GAP + h / 2) if side == "Up" else \
-                min(float(sec.Y), y0 - GAP - h / 2)
+            y = max(float(sec.Y), y1 + GAP + d_) if side == "Up" else                 min(float(sec.Y), y0 - GAP - u)
             sec.X, sec.Y = bx, y
         # step further out while it lands on another view
         for _ in range(20):
-            box = (float(sec.X) - w / 2, float(sec.Y) - h / 2, float(sec.X) + w / 2, float(sec.Y) + h / 2)
+            box = (float(sec.X) - l, float(sec.Y) - d_, float(sec.X) + r, float(sec.Y) + u)
             hit = None
             for v in views:
-                if same(v, sec):
-                    continue
+                if same(v, sec) or getattr(v, AXIS_PROP, ""):
+                    continue     # linked views make way for sections afterwards
                 try:
                     vb = view_box(v)
                 except Exception:
@@ -721,13 +794,13 @@ def realign_sections(page, extras):
             if hit is None:
                 break
             if side == "Right":
-                sec.X = hit[2] + GAP + w / 2
+                sec.X = hit[2] + GAP + l
             elif side == "Left":
-                sec.X = hit[0] - GAP - w / 2
+                sec.X = hit[0] - GAP - r
             elif side == "Up":
-                sec.Y = hit[3] + GAP + h / 2
+                sec.Y = hit[3] + GAP + d_
             else:
-                sec.Y = hit[1] - GAP - h / 2
+                sec.Y = hit[1] - GAP - u
 
 
 def set_hidden_lines(views, on=True):
@@ -1064,7 +1137,21 @@ def view_box(view):
         # only the circle is drawn, not the whole part
         r = float(getattr(view.Radius, "Value", view.Radius)) * s
         return (x - r, y - r, x + r, y + r)
+    if view.isDerivedFrom("TechDraw::DrawViewSection"):
+        # what TechDraw drew: an aligned section is unfolded and a section
+        # is centred on what it keeps, so the source's size is wrong. A
+        # drawing still at an old scale is scaled to the current one.
+        ext = drawn_extent(view)
+        f = section_stale_factor(view, ext) if ext is not None else None
+        if f is not None:
+            k = s * f
+            return (x + ext[0] * k, y + ext[1] * k, x + ext[2] * k, y + ext[3] * k)
     w, h = extra_view_size(view)
+    rot = math.radians(float(getattr(getattr(view, "Rotation", 0.0), "Value",
+                                     getattr(view, "Rotation", 0.0)) or 0.0))
+    if abs(math.sin(rot)) > 1e-9:
+        w, h = (abs(w * math.cos(rot)) + abs(h * math.sin(rot)),
+                abs(w * math.sin(rot)) + abs(h * math.cos(rot)))
     if view.isDerivedFrom("TechDraw::DrawProjGroupItem"):
         group = view.InList[0] if view.InList else None
         for parent in view.InList:
@@ -1124,8 +1211,51 @@ def add_section(page, base, letter=None, direction="Right", origin=None, place=N
     return sec
 
 
+_SNAP = {"n": 0, "old": True}
+SNAP_PREFS = "User parameter:BaseApp/Preferences/Mod/TechDraw/General"
+
+
+def hold_snap(ms=8000):
+    """Keep TechDraw's 'snap views' off for a while. Its snapping moves a
+    section's drawing on screen (not the document) to its own idea of in
+    line, which is off for aligned and stepped sections; DrawingKit lines
+    them up on the part itself."""
+    if not App.GuiUp:
+        return
+    try:
+        from PySide import QtCore
+    except Exception:
+        return
+    g = App.ParamGet(SNAP_PREFS)
+    if _SNAP["n"] == 0:
+        _SNAP["old"] = g.GetBool("SnapViews", True)
+        g.SetBool("SnapViews", False)
+    _SNAP["n"] += 1
+
+    def release():
+        _SNAP["n"] = max(0, _SNAP["n"] - 1)
+        if _SNAP["n"] == 0:
+            g.SetBool("SnapViews", _SNAP["old"])
+    QtCore.QTimer.singleShot(ms, release)
+
+
+def section_align_offset(sec):
+    """See hatching.align_offset: (dx, dy) model units, or (0, 0)."""
+    try:
+        from . import hatching
+        off = hatching.align_offset(sec)
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit section alignment: %s\n" % e)
+        off = None
+    return off or (0.0, 0.0)
+
+
 def _place_section(page, base, sec, direction, shape, place):
+    hold_snap()
     bx, by = view_center(base)
+    ox, oy = section_align_offset(sec)
+    s0 = view_scale(base)
+    bx, by = bx + ox * s0, by + oy * s0
     if place is not None:
         # keep it lined up with the base view, like a projected view
         if direction in ("Right", "Left"):
@@ -1496,6 +1626,63 @@ def follow_parent(view):
     return False
 
 
+def _linked_dir(view):
+    """Unit page direction a linked view slides along away from its parent."""
+    parent = getattr(view, PARENT_PROP, None)
+    axis = getattr(view, AXIS_PROP, "")
+    if parent is None or not axis:
+        return None
+    px, py = view_center(parent)
+    if axis.startswith("N:"):
+        a = math.radians(float(axis[2:]))
+        return math.cos(a), math.sin(a)
+    if axis == "H":
+        return (1.0 if float(view.X) >= px else -1.0), 0.0
+    if axis == "V":
+        return 0.0, (1.0 if float(view.Y) >= py else -1.0)
+    return None
+
+
+def clear_linked(page, view, step=2.0, reach=400.0):
+    """Slide a linked view (projected or auxiliary) along its line away
+    from its parent until it is clear of every other view. True if moved."""
+    follow_parent(view)
+    d = _linked_dir(view)
+    if d is None:
+        return False
+    others = [v for v in part_views(page) if not same(v, view)]
+    x0, y0 = float(view.X), float(view.Y)
+    b = view_box(view)
+    l, dn, r, u = x0 - b[0], y0 - b[1], b[2] - x0, b[3] - y0
+
+    def hits(x, y):
+        box = (x - l - GAP / 2, y - dn - GAP / 2, x + r + GAP / 2, y + u + GAP / 2)
+        for v in others:
+            try:
+                vb = view_box(v)
+            except Exception:
+                continue
+            if box[0] < vb[2] and vb[0] < box[2] and box[1] < vb[3] and vb[1] < box[3]:
+                return True
+        return False
+
+    t = 0.0
+    while t <= reach and hits(x0 + d[0] * t, y0 + d[1] * t):
+        t += step
+    if t == 0.0 or t > reach:
+        return False
+    view.X, view.Y = x0 + d[0] * t, y0 + d[1] * t
+    return True
+
+
+def clear_all_linked(page):
+    moved = False
+    for v in part_views(page):
+        if getattr(v, AXIS_PROP, ""):
+            moved = clear_linked(page, v) or moved
+    return moved
+
+
 def realign_children(obj):
     """After ``obj`` moved, bring the views projected from it back in line."""
     views = [obj]
@@ -1575,6 +1762,7 @@ def add_auxiliary_view(page, base, edge_name, point):
                      "N:<angle> = slides along that direction from the parent")
     setattr(view, PARENT_PROP, base)
     setattr(view, AXIS_PROP, "N:%.6f" % nang)
+    clear_linked(page, view)
     view.touch()
     return view
 

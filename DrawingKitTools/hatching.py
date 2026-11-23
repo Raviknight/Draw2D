@@ -191,6 +191,49 @@ def cut_faces(shape, sec, keep):
     return out
 
 
+def kept_centre(sec, keep=None):
+    """Model point TechDraw puts at the middle of a straight or stepped
+    section: the centre of the box of what it keeps."""
+    import FreeCAD
+    keep = keep if keep is not None else _kept(sec)[0]
+    bb = FreeCAD.BoundBox()
+    shapes = [core.shape_of(p) for p in section_parts(sec)] or [core.source_shape(sec.Source)]
+    for shp in shapes:
+        if shp is None:
+            continue
+        try:
+            k = shp.common(keep)
+        except Exception:
+            continue
+        if not k.isNull() and k.Volume > 1e-9:
+            bb.add(k.BoundBox)
+    if not bb.isValid():
+        bb = core.source_shape(sec.Source).BoundBox
+    return bb.Center
+
+
+def align_offset(sec):
+    """(along base right, along base up) in model units: how far the
+    section's centre must sit from its base view's centre so the part lines
+    up across both views. None for an aligned section TechDraw hasn't drawn
+    yet."""
+    base = sec.BaseView
+    full_c = core.source_shape(base.Source).BoundBox.Center
+    d, rb, ub = core.view_axes(base)
+    if is_aligned(sec):
+        key = (sec.Document.Name, sec.Name)
+        _aligned_anchor.pop(key, None)    # the model may have changed
+        if core.section_stale_factor(sec) != 1.0:
+            return None                   # not (re)drawn at this scale yet
+        aligned_part_regions(sec)
+        if key not in _aligned_anchor:
+            return None
+        p, (lx, ly) = _aligned_anchor[key]
+        return ((p - full_c).dot(rb) - lx, (p - full_c).dot(ub) - ly)
+    c = kept_centre(sec)
+    return ((c - full_c).dot(rb), (c - full_c).dot(ub))
+
+
 def _local_frame(sec, keep):
     """Model -> section-view local (unscaled, Y up) mapping: TechDraw
     centres the section on the box of what it keeps. Worked out part by
@@ -549,6 +592,7 @@ def _register(corners, drawn, tol=0.02, avoid=()):
 
 
 _aligned_uncut = {}     # part name -> (local centre, view direction, x direction)
+_aligned_anchor = {}    # (doc, section) -> (model point, its local position)
 
 
 def _uncut_frame(part, fit, a, u, d):
@@ -607,6 +651,10 @@ def aligned_part_regions(sec):
         fit = _register(corners, drawn, avoid=placed)
         if fit is None:
             continue
+        if (a - pts[-2]).Length < 1e-9:
+            # the run seen true starts at the bend: that point lines the
+            # section up with its base view
+            _aligned_anchor[(sec.Document.Name, sec.Name)] = (App.Vector(a), _orient(fit, 0.0, 0.0))
         ps = [_orient(fit, u, v) for u, v in corners]
         placed.append((min(p[0] for p in ps), min(p[1] for p in ps),
                        max(p[0] for p in ps), max(p[1] for p in ps)))
