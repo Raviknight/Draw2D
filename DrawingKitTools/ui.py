@@ -150,8 +150,14 @@ class Cycle(QtWidgets.QToolButton):
         return self.values[self.i]
 
 
-def mmc_button(value="", tip="Material condition: none / MMC Ⓜ / LMC Ⓛ"):
-    return Cycle(["", "MMC", "LMC"], [" · ", "Ⓜ", "Ⓛ"], value, tip)
+def mmc_button(value="", tip=None, datum=False):
+    """Click to cycle: none / MMC Ⓜ / LMC Ⓛ / RFS Ⓢ (ASME), and for a datum
+    also ▷ translation (ASME: the datum simulator may move)."""
+    values = ["", "MMC", "LMC", "RFS"] + (["TR"] if datum else [])
+    labels = [" · ", "Ⓜ", "Ⓛ", "Ⓢ"] + (["▷"] if datum else [])
+    tip = tip or ("Click to change: none / MMC Ⓜ / LMC Ⓛ / RFS Ⓢ"
+                  + (" / translation ▷" if datum else ""))
+    return Cycle(values, labels, value, tip)
 
 
 def combo(items, current=None, width=None):

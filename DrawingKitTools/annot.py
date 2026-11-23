@@ -363,6 +363,8 @@ def tolerance_items(seg):
     letter) or 'text'."""
     zones = seg.get("zones") or []
     out = []
+    if "DP" in zones:
+        out.append(("tri", "DP"))      # ASME dynamic profile: open triangle after the value
     if "U" in zones:
         out.append(("circ", "U"))
         out.append(("text", seg.get("uval") or "0.1"))
@@ -377,11 +379,37 @@ def tolerance_items(seg):
     for z in ("F", "T"):
         if z in zones:
             out.append(("circ", z))
+    if "ST" in zones:
+        out.append(("hex", "ST"))      # ASME statistical tolerance
     return out
 
 
 def _item_w(kind, text):
-    return 4.8 if kind == "circ" else len(text) * _CHAR_W + 1.0
+    return {"circ": 4.8, "hex": 6.6, "tri": 4.0}.get(kind, len(text) * _CHAR_W + 1.0)
+
+
+def hex_box(sk, c, text, w=5.8, h=3.2):
+    """Elongated hexagon round a short text: ASME statistical tolerance ⟨ST⟩
+    and continuous feature ⟨CF⟩ symbols."""
+    k = sk.k
+    w, h = w * k, h * k
+    x, y = c
+    e = h / 2.0
+    sk.poly([(x - w / 2, y), (x - w / 2 + e, y + h / 2), (x + w / 2 - e, y + h / 2),
+             (x + w / 2, y), (x + w / 2 - e, y - h / 2), (x - w / 2 + e, y - h / 2)])
+    sk.text(x, y, text, size=2.4)
+
+
+def open_triangle(sk, c, size, direction="up"):
+    """△ (dynamic profile) or ▷ (datum translation), outline only."""
+    x, y = c
+    s = size
+    if direction == "up":
+        pts = [(x - s / 2, y - s * 0.43), (x + s / 2, y - s * 0.43), (x, y + s * 0.43)]
+    else:
+        pts = [(x - s * 0.43, y - s / 2), (x - s * 0.43, y + s / 2), (x + s * 0.43, y)]
+    for a, b in zip(pts, pts[1:] + pts[:1]):
+        sk.line(a, b)
 
 
 def segment_cells(seg, k=1.0):
@@ -477,6 +505,10 @@ def draw_frame(sk, anchor, box_centre, p, values, align=None):
             w = _item_w(kind_, txt) * k
             if kind_ == "circ":
                 circled(sk, (mx + w / 2.0, cy), 1.8 * k, txt)
+            elif kind_ == "hex":
+                hex_box(sk, (mx + w / 2.0, cy), txt)
+            elif kind_ == "tri":
+                open_triangle(sk, (mx + w / 2.0, cy), 3.0 * k, "up")
             else:
                 sk.text(mx + w / 2.0, cy, txt)
             mx += w
@@ -486,13 +518,19 @@ def draw_frame(sk, anchor, box_centre, p, values, align=None):
             sk.line((x, y0), (x, y1))
             name = _field("datum%d" % (i + 1), r)
             sk.text(x + (w - (3.6 * k if m else 0.0)) / 2.0, cy, values.get(name, d), editable=name)
-            if m:
+            if m == "TR":
+                # ASME translation modifier: the datum simulator may move
+                open_triangle(sk, (x + w - 2.2 * k, cy), 2.6 * k, "right")
+            elif m:
                 mx = x + w - 2.2 * k
                 circled(sk, (mx, cy), 1.5 * k, gdt.MODIFIERS[m])
             x += w
     count = values.get("count", p.get("count", ""))
     if count:
         sk.text(x0, ytop + 2.5 * k, count, anchor="start", editable="count")
+    if p.get("cf"):
+        # ASME continuous feature: ⟨CF⟩ next to the frame, above its right end
+        hex_box(sk, (x0 + W - 3.2 * k, ytop + 2.8 * k), "CF")
     between = p.get("between") or []
     if len(between) == 2 and all(between):
         draw_between(sk, bx, ytop - n * H - 3.0 * k, between[0], between[1])

@@ -697,6 +697,8 @@ ZONE_TIPS = [
     ("P", "Ⓟ Projected tolerance zone (e.g. threaded holes); height in the next box"),
     ("F", "Ⓕ Free state (non-rigid parts)"),
     ("T", "Ⓣ Tangent plane"),
+    ("DP", "△ Dynamic profile (ASME): controls form/size of the profile, not its location"),
+    ("ST", "ST Statistical tolerance (ASME)"),
 ]
 
 
@@ -720,7 +722,7 @@ class _SegmentRow:
                          ("Primary", "Secondary", "Tertiary")[i] + " datum")
             d.setMaxLength(3)
             self.datums.append(d)
-            self.dmods.append(ui.mmc_button((seg.get("datum_mods") or ["", "", ""])[i]))
+            self.dmods.append(ui.mmc_button((seg.get("datum_mods") or ["", "", ""])[i], datum=True))
 
     def widgets(self):
         w = [self.char, self.dia, self.tol, self.mod]
@@ -750,27 +752,30 @@ class FrameDialog(ui.Popover):
                               "Count above the frame (filled in when you click one of several holes)")
         self.more = ui.toggle("+ Segment", False, "Second row: composite or stacked frame")
         self.opts = ui.toggle("Modifiers…", False,
-                              "Zone modifiers (Ⓤ CZ Ⓟ Ⓕ Ⓣ Ⓔ), all around, between")
+                              "Zone modifiers (Ⓤ CZ Ⓟ Ⓕ Ⓣ △ ST), all around, between, CF")
         self.add_row("Count", self.count, self.more, self.opts, stretch=True)
         # zone modifiers and leader symbols, hidden until asked for
         last = self.last
         zones = last.get("zones") or []
         self.z = {}
         tips = dict(ZONE_TIPS)
-        for code, label in (("U", "Ⓤ"), ("CZ", "CZ"), ("P", "Ⓟ"), ("F", "Ⓕ"), ("T", "Ⓣ")):
+        for code, label in (("U", "Ⓤ"), ("CZ", "CZ"), ("P", "Ⓟ"), ("F", "Ⓕ"), ("T", "Ⓣ"),
+                            ("DP", "△"), ("ST", "ST")):
             self.z[code] = ui.toggle(label, code in zones, tips[code])
         self.uval = ui.field(last.get("uval", ""), 34, "0.1", "Ⓤ offset towards the outside of the profile")
         self.proj = ui.field(last.get("proj", ""), 34, "15", "Ⓟ projected zone height")
         self.zrow = self.add_row(self.z["U"], self.uval, self.z["CZ"], self.z["P"], self.proj,
-                                 self.z["F"], self.z["T"], stretch=True)
+                                 self.z["F"], self.z["T"], self.z["DP"], self.z["ST"], stretch=True)
         self.around = ui.toggle("○ All around", last.get("all_around", False),
                                 "All around: the tolerance applies to the whole outline in this view")
         b = last.get("between") or ["", ""]
         self.b1 = ui.field(b[0], 26, "J", "Between: from point")
         self.b2 = ui.field(b[1], 26, "K", "Between: to point")
-        self.lrow = self.add_row(self.around, "Between", self.b1, "↔", self.b2, stretch=True)
+        self.cf = ui.toggle("CF", last.get("cf", False),
+                            "Continuous feature (ASME): interrupted surfaces treated as one")
+        self.lrow = self.add_row(self.around, "Between", self.b1, "↔", self.b2, self.cf, stretch=True)
         for r in (self.zrow, self.lrow):
-            r.setVisible(bool(zones or last.get("all_around") or any(b)))
+            r.setVisible(bool(zones or last.get("all_around") or any(b) or last.get("cf")))
         self.opts.setChecked(self.zrow.isVisible())
         self.opts.toggled.connect(lambda on: (self.zrow.setVisible(on), self.lrow.setVisible(on),
                                               self.adjustSize()))
@@ -795,6 +800,7 @@ class FrameDialog(ui.Popover):
         c = dict(first)
         c["count"] = self.count.text().strip()
         c["all_around"] = self.around.isChecked()
+        c["cf"] = self.cf.isChecked()
         between = [self.b1.text().strip().upper(), self.b2.text().strip().upper()]
         if all(between):
             c["between"] = between

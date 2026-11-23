@@ -32,7 +32,7 @@ CHARACTERISTICS = [
     ("circular_runout", "Circular run-out"),
     ("total_runout", "Total run-out"),
 ]
-MODIFIERS = {"": "", "MMC": "M", "LMC": "L"}
+MODIFIERS = {"": "", "MMC": "M", "LMC": "L", "RFS": "S"}   # RFS: regardless of feature size (ASME)
 
 
 def _esc(t):

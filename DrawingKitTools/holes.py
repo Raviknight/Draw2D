@@ -16,6 +16,12 @@ DEPTH_SYMBOL = "↧"   # ↧  (ISO 129 / ASME depth symbol)
 DIAMETER = "⌀"       # ⌀
 
 
+COUNTERBORE = "⌴"   # ⌴  ASME Y14.5 / ISO 129-1
+COUNTERSINK = "⌵"   # ⌵
+SPOTFACE = "SF"
+SPOTFACE_RATIO = 0.2       # a counterbore shallower than this x its diameter is a spotface
+
+
 class Hole:
     def __init__(self, centre, axis, radius, t0, t1, through):
         self.centre = centre      # point on the axis (3D)
@@ -23,6 +29,15 @@ class Hole:
         self.radius = radius
         self.t0, self.t1 = t0, t1  # extent along the axis from centre
         self.through = through
+        self.cbore = None         # (diameter, depth) of a counterbore / spotface
+        self.spotface = False
+        self.csink = None         # (diameter at the surface, included angle)
+
+    def key(self):
+        """What makes two holes 'the same' for counting (3X ...)."""
+        return (round(self.radius * 2, 3), True if self.through else round(self.depth, 3),
+                tuple(round(x, 3) for x in self.cbore) if self.cbore else None, self.spotface,
+                tuple(round(x, 2) for x in self.csink) if self.csink else None)
 
     @property
     def depth(self):
@@ -76,10 +91,87 @@ def find_holes(shape):
     holes = []
     for c, axis, r, lo, hi in groups.values():
         eps = max(0.01, r * 0.05)
-        open0 = not shape.isInside(c + axis * (lo - eps), 1e-6, True)
-        open1 = not shape.isInside(c + axis * (hi + eps), 1e-6, True)
+        # probe just past each end near the wall (not on the axis, which may
+        # still be inside a narrower hole below a counterbore)
+        side = axis.cross(App.Vector(1, 0, 0))
+        if side.Length < 1e-6:
+            side = axis.cross(App.Vector(0, 1, 0))
+        side.normalize()
+        w = side * (r * 0.9)
+        open0 = not shape.isInside(c + w + axis * (lo - eps), 1e-6, True)
+        open1 = not shape.isInside(c + w + axis * (hi + eps), 1e-6, True)
         holes.append(Hole(c, axis, r, lo, hi, open0 and open1))
-    return holes
+    return _merge_coaxial(holes, _countersinks(shape))
+
+
+def _same_line(c1, a1, c2, a2, tol=1e-3):
+    if abs(abs(a1.dot(a2)) - 1.0) > 1e-6:
+        return False
+    d = c2 - c1
+    return (d - a1 * d.dot(a1)).Length < tol
+
+
+def _countersinks(shape):
+    """Concave cones (countersinks): (point on axis, axis, t of wide end,
+    wide radius, t of narrow end, included angle in degrees)."""
+    out = []
+    for face in shape.Faces:
+        surf = face.Surface
+        if surf.TypeId != "Part::GeomCone":
+            continue
+        axis = App.Vector(surf.Axis)
+        axis.normalize()
+        u0, u1, v0, v1 = face.ParameterRange
+        if u1 - u0 < math.pi - 1e-3:
+            continue
+        u, v = (u0 + u1) / 2.0, (v0 + v1) / 2.0
+        p, n = face.valueAt(u, v), face.normalAt(u, v)
+        apex = App.Vector(surf.Apex)
+        radial = (p - apex) - axis * (p - apex).dot(axis)
+        if n.dot(radial) >= 0:
+            continue          # convex: a chamfer on a pin, not a countersink
+        circles = [(e.Curve.Radius, App.Vector(e.Curve.Center)) for e in face.Edges
+                   if "Circle" in getattr(getattr(e, "Curve", None), "TypeId", "")]
+        if not circles:
+            continue
+        wide = max(circles, key=lambda t: t[0])
+        narrow = min(circles, key=lambda t: t[0])
+        out.append((apex, axis, wide[1], wide[0], narrow[1], narrow[0],
+                    2.0 * math.degrees(abs(surf.SemiAngle))))
+    return out
+
+
+def _merge_coaxial(holes, cones):
+    """A hole with a wider, blind, coaxial bore at one end is a counterbore
+    (or a spotface if shallow); a cone at one end is a countersink. The
+    wider bore is folded into the hole instead of being a hole of its own."""
+    used = set()
+    for h in sorted(holes, key=lambda x: x.radius):
+        if id(h) in used:
+            continue
+        for big in holes:
+            if big is h or id(big) in used or big.radius <= h.radius + TOL or big.through:
+                continue
+            if not _same_line(h.centre, h.axis, big.centre, big.axis):
+                continue
+            # aligned extents (both canonical along the same axis direction)
+            off = (big.centre - h.centre).dot(h.axis)
+            b0, b1 = big.t0 + off, big.t1 + off
+            if abs(b0 - h.t1) < 1e-3 or abs(b1 - h.t0) < 1e-3 or \
+                    (h.t0 - 1e-3 <= b0 and b1 <= h.t1 + 1e-3 and (abs(b0 - h.t0) < 1e-3 or abs(b1 - h.t1) < 1e-3)):
+                depth = b1 - b0
+                h.cbore = (big.radius * 2, depth)
+                h.spotface = depth < SPOTFACE_RATIO * big.radius * 2
+                used.add(id(big))
+                break
+        for apex, axis, wide_c, wide_r, narrow_c, narrow_r, ang in cones:
+            if wide_r <= h.radius + TOL or not _same_line(h.centre, h.axis, apex, axis):
+                continue
+            if abs(narrow_r - h.radius) > 1e-3:
+                continue
+            h.csink = (wide_r * 2, ang)
+            break
+    return [h for h in holes if id(h) not in used]
 
 
 def holes_seen_end_on(view, shape=None):
@@ -93,13 +185,16 @@ def group_holes(holes):
     """Same diameter and same depth (or both through) -> one group."""
     groups = {}
     for h in holes:
-        key = (round(h.radius * 2, 3), True if h.through else round(h.depth, 3))
-        groups.setdefault(key, []).append(h)
+        groups.setdefault(h.key(), []).append(h)
     return list(groups.values())
 
 
 def callout_text(group, decimals=2):
-    """FormatSpec for TechDraw: '3X ⌀%.2f THRU' or '⌀%.2f ↧ 10.00'."""
+    """FormatSpec for TechDraw, ASME / ISO 129-1 style:
+    '3X ⌀%.2f THRU', '⌀%.2f ↧ 10.00',
+    '4X ⌀%.2f THRU ⌴ ⌀11.00 ↧ 6.40'  (counterbore),
+    '⌀%.2f THRU SF ⌀16.00 ↧ 1.00'     (spotface),
+    '⌀%.2f THRU ⌵ ⌀12.40 X 90°'      (countersink)."""
     h = group[0]
     spec = "%s%%.%df" % (DIAMETER, decimals)
     if len(group) > 1:
@@ -108,6 +203,13 @@ def callout_text(group, decimals=2):
         spec += " THRU"
     else:
         spec += " %s %.*f" % (DEPTH_SYMBOL, decimals, h.depth)
+    if h.cbore:
+        dia, depth = h.cbore
+        spec += " %s %s%.*f %s %.*f" % (SPOTFACE if h.spotface else COUNTERBORE, DIAMETER,
+                                        decimals, dia, DEPTH_SYMBOL, decimals, depth)
+    if h.csink:
+        dia, ang = h.csink
+        spec += " %s %s%.*f X %g°" % (COUNTERSINK, DIAMETER, decimals, dia, round(ang, 1))
     return spec
 
 
@@ -161,13 +263,32 @@ def _inside(regions, x, y):
     return any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in regions)
 
 
+LABEL_FONT = 5.0     # TechDraw's default dimension text height here (mm)
+
+
+def label_width(group):
+    txt = callout_text(group).replace("%.2f", "%.2f" % (group[0].radius * 2))
+    return len(txt) * LABEL_FONT * 0.58
+
+
+def _label_box(x, y, w):
+    """Page rectangle of a horizontal callout label centred at (x, y)."""
+    return (x - w / 2.0 - 1.0, y - 1.5, x + w / 2.0 + 1.0, y + LABEL_FONT + 1.0)
+
+
+def _overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
 def _place_callout(page, view, group, shape, used, clearance=10.0, min_gap=35.0,
-                   text_len=25.0):
+                   text_len=25.0, boxes=None):
     """Pick (hole, angle, (x, y) relative to view): preferred directions in
-    order, clear of other callouts, label on the drawing area (not off the
-    frame, not on the title block)."""
+    order, clear of other callouts' labels (``boxes``, page rectangles),
+    label on the drawing area (not off the frame, not on the title block)."""
     cx, cy = core.view_center(view)
     regions = core.page_regions(page)
+    boxes = boxes if boxes is not None else []
+    text_len = max(text_len, label_width(group))
     located = []
     for h in group:
         lx, ly = core.model_to_local(view, h.centre, shape)
@@ -179,27 +300,31 @@ def _place_callout(page, view, group, shape, used, clearance=10.0, min_gap=35.0,
             continue
         # the hole lying closest to this direction (any hole if centred)
         hole, _ = min(located, key=lambda o: _angle_gap(o[1], pref) if o[1] is not None else 0)
-        rel = _label_offset(view, hole, pref, shape, clearance)
-        ux, uy = math.cos(math.radians(pref)), math.sin(math.radians(pref))
-        tip = (cx + rel[0] + ux * text_len, cy + rel[1] + uy * text_len)
-        if _inside(regions, cx + rel[0], cy + rel[1]) and _inside(regions, *tip):
-            return hole, float(pref), rel
+        for extra in (0.0, 8.0, 16.0, 24.0):
+            rel = _label_offset(view, hole, pref, shape, clearance + extra)
+            box = _label_box(cx + rel[0], cy + rel[1], text_len)
+            if any(_overlap(box, b) for b in boxes):
+                continue        # would sit on another label: try further out
+            if _inside(regions, box[0], box[1]) and _inside(regions, box[2], box[3]):
+                boxes.append(box)
+                return hole, float(pref), rel
+            break
         if fallback is None:
-            fallback = (hole, float(pref), rel)
+            fallback = (hole, float(pref), _label_offset(view, hole, pref, shape, clearance))
     if fallback:
         return fallback
     hole = located[0][0]
     return hole, 45.0, _label_offset(view, hole, 45.0, shape, clearance)
 
 
-def add_callout(page, view, group, shape=None, used_angles=None, clearance=10.0):
+def add_callout(page, view, group, shape=None, used_angles=None, clearance=10.0, boxes=None):
     """Diameter dimension on one hole of the group, labelled for all of it.
 
     The label sits just outside the view's outline, in a direction no other
     callout on this view uses, and on the drawing area."""
     shape = shape or core.source_shape(view.Source)
     used_angles = used_angles if used_angles is not None else []
-    hole, ang, rel = _place_callout(page, view, group, shape, used_angles, clearance)
+    hole, ang, rel = _place_callout(page, view, group, shape, used_angles, clearance, boxes=boxes)
     edge = circle_edge_name(view, hole, shape)
     if edge is None:
         raise ValueError("Could not find that hole's circle in %s" % view.Label)
@@ -235,10 +360,18 @@ def add_callouts(page, view, holes=None):
     holes = holes if holes is not None else holes_seen_end_on(view, shape)
     out = []
     used = []
+    # labels must not land on other views (they would be hidden under them)
+    boxes = []
+    for v in core.part_views(page):
+        if not core.same(v, view):
+            try:
+                boxes.append(core.view_box(v))
+            except Exception:
+                pass
     # bigger holes first: they usually sit in the middle and need the space
     for g in sorted(group_holes(holes), key=lambda g: -g[0].radius):
         try:
-            out.append(add_callout(page, view, g, shape, used))
+            out.append(add_callout(page, view, g, shape, used, boxes=boxes))
         except ValueError:
             continue  # hidden in this view (no circle drawn)
     return out
@@ -265,9 +398,8 @@ def holes_for_edges(view, edge_names, shape=None):
         return []
     # expand to every hole identical to a picked one (for the 3X count)
     all_holes = holes_seen_end_on(view, shape)
-    keys = {(round(h.radius * 2, 3), True if h.through else round(h.depth, 3)) for h in picked}
-    return [h for h in all_holes
-            if (round(h.radius * 2, 3), True if h.through else round(h.depth, 3)) in keys]
+    keys = {h.key() for h in picked}
+    return [h for h in all_holes if h.key() in keys]
 
 
 # ---------------------------------------------------------------------------

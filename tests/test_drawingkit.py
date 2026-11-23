@@ -1442,3 +1442,97 @@ class TestPartsList(DocTest):
             self.assertLess(a[0], 0)                      # left of the box
             for b in taken[i + 1:]:
                 self.assertGreaterEqual(math_dist(a, b), 10.0 - 1e-9)
+
+
+def hole_block(doc):
+    """60 x 40 x 20 block (top at z=20) with, seen from the top:
+    a counterbored through hole (x=10), a countersunk through hole (x=30),
+    a spotfaced through hole (x=50) and a plain through hole (x=50, y=30)."""
+    import Part
+    s = Part.makeBox(60, 40, 20)
+    z = App.Vector(0, 0, 1)
+    for x, y in ((10, 10), (30, 10), (50, 10), (50, 30)):
+        s = s.cut(Part.makeCylinder(3.3, 30, App.Vector(x, y, -5), z))
+    s = s.cut(Part.makeCylinder(5.5, 6.4, App.Vector(10, 10, 20 - 6.4), z))       # counterbore
+    s = s.cut(Part.makeCone(3.3, 6.2, 2.9, App.Vector(30, 10, 20 - 2.9), z))      # 90° countersink
+    s = s.cut(Part.makeCylinder(8.0, 1.0, App.Vector(50, 10, 19.0), z))          # spotface
+    obj = doc.addObject("Part::Feature", "HoleBlock")
+    obj.Shape = s
+    doc.recompute()
+    return obj
+
+
+class TestAsmeHoles(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import holes
+        self.h = holes
+        self.obj = hole_block(self.doc)
+        self.found = sorted(holes.find_holes(self.obj.Shape), key=lambda x: (x.centre.x, x.centre.y))
+
+    def at(self, x, y):
+        for h in self.found:
+            p = h.centre
+            d = App.Vector(x, y, 0) - App.Vector(p.x, p.y, 0)
+            if d.Length < 1e-3:
+                return h
+
+    def test_wider_bores_are_merged_into_their_hole(self):
+        self.assertEqual(len(self.found), 4)            # not 6: bores folded in
+        self.assertTrue(all(abs(h.radius - 3.3) < 1e-6 for h in self.found))
+        self.assertTrue(all(h.through for h in self.found))
+
+    def test_counterbore(self):
+        h = self.at(10, 10)
+        self.assertAlmostEqual(h.cbore[0], 11.0, places=3)
+        self.assertAlmostEqual(h.cbore[1], 6.4, places=3)
+        self.assertFalse(h.spotface)
+        self.assertEqual(self.h.callout_text([h]), "⌀%.2f THRU ⌴ ⌀11.00 ↧ 6.40")
+
+    def test_countersink(self):
+        h = self.at(30, 10)
+        self.assertAlmostEqual(h.csink[0], 12.4, places=3)
+        self.assertAlmostEqual(h.csink[1], 90.0, delta=0.1)
+        self.assertEqual(self.h.callout_text([h]), "⌀%.2f THRU ⌵ ⌀12.40 X 90°")
+
+    def test_spotface(self):
+        h = self.at(50, 10)
+        self.assertTrue(h.spotface)
+        self.assertEqual(self.h.callout_text([h]), "⌀%.2f THRU SF ⌀16.00 ↧ 1.00")
+
+    def test_plain_and_counted_separately(self):
+        groups = self.h.group_holes(self.found)
+        self.assertEqual(len(groups), 4)                 # same pilot, different heads
+        plain = self.at(50, 30)
+        self.assertIsNone(plain.cbore)
+        self.assertIsNone(plain.csink)
+        self.assertEqual(self.h.callout_text([plain, plain]), "2X ⌀%.2f THRU")
+
+
+class TestAsmeFrame(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import annot
+        self.annot = annot
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+
+    def test_asme_symbols_in_the_frame(self):
+        import xml.etree.ElementTree as ET
+        plain = self.annot.add_frame(self.page, (200, 200), {
+            "char": "profile_surface", "tol": "0.2", "datums": ["A", "B", ""], "tsize": 3.5})
+        fr = self.annot.add_frame(self.page, (200, 150), {
+            "char": "profile_surface", "tol": "0.2", "mod": "RFS", "zones": ["DP", "ST"],
+            "datums": ["A", "B", ""], "datum_mods": ["TR", "RFS", ""], "cf": True, "tsize": 3.5})
+        ET.fromstring(fr.Symbol)
+        self.assertIn(">ST<", fr.Symbol)
+        self.assertIn(">CF<", fr.Symbol)
+        # two Ⓢ circles (tolerance and datum B)
+        self.assertEqual(fr.Symbol.count("<circle") - plain.Symbol.count("<circle"), 2)
+        w_plain = float(__import__("re").search(r'width="([\d.]+)mm"', plain.Symbol).group(1))
+        w_full = float(__import__("re").search(r'width="([\d.]+)mm"', fr.Symbol).group(1))
+        self.assertGreater(w_full, w_plain + 10)
+        self.assertEqual(list(fr.EditableTexts), ["0.2", "A", "B"])
+
+    def test_cycle_buttons_offer_asme_modifiers(self):
+        from DrawingKitTools import gdt
+        self.assertEqual(gdt.MODIFIERS["RFS"], "S")
