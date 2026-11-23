@@ -520,6 +520,15 @@ class HatchByPart:
         if not secs:
             warn("There is no section view on this page.")
             return
+        pop = ui.Popover("Hatch by part")
+        by_mat = ui.toggle("Patterns by material", hatching.material_patterns_on(),
+                           "Off (standard): one general hatch for all, as ASME Y14.2 and ISO 128 "
+                           "do. On: steel double lines, brass solid/dashed, aluminium cross, "
+                           "plastics dashed.")
+        pop.add_row(by_mat, stretch=True)
+        if not pop.run():
+            return
+        hatching.set_material_patterns(by_mat.isChecked())
         doc = page.Document
 
         def work():

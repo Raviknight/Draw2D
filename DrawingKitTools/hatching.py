@@ -51,6 +51,56 @@ def is_unsectioned(obj):
     return bool(NO_SECTION.search(src.Label) or NO_SECTION.search(obj.Label))
 
 
+def part_axis(shape):
+    """Long axis of a shaft/pin/bolt-like part: the axis of its biggest
+    cylindrical face, else the long side of its box if it is clearly
+    longer than wide. None if it has no clear axis."""
+    best = None
+    for f in shape.Faces:
+        if f.Surface.TypeId == "Part::GeomCylinder":
+            if best is None or f.Area > best[0]:
+                best = (f.Area, App.Vector(f.Surface.Axis))
+    if best is not None:
+        ax = best[1]
+        ax.normalize()
+        return ax
+    bb = shape.BoundBox
+    dims = sorted([(bb.XLength, App.Vector(1, 0, 0)), (bb.YLength, App.Vector(0, 1, 0)),
+                   (bb.ZLength, App.Vector(0, 0, 1))], key=lambda t: -t[0])
+    if dims[0][0] >= 2.0 * dims[1][0]:
+        return dims[0][1]
+    return None
+
+
+def cut_normals(sec):
+    """Normals of the planes the section cuts on (one per run for an
+    aligned section)."""
+    if is_aligned(sec):
+        d, _, _ = core.view_axes(sec.BaseView)
+        pts = [App.Vector(v.Point) for v in sec.CuttingToolWireObject.Shape.Vertexes]
+        out = []
+        for a, b in zip(pts, pts[1:]):
+            m = (b - a).cross(d)
+            if m.Length > 1e-9:
+                m.normalize()
+                out.append(m)
+        return out
+    n = App.Vector(sec.SectionNormal)
+    n.normalize()
+    return [n]
+
+
+def cut_lengthwise(part, sec):
+    """True if the cut runs along the part's axis (the axis lies in a cut
+    plane): ASME Y14.3 and ISO 128 then show shafts, pins, bolts... whole,
+    not sectioned. Cut across, they are hatched like any other part."""
+    shape = core.shape_of(part)
+    ax = part_axis(shape) if shape is not None else None
+    if ax is None:
+        return False
+    return any(abs(ax.dot(n)) < 0.5 for n in cut_normals(sec))
+
+
 def section_parts(sec):
     from . import drafting
     return drafting._leaf_parts(list(sec.Source))
@@ -265,6 +315,23 @@ MATERIAL_PATTERNS = [
 ]
 
 
+PREFS = "User parameter:BaseApp/Preferences/Mod/DrawingKit"
+
+
+def material_patterns_on():
+    """Hatch patterns by material are optional: ASME Y14.2 and ISO 128 both
+    use one general-purpose hatch, the material going in the parts list or
+    title block. Off unless switched on."""
+    try:
+        return App.ParamGet(PREFS).GetBool("MaterialHatch", False)
+    except Exception:
+        return False
+
+
+def set_material_patterns(on):
+    App.ParamGet(PREFS).SetBool("MaterialHatch", bool(on))
+
+
 def material_pattern(material):
     for rx, pat in MATERIAL_PATTERNS:
         if material and rx.search(material):
@@ -323,7 +390,11 @@ def plan(sec, overrides=None):
     styles = {}         # identical parts (one parts-list item) share a hatch
     for part, regions in _part_regions_for(sec):
         ov = overrides.get(part.Name, {})
-        skip = ov.get("off", is_unsectioned(part)) if "off" in ov else is_unsectioned(part)
+        if "off" in ov:
+            skip = bool(ov["off"])
+        else:
+            # shafts, pins, bolts... are drawn whole only when cut lengthwise
+            skip = is_unsectioned(part) and cut_lengthwise(part, sec)
         if skip:
             # where its uncut drawing goes: TechDraw centres a view on the
             # part's box, so the box centre in section-local units
@@ -341,7 +412,8 @@ def plan(sec, overrides=None):
         k = styles[sig]
         src = part.getLinkedObject(True) if hasattr(part, "getLinkedObject") else part
         material = core.part_material(src) or ""
-        pattern = ov.get("pattern") or material_pattern(material)
+        pattern = ov.get("pattern") or (material_pattern(material) if material_patterns_on()
+                                        else "single")
         angle = float(ov.get("angle", ANGLES[k % len(ANGLES)]))
         # small sections get closer hatching (about four lines across the
         # narrowest piece, never under 1 mm on paper)

@@ -2199,3 +2199,44 @@ class TestHatchAligned(DocTest):
         if not hatching.drawn_vertices(sec):
             sym, parts = hatching.hatch_by_part(page, sec)
             self.assertIsNone(sym)
+
+
+class TestCutDirection(DocTest):
+    """ASME Y14.3 / ISO 128: shafts, pins, bolts are drawn whole only when
+    cut lengthwise; cut across they are hatched."""
+
+    def test_pin_cut_across_is_hatched(self):
+        from DrawingKitTools import hatching
+        maker = TestHatchByPart("test_each_part_its_own_hatch_and_pins_left_uncut")
+        maker.doc = self.doc
+        page, g, plate, collar, pin = maker.make()
+        # horizontal cut through the plate (pin axis is vertical): across the pin
+        sec = core.add_section(page, g.Anchor, direction="Down", origin=App.Vector(20, 25, 5))
+        self.doc.recompute()
+        self.assertFalse(hatching.cut_lengthwise(pin, sec))
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertFalse(parts["Pin001"]["skip"])
+        self.assertTrue(parts["Pin001"]["segments"])
+        self.assertEqual(hatching.uncut_views(sec), {})
+        # vertical cut along it: drawn whole
+        sec2 = core.add_section(page, g.Anchor, direction="Right", origin=App.Vector(20, 25, 5))
+        self.doc.recompute()
+        self.assertTrue(hatching.cut_lengthwise(pin, sec2))
+        sym2, parts2 = hatching.hatch_by_part(page, sec2)
+        self.assertTrue(parts2["Pin001"]["skip"])
+
+    def test_plain_hatch_unless_material_patterns_on(self):
+        from DrawingKitTools import hatching
+        g = App.ParamGet(hatching.PREFS)
+        old = g.GetBool("MaterialHatch", False)
+        try:
+            hatching.set_material_patterns(False)
+            self.assertFalse(hatching.material_patterns_on())
+            r = hatching.Region([[(0, 0), (20, 0), (20, 10), (0, 10)]])
+            self.assertEqual(hatching.material_pattern("Steel-Generic"), "double")
+            hatching.set_material_patterns(True)
+            self.assertTrue(hatching.material_patterns_on())
+        finally:
+            g.SetBool("MaterialHatch", old)
+            if not old:
+                g.RemBool("MaterialHatch")
