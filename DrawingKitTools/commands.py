@@ -1401,6 +1401,440 @@ class SmartDimension:
                             on_move=on_move, on_click=on_click, finish_on_right_click=False)
 
 
+def _pick_entities(page, hint, done, max_picks=None, label=None):
+    """Hover-highlight and click lines, circles and points in one view (like
+    the Dimension tool). Enter or right-click finishes; reaching
+    ``max_picks`` finishes at once. done(view, picks)."""
+    from . import annot, interact, smartdim
+    show_page(page)
+    Gui.updateGui()
+    Gui.Selection.clearSelection()
+    st = {"view": None, "picks": [], "ents": {}, "hover": None}
+
+    def ents_of(view):
+        if view.Name not in st["ents"]:
+            st["ents"][view.Name] = smartdim.entities(view)
+        return st["ents"][view.Name]
+
+    def hl(view, e, color):
+        s = core.view_scale(view)
+        if e.kind == "line":
+            return ("hl_line", [annot.view_point(view, e.pts[0]), annot.view_point(view, e.pts[1])], color)
+        if e.kind in ("circle", "arc"):
+            return ("hl_circle", annot.view_point(view, e.point), e.radius * s, color)
+        return ("hl_point", annot.view_point(view, e.point), 1.6, color)
+
+    def same(a, b):
+        return a.kind == b.kind and a.index == b.index
+
+    def on_move(pt, _points):
+        view = st["view"] or interact._view_under(page, pt[0], pt[1], margin=3.0)
+        st["hover"] = None
+        shapes = [hl(st["view"], p, "#1f77b4") for p in st["picks"]]
+        if view is None:
+            return shapes
+        try:
+            hov = smartdim.pick(view, annot.page_to_local(view, *pt), ents_of(view))
+        except Exception:
+            hov = None
+        if hov is not None:
+            st["hover"] = (view, hov)
+            if not any(same(hov, p) for p in st["picks"]):
+                shapes.append(hl(view, hov, "#ff7f0e"))
+        if label and st["picks"]:
+            shapes.append(("text", pt[0] + 2.0, pt[1] + 2.0, label(st["picks"])))
+        return shapes
+
+    def on_click(pt, points):
+        points.clear()
+        hov = st["hover"]
+        if hov is None or (st["view"] is not None and not core.same(hov[0], st["view"])):
+            return False
+        if any(same(hov[1], p) for p in st["picks"]):
+            return False
+        st["view"] = hov[0]
+        st["picks"].append(hov[1])
+        if max_picks and len(st["picks"]) >= max_picks:
+            QtCore.QTimer.singleShot(0, finish)
+            return False
+        return False
+
+    def finish():
+        picker.cancel()
+        if st["picks"]:
+            try:
+                done(st["view"], list(st["picks"]))
+            except Exception as e:
+                warn(str(e))
+
+    def on_done(_points):
+        if st["picks"]:
+            try:
+                done(st["view"], list(st["picks"]))
+            except Exception as e:
+                warn(str(e))
+
+    picker = interact.PagePicker(page, hint, on_move=on_move, on_click=on_click,
+                                 on_done=on_done, finish_on_right_click=True)
+    return picker
+
+
+class OrdinateDims:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Ordinate.svg"),
+                "MenuText": "Ordinate / baseline dimensions",
+                "ToolTip": "Dimension many features from one zero edge or point. Pick "
+                           "Ordinate (0, 20, 45 … on extension lines), Baseline (stacked) "
+                           "or Chain (end to end), and horizontal or vertical. Click the "
+                           "zero edge/point first, then each feature; Enter to finish."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    last = {"mode": "ordinate", "axis": "x"}
+
+    def Activated(self):
+        from . import drafting
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        pop = ui.Popover("Ordinate / baseline")
+        mode = ui.combo([("ordinate", "Ordinate"), ("baseline", "Baseline"), ("chain", "Chain")],
+                        self.last["mode"], 100)
+        horiz = ui.toggle("↔ Horizontal", self.last["axis"] == "x")
+        vert = ui.toggle("↕ Vertical", self.last["axis"] == "y")
+        grp = QtWidgets.QButtonGroup(pop)
+        grp.setExclusive(True)
+        grp.addButton(horiz)
+        grp.addButton(vert)
+        pop.add_row(mode, horiz, vert)
+        if not pop.run():
+            return
+        m, axis = mode.currentData(), ("x" if horiz.isChecked() else "y")
+        OrdinateDims.last = {"mode": m, "axis": axis}
+        doc = page.Document
+
+        def done(view, picks):
+            if len(picks) < 2:
+                warn("Pick the zero edge or point, then at least one feature.")
+                return
+            if m == "ordinate":
+                r = run_in_transaction(doc, "DrawingKit ordinate dimensions", lambda: drafting.add_ordinate(
+                    page, view, picks[0], picks[1:], axis))
+                n = len(picks) - 1
+            else:
+                r = run_in_transaction(doc, "DrawingKit %s dimensions" % m, lambda: drafting.add_baseline(
+                    page, view, picks[0], picks[1:], axis, chain=(m == "chain")))
+                n = len(r)
+            doc.recompute()
+            say("%d %s dimension(s) added" % (n, m))
+
+        _pick_entities(page, "%s %s: click the zero edge or point, then each feature. "
+                             "Enter to finish, Esc to cancel." % (m.capitalize(),
+                                                                 "horizontal" if axis == "x" else "vertical"),
+                       done, label=lambda picks: "0" if len(picks) == 1 else "%d" % (len(picks) - 1))
+
+
+class Centerline:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Centerline.svg"),
+                "MenuText": "Centerline",
+                "ToolTip": "Click two edges (e.g. the sides of a hole or shaft seen from the "
+                           "side) or two points: a centerline is drawn midway, extending a "
+                           "little past them. It follows the view."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import drafting
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        doc = page.Document
+
+        def done(view, picks):
+            if len(picks) < 2:
+                return
+            run_in_transaction(doc, "DrawingKit centerline",
+                               lambda: drafting.add_centerline(view, picks[0], picks[1]))
+            doc.recompute()
+            say("Centerline added")
+
+        _pick_entities(page, "Centerline: click two edges or two points (Esc to cancel).", done,
+                       max_picks=2)
+
+
+class ChamferCallout:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Chamfer.svg"),
+                "MenuText": "Chamfer callout",
+                "ToolTip": "Click the slanted chamfer edge, then where the text goes: "
+                           "'1 x 45°' (or '2 x 30°'), on a leader that stays on the edge."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import annot, drafting, interact, smartdim
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        show_page(page)
+        Gui.updateGui()
+        doc = page.Document
+
+        def preview(anchor, pt):
+            return [("line", [anchor, pt]), ("rect", pt[0], pt[1], 22, 5)]
+
+        def done(anchor, box):
+            view = interact._view_under(page, anchor[0], anchor[1], margin=3.0)
+            if view is None:
+                warn("Click on the chamfer edge in a view.")
+                return
+            local = annot.page_to_local(view, *anchor)
+            lines = [e for e in smartdim.entities(view) if e.kind == "line"]
+            ent = smartdim.pick(view, local, lines)
+            if ent is None:
+                warn("No edge there - click right on the chamfer.")
+                return
+            try:
+                text = drafting.chamfer_text(ent)
+            except ValueError as e:
+                warn(str(e))
+                return
+            box = box or (anchor[0] + 18, anchor[1] + 12)
+            sym = run_in_transaction(doc, "DrawingKit chamfer", lambda: annot.add_note(
+                page, box, [text], anchor=anchor))
+            doc.recompute()
+            say("Chamfer %s placed (a note: select it and press Note to edit)" % text)
+
+        _two_click(page, "Click the chamfer edge,", "click where the text goes.", preview, done)
+
+
+class SurfaceDialog(ui.Popover):
+    last = {"process": "remove", "ra": "Ra 3.2", "lay": "", "method": "", "all_around": False}
+
+    def __init__(self):
+        from . import drafting
+        super().__init__("Surface texture")
+        l = self.last
+        self.proc = ui.combo(drafting.SURF_PROCESS, l["process"], 190)
+        self.ra = QtWidgets.QComboBox()
+        self.ra.setEditable(True)
+        for v in ("Ra 0.4", "Ra 0.8", "Ra 1.6", "Ra 3.2", "Ra 6.3", "Ra 12.5", "Rz 6.3", "Rz 25"):
+            self.ra.addItem(v)
+        self.ra.setEditText(l["ra"])
+        self.ra.setFixedWidth(84)
+        self.ra.setToolTip("Roughness requirement (pick or type)")
+        self.add_row(self.proc, self.ra)
+        self.lay = ui.combo([(x, x or "no lay") for x in drafting.LAYS], l["lay"], 70)
+        self.lay.setToolTip("Lay (direction of the machining marks)")
+        self.method = ui.field(l["method"], 90, "ground", "Manufacturing method (above the line)")
+        self.around = ui.toggle("○ All around", l["all_around"], "All surfaces around the outline")
+        self.add_row("Lay", self.lay, self.method, self.around, stretch=True)
+        self.focus_on = self.ra.lineEdit()
+
+    def choice(self):
+        c = {"process": self.proc.currentData(), "ra": self.ra.currentText().strip(),
+             "lay": self.lay.currentData(), "method": self.method.text().strip(),
+             "all_around": self.around.isChecked()}
+        SurfaceDialog.last = dict(c)
+        return c
+
+
+class SurfaceFinish:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_SurfaceFinish.svg"),
+                "MenuText": "Surface texture symbol",
+                "ToolTip": "ISO 1302 surface symbol: pick the process (any / machined / no "
+                           "material removal), Ra value, lay and method, then click the "
+                           "surface's edge and where the symbol goes (Enter: on the surface "
+                           "if it's on top, else on a leader). Follows the view."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import drafting
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        dlg = SurfaceDialog()
+        if not dlg.run():
+            return
+        c = dlg.choice()
+        show_page(page)
+        Gui.updateGui()
+        doc = page.Document
+
+        def preview(anchor, pt):
+            return [("line", [anchor, pt]), ("line", [pt, (pt[0] - 3, pt[1] + 5), (pt[0], pt[1]),
+                                                      (pt[0] + 6, pt[1] + 10)])]
+
+        def done(anchor, box):
+            sym = run_in_transaction(doc, "DrawingKit surface symbol",
+                                     lambda: drafting.add_surface(page, anchor[0], anchor[1], c, box))
+            doc.recompute()
+            say("%s placed; drag it to move" % sym.Label)
+
+        _two_click(page, "Click the surface's edge,", "click where the symbol goes.", preview, done)
+
+
+class WeldDialog(ui.Popover):
+    last = {"type": "fillet", "side": "arrow", "size": "a5", "length": "", "all_around": False,
+            "field": False, "process": "", "iso_line": True}
+
+    def __init__(self):
+        from . import drafting
+        super().__init__("Weld")
+        l = self.last
+        self.kind = ui.combo(drafting.WELDS, l["type"], 130)
+        self.side = ui.combo([("arrow", "Arrow side"), ("other", "Other side"), ("both", "Both sides")],
+                             l["side"], 100)
+        self.size = ui.field(l["size"], 40, "a5", "Size (fillet: a = throat, z = leg)")
+        self.length = ui.field(l["length"], 46, "50", "Weld length, or n x l (e)")
+        self.add_row(self.kind, self.side, self.size, self.length)
+        self.around = ui.toggle("○ All around", l["all_around"])
+        self.field_ = ui.toggle("⚑ Field weld", l["field"], "Welded on site")
+        self.iso = ui.toggle("ISO dashed line", l["iso_line"], "ISO 2553 system A identification line")
+        self.process = ui.field(l["process"], 46, "111", "Process number in the tail (ISO 4063)")
+        self.add_row(self.around, self.field_, self.iso, "Tail", self.process, stretch=True)
+        self.focus_on = self.size
+
+    def choice(self):
+        c = {"type": self.kind.currentData(), "side": self.side.currentData(),
+             "size": self.size.text().strip(), "length": self.length.text().strip(),
+             "all_around": self.around.isChecked(), "field": self.field_.isChecked(),
+             "iso_line": self.iso.isChecked(), "process": self.process.text().strip()}
+        WeldDialog.last = dict(c)
+        return c
+
+
+class WeldSymbol:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Weld.svg"),
+                "MenuText": "Weld symbol",
+                "ToolTip": "ISO 2553 weld symbol: type, side, size and length, all-around, "
+                           "field weld and process. Click the joint, then where the reference "
+                           "line goes. Follows the view."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import drafting
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        dlg = WeldDialog()
+        if not dlg.run():
+            return
+        c = dlg.choice()
+        show_page(page)
+        Gui.updateGui()
+        doc = page.Document
+
+        def preview(anchor, pt):
+            return [("line", [anchor, pt, (pt[0] + 22, pt[1])])]
+
+        def done(anchor, box):
+            sym = run_in_transaction(doc, "DrawingKit weld symbol",
+                                     lambda: drafting.add_weld(page, anchor[0], anchor[1], c, box))
+            doc.recompute()
+            say("%s placed; drag it to move" % sym.Label)
+
+        _two_click(page, "Click the joint,", "click where the reference line starts.", preview, done)
+
+
+class PartsList:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_PartsList.svg"),
+                "MenuText": "Parts list",
+                "ToolTip": "Select a view of an assembly: a parts list (item, qty, part, "
+                           "material) goes above the title block, identical parts counted "
+                           "together. Balloons with the item numbers are added too."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import drafting
+        view = selected_part_view()
+        if view is None:
+            page = target_page()
+            views = core.part_views(page) if page is not None else []
+            view = views[0] if views else None
+        if view is None:
+            warn("Select a view of the assembly first.")
+            return
+        page = parent_page(view)
+        pop = ui.Popover("Parts list")
+        balloons = ui.toggle("+ Balloons", True, "Number every part in this view")
+        pop.add_row("For %s" % view.Label, balloons, stretch=True)
+        if not pop.run():
+            return
+        doc = page.Document
+
+        def work():
+            table, items = drafting.add_parts_list(page, view)
+            made = drafting.auto_balloons(page, view) if balloons.isChecked() else []
+            return items, made
+
+        items, made = run_in_transaction(doc, "DrawingKit parts list", work)
+        doc.recompute()
+        say("Parts list with %d item(s)%s" % (len(items), (", %d balloon(s)" % len(made)) if made else ""))
+
+
+class Balloon:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Balloon.svg"),
+                "MenuText": "Balloon",
+                "ToolTip": "Click a part in a view, then where the balloon goes: it gets the "
+                           "part's item number from the parts list (or the next number)."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import drafting, interact
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        show_page(page)
+        Gui.updateGui()
+        doc = page.Document
+
+        def preview(anchor, pt):
+            return [("line", [anchor, pt]), ("circle", pt[0], pt[1], 4)]
+
+        def done(anchor, box):
+            view = interact._view_under(page, anchor[0], anchor[1], margin=1.0)
+            if view is None:
+                warn("Click on a part in a view.")
+                return
+            it, _obj = drafting.part_at(view, anchor[0], anchor[1])
+            if it is not None:
+                text = it["item"]
+            else:
+                nums = [int(b.Text) for b in page.Views
+                        if b.isDerivedFrom("TechDraw::DrawViewBalloon") and str(b.Text).isdigit()]
+                text = max(nums or [0]) + 1
+            box = box or (anchor[0] + 15, anchor[1] + 15)
+            run_in_transaction(doc, "DrawingKit balloon",
+                               lambda: drafting.add_balloon(page, view, anchor, box, text))
+            doc.recompute()
+            say("Balloon %s placed" % text)
+
+        _two_click(page, "Click the part,", "click where the balloon goes.", preview, done)
+
+
 def _one_click(page, hint, preview, done):
     """Click once to place (Esc cancels)."""
     from . import interact
@@ -1569,6 +2003,13 @@ COMMANDS = [
     ("DrawingKit_ToleranceFrame", ToleranceFrame()),
     ("DrawingKit_Note", Note()),
     ("DrawingKit_TextStyle", TextStyle()),
+    ("DrawingKit_Ordinate", OrdinateDims()),
+    ("DrawingKit_Centerline", Centerline()),
+    ("DrawingKit_Chamfer", ChamferCallout()),
+    ("DrawingKit_SurfaceFinish", SurfaceFinish()),
+    ("DrawingKit_Weld", WeldSymbol()),
+    ("DrawingKit_PartsList", PartsList()),
+    ("DrawingKit_Balloon", Balloon()),
     ("DrawingKit_HoleTable", HoleTable()),
     ("DrawingKit_FillTitleBlock", FillTitleBlock()),
     ("DrawingKit_Revision", AddRevision()),
@@ -1585,12 +2026,15 @@ COMMAND_GROUPS = [
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
                           "DrawingKit_AlignedSection", "DrawingKit_DetailView",
                           "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_SpeedToggle"]),
-    ("DrawingKit annotation", ["DrawingKit_Dimension", "DrawingKit_CenterMarks", "DrawingKit_HoleCallout",
-                               "DrawingKit_EditDimension",
+    ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
+                               "DrawingKit_CenterMarks", "DrawingKit_Centerline",
+                               "DrawingKit_HoleCallout", "DrawingKit_Chamfer"]),
+    ("DrawingKit annotation", ["DrawingKit_SurfaceFinish", "DrawingKit_Weld",
                                "DrawingKit_Datum", "DrawingKit_DatumTarget",
                                "DrawingKit_ToleranceFrame", "DrawingKit_Note",
                                "DrawingKit_TextStyle"]),
-    ("DrawingKit tables", ["DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
+    ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
+                           "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
                            "DrawingKit_Revision"]),
 ]
 

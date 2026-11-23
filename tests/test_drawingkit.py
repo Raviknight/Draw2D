@@ -882,15 +882,27 @@ class TestAnnotations(DocTest):
             base, zones=["CZ", "P", "F", "T"], proj="15"))
         ET.fromstring(full.Symbol)
         self.assertGreater(self._svg_size(full)[0], self._svg_size(plain)[0] + 4 * 4.2)
-        for t in (">P<", ">F<", ">T<", ">CZ<", ">15<", ">M<"):
+        for t in (">CZ<", ">15<"):
             self.assertIn(t, full.Symbol)
-        # Ⓜ comes before Ⓟ (ASME Y14.5 order)
-        self.assertLess(full.Symbol.index(">M<"), full.Symbol.index(">P<"))
+        # Ⓜ Ⓟ Ⓕ Ⓣ: four circles more than the plain frame's Ⓜ
+        self.assertEqual(full.Symbol.count("<circle") - plain.Symbol.count("<circle"), 3)
         prof = self.annot.add_frame(self.page, (300, 170), {
             "char": "profile_surface", "tol": "0.2", "zones": ["U"], "uval": "0.05",
             "datums": ["A", "", ""], "tsize": 3.5})
-        self.assertIn(">U<", prof.Symbol)
+        self.assertEqual(prof.Symbol.count("<circle"), 1)   # Ⓤ
         self.assertIn(">0.05<", prof.Symbol)
+
+    def test_circled_letters_are_centred(self):
+        sk = self.annot.Sketch()
+        for letter in "MLPFTUES":
+            sk.items, sk.xs, sk.ys = [], [], []
+            self.annot.circled(sk, (10.0, 20.0), 1.8, letter)
+            lines = [it for it in sk.items if it[0] == "line"]
+            self.assertTrue(lines, letter)
+            xs = [p[0] for it in lines for p in it[1:3]]
+            ys = [p[1] for it in lines for p in it[1:3]]
+            self.assertAlmostEqual((min(xs) + max(xs)) / 2, 10.0, delta=0.15, msg=letter)
+            self.assertAlmostEqual((min(ys) + max(ys)) / 2, 20.0, delta=0.15, msg=letter)
 
     def test_all_around_and_between(self):
         x0, y0, x1, y1 = core.view_box(self.front)
@@ -1257,3 +1269,176 @@ class TestSpeed(DocTest):
         self.assertFalse(core.is_fast(page))
         self.assertFalse(any(v.CoarseView for v in core.part_views(page)))
         self.assertTrue(all("Up-to-date" in v.State for v in core.part_views(page)))
+
+
+class TestDrafting(DocTest):
+    """Ordinate/baseline/chain, centerlines, chamfers, surface, weld, parts list."""
+
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import drafting, smartdim, annot
+        self.dr, self.sd, self.annot = drafting, smartdim, annot
+        self.part = plate_two_holes(self.doc)
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        self.g = core.add_standard_views(self.page, [self.part])
+        self.doc.recompute()
+        self.v = self.g.Anchor            # 80 x 50 face, centre at the plate middle
+        self.ents = self.sd.entities(self.v)
+
+    def find(self, kind, near):
+        return self.sd.pick(self.v, near, [e for e in self.ents if e.kind == kind], tol=1.0)
+
+    def test_baseline_dimensions_stack(self):
+        left = self.find("line", (-40, 0))
+        holes = [self.find("circle", (-15, 0)), self.find("circle", (25, 0))]
+        right = self.find("line", (40, 0))
+        dims = self.dr.add_baseline(self.page, self.v, left, holes + [right], "x")
+        self.doc.recompute()
+        self.assertEqual([round(d.getRawValue(), 3) for d in dims], [20.0, 60.0, 80.0])
+        self.assertEqual(len({round(float(d.Y), 3) for d in dims}), 3)   # three rows
+
+    def test_chain_dimensions_one_row(self):
+        left = self.find("line", (-40, 0))
+        holes = [self.find("circle", (25, 0)), self.find("circle", (-15, 0))]
+        dims = self.dr.add_baseline(self.page, self.v, left, holes, "x", chain=True)
+        self.doc.recompute()
+        self.assertEqual([round(d.getRawValue(), 3) for d in dims], [20.0, 40.0])
+        self.assertEqual(len({round(float(d.Y), 3) for d in dims}), 1)
+
+    def test_vertical_baseline(self):
+        bottom = self.find("line", (0, -25))
+        hole = self.find("circle", (-15, 0))
+        dims = self.dr.add_baseline(self.page, self.v, bottom, [hole], "y")
+        self.doc.recompute()
+        self.assertEqual(dims[0].Type, "DistanceY")
+        self.assertAlmostEqual(dims[0].getRawValue(), 25.0, places=6)
+
+    def test_ordinate_follows_view(self):
+        import xml.etree.ElementTree as ET
+        left = self.find("line", (-40, 0))
+        holes = [self.find("circle", (-15, 0)), self.find("circle", (25, 0)), self.find("line", (40, 0))]
+        o = self.dr.add_ordinate(self.page, self.v, left, holes, "x")
+        ET.fromstring(o.Symbol)
+        for t in (">0<", ">20<", ">60<", ">80<"):
+            self.assertIn(t, o.Symbol)
+        self.assertIn("rotate(-90", o.Symbol)
+        x = float(o.X)
+        self.g.X = float(self.g.X) + 10
+        self.annot.refresh(self.annot.attached_to(self.g))
+        self.assertAlmostEqual(float(o.X) - x, 10.0, places=6)
+
+    def test_ordinate_spreads_close_values(self):
+        left = self.find("line", (-40, 0))
+        o = self.dr.add_ordinate(self.page, self.v, left, [self.find("line", (-40, 0))], "y")
+        self.assertIn(">0<", o.Symbol)
+
+    def test_centerline_between_two_lines(self):
+        top = self.find("line", (0, 25))
+        bottom = self.find("line", (0, -25))
+        before = len(self.v.CenterLines)
+        self.dr.add_centerline(self.v, top, bottom)
+        self.assertEqual(len(self.v.CenterLines), before + 1)
+
+    def test_chamfer_text(self):
+        E = self.sd.Ent
+        self.assertEqual(self.dr.chamfer_text(E("line", 0, [(0, 0), (1, 1)])), "1 x 45°")
+        self.assertEqual(self.dr.chamfer_text(E("line", 0, [(0, 0), (1.5, 1.5)]), "c"), "C1.5")
+        self.assertEqual(self.dr.chamfer_text(E("line", 0, [(0, 0), (2, 1.1547)])), "2 x 30°")
+        with self.assertRaises(ValueError):
+            self.dr.chamfer_text(E("line", 0, [(0, 0), (5, 0)]))
+
+    def test_surface_symbol_on_top_edge(self):
+        import xml.etree.ElementTree as ET
+        x0, y0, x1, y1 = core.view_box(self.v)
+        s = self.dr.add_surface(self.page, (x0 + x1) / 2 + 10, y1,
+                                {"ra": "Ra 1.6", "process": "remove", "lay": "="})
+        ET.fromstring(s.Symbol)
+        self.assertEqual(s.DrawingKitAnchorKind, "view")
+        self.assertEqual(list(s.EditableTexts), ["Ra 1.6"])
+        self.assertEqual(tuple(s.DrawingKitOffset)[:2], (0.0, 0.0))   # sits on the top face
+        # on the right edge it stands off on a leader with an arrow
+        s2 = self.dr.add_surface(self.page, x1, (y0 + y1) / 2,
+                                 {"ra": "Ra 3.2", "process": "noremove", "method": "ground"})
+        self.assertNotEqual(tuple(s2.DrawingKitOffset)[:2], (0.0, 0.0))
+        self.assertEqual(sorted(s2.EditableTexts), ["Ra 3.2", "ground"])
+
+    def test_weld_symbol(self):
+        import xml.etree.ElementTree as ET
+        x0, y0, x1, y1 = core.view_box(self.v)
+        w = self.dr.add_weld(self.page, x1, y1, {"type": "fillet", "size": "a5", "length": "50",
+                                                  "side": "arrow", "all_around": True, "field": True})
+        ET.fromstring(w.Symbol)
+        self.assertIn("stroke-dasharray", w.Symbol)   # ISO identification line
+        self.assertEqual(sorted(w.EditableTexts), ["50", "a5"])
+        for kind, _ in self.dr.WELDS:
+            for side in ("arrow", "other", "both"):
+                w2 = self.dr.add_weld(self.page, x1, y0, {"type": kind, "size": "5", "side": side})
+                ET.fromstring(w2.Symbol)
+
+
+class TestPartsList(DocTest):
+    def setUp(self):
+        super().setUp()
+        import Part
+        from DrawingKitTools import drafting
+        self.dr = drafting
+        asm = self.doc.addObject("App::Part", "Assembly")
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = Part.makeBox(100, 60, 10)
+        p1 = self.doc.addObject("Part::Feature", "Pin001")
+        p1.Shape = Part.makeCylinder(4, 20, App.Vector(20, 30, 10))
+        p2 = self.doc.addObject("Part::Feature", "Pin002")
+        p2.Shape = Part.makeCylinder(4, 20, App.Vector(80, 30, 10))
+        for o in (base, p1, p2):
+            asm.addObject(o)
+        self.doc.recompute()
+        self.asm = asm
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        view = self.doc.addObject("TechDraw::DrawViewPart", "View")
+        self.page.addView(view)
+        view.Source = [asm]
+        view.Direction = App.Vector(0, -1, 0)
+        view.XDirection = App.Vector(1, 0, 0)
+        view.Scale = 1.0
+        view.X, view.Y = 150, 150
+        self.doc.recompute()
+        self.view = view
+
+    def test_identical_parts_counted(self):
+        items = self.dr.bom_items([self.asm])
+        self.assertEqual([(i["name"], i["qty"]) for i in items], [("Base", 1), ("Pin", 2)])
+
+    def test_parts_list_table(self):
+        table, items = self.dr.add_parts_list(self.page, self.view)
+        self.assertIn("PARTS LIST", table.Symbol)
+        self.assertIn(">Pin<", table.Symbol)
+        self.assertEqual(table.DrawingKitAnnot, "bom")
+
+    def test_part_under_a_point_and_balloons(self):
+        from DrawingKitTools import core as c
+        items = self.dr.bom_items([self.asm])
+        # the pin seen from the front, above the base
+        px, py = c.model_to_page(self.view, App.Vector(20, 30, 25))
+        it, obj = self.dr.part_at(self.view, px, py, items)
+        self.assertEqual(it["name"], "Pin")
+        px, py = c.model_to_page(self.view, App.Vector(50, 30, 5))
+        it, obj = self.dr.part_at(self.view, px, py, items)
+        self.assertEqual(it["name"], "Base")
+        balloons = self.dr.auto_balloons(self.page, self.view)
+        self.assertEqual(sorted(b.Text for b in balloons), ["1", "2"])
+        # stored in view units (page offset / scale); bubbles outside the view
+        s = c.view_scale(self.view)
+        cx, cy = c.view_center(self.view)
+        x0, y0, x1, y1 = c.view_box(self.view)
+        for b in balloons:
+            bx, by = cx + float(b.X) * s, cy + float(b.Y) * s
+            self.assertFalse(x0 < bx < x1 and y0 < by < y1, b.Text)
+
+    def test_balloon_places_do_not_overlap(self):
+        taken = []
+        for _ in range(5):
+            taken.append(self.dr.balloon_place((10, 50), (0, 0, 100, 100), taken))
+        for i, a in enumerate(taken):
+            self.assertLess(a[0], 0)                      # left of the box
+            for b in taken[i + 1:]:
+                self.assertGreaterEqual(math_dist(a, b), 10.0 - 1e-9)

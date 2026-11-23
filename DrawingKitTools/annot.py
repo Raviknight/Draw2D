@@ -195,10 +195,10 @@ class Sketch:
         self.xs.append(x)
         self.ys.append(y)
 
-    def line(self, a, b, width=STROKE):
+    def line(self, a, b, width=STROKE, dash=False):
         self._p(*a)
         self._p(*b)
-        self.items.append(("line", a, b, width))
+        self.items.append(("line", a, b, width, dash))
 
     def poly(self, pts, fill=False):
         for p in pts:
@@ -222,17 +222,21 @@ class Sketch:
         self._p(x0 + w, ytop - h)
         self.items.append(("raw", x0, ytop, fragment))
 
-    def text(self, x, y, txt, size=gdt.FONT, anchor="middle", editable=None):
-        """``size`` is the size at 3.5 mm lettering; it is scaled by k."""
+    def text(self, x, y, txt, size=gdt.FONT, anchor="middle", editable=None, rot=0):
+        """``size`` is the size at 3.5 mm lettering; it is scaled by k.
+        ``rot``: 90 reads upwards (for vertical ordinate values)."""
         size = size * self.k
         w = len(txt) * size * 0.6
-        if anchor == "start":
-            self._p(x, y - size * 0.4)
-            self._p(x + w, y + size * 0.7)
+        x0 = x if anchor == "start" else x - w
+        x1 = x + w
+        if rot:
+            # rotated about (x, y): along the text is now up the page
+            self._p(x - size * 0.7, y + (x0 - x))
+            self._p(x + size * 0.4, y + (x1 - x))
         else:
-            self._p(x - w, y - size * 0.4)
-            self._p(x + w, y + size * 0.7)
-        self.items.append(("text", x, y, txt, size, anchor, editable))
+            self._p(x0, y - size * 0.4)
+            self._p(x1, y + size * 0.7)
+        self.items.append(("text", x, y, txt, size, anchor, editable, rot))
 
     def svg(self):
         m = 1.0
@@ -247,9 +251,10 @@ class Sketch:
         for it in self.items:
             k = it[0]
             if k == "line":
-                _, a, b, w = it
-                out.append('<path style="stroke-width:%g" d="M %.3f,%.3f L %.3f,%.3f"/>'
-                           % (w, X(a[0]), Y(a[1]), X(b[0]), Y(b[1])))
+                _, a, b, w, dash = it
+                out.append('<path style="stroke-width:%g%s" d="M %.3f,%.3f L %.3f,%.3f"/>'
+                           % (w, ";stroke-dasharray:3,1.5" if dash else "",
+                              X(a[0]), Y(a[1]), X(b[0]), Y(b[1])))
             elif k == "poly":
                 _, pts, fill = it
                 d = " L ".join("%.3f,%.3f" % (X(p[0]), Y(p[1])) for p in pts)
@@ -268,8 +273,13 @@ class Sketch:
                 out.append('<circle style="stroke-width:%g" cx="%.3f" cy="%.3f" r="%.3f"/>'
                            % (w, X(c[0]), Y(c[1]), r))
             else:
-                _, x, y, txt, size, anchor, ed = it
-                texts.append(gdt._text(X(x), Y(y) + size * 0.36, txt, ed, anchor, size, self.font))
+                _, x, y, txt, size, anchor, ed, rot = it
+                t = gdt._text(X(x), Y(y) + size * 0.36, txt, ed, anchor, size, self.font)
+                if rot:
+                    # turn about (x, y); the baseline shift keeps it centred
+                    t = t.replace('<text ', '<text transform="rotate(%g %.3f %.3f)" '
+                                  % (-rot, X(x), Y(y)), 1)
+                texts.append(t)
         out.append('</g>')
         out.extend(texts)
         out.append('</svg>')
@@ -466,8 +476,7 @@ def draw_frame(sk, anchor, box_centre, p, values, align=None):
         for kind_, txt in tolerance_items(seg):
             w = _item_w(kind_, txt) * k
             if kind_ == "circ":
-                sk.circle((mx + w / 2.0, cy), 1.8 * k)
-                sk.text(mx + w / 2.0, cy + 0.1 * k, txt, size=2.6)
+                circled(sk, (mx + w / 2.0, cy), 1.8 * k, txt)
             else:
                 sk.text(mx + w / 2.0, cy, txt)
             mx += w
@@ -479,8 +488,7 @@ def draw_frame(sk, anchor, box_centre, p, values, align=None):
             sk.text(x + (w - (3.6 * k if m else 0.0)) / 2.0, cy, values.get(name, d), editable=name)
             if m:
                 mx = x + w - 2.2 * k
-                sk.circle((mx, cy), 1.5 * k)
-                sk.text(mx, cy + 0.1 * k, gdt.MODIFIERS[m], size=2.2)
+                circled(sk, (mx, cy), 1.5 * k, gdt.MODIFIERS[m])
             x += w
     count = values.get("count", p.get("count", ""))
     if count:
@@ -504,6 +512,41 @@ def draw_frame(sk, anchor, box_centre, p, values, align=None):
             sk.line(end, anchor)
             draw_arrow(sk, anchor, end)
     return W
+
+
+def _arc(cx, cy, rx, ry, a0, a1, n=8):
+    return [(cx + rx * math.cos(math.radians(a0 + (a1 - a0) * i / n)),
+             cy + ry * math.sin(math.radians(a0 + (a1 - a0) * i / n))) for i in range(n + 1)]
+
+
+# Modifier letters as strokes in a unit box (x, y in -0.5..0.5, y up), so
+# they sit exactly in the middle of their circle whatever the font.
+GLYPHS = {
+    "M": [[(-0.5, -0.5), (-0.5, 0.5), (0, -0.1), (0.5, 0.5), (0.5, -0.5)]],
+    "L": [[(-0.4, 0.5), (-0.4, -0.5), (0.45, -0.5)]],
+    "F": [[(0.45, 0.5), (-0.4, 0.5), (-0.4, -0.5)], [(-0.4, 0.02), (0.3, 0.02)]],
+    "T": [[(-0.5, 0.5), (0.5, 0.5)], [(0, 0.5), (0, -0.5)]],
+    "E": [[(0.45, 0.5), (-0.4, 0.5), (-0.4, -0.5), (0.45, -0.5)], [(-0.4, 0.0), (0.3, 0.0)]],
+    "U": [[(-0.45, 0.5), (-0.45, -0.05)] + _arc(0, -0.05, 0.45, 0.45, 180, 360)
+          + [(0.45, 0.5)]],
+    "P": [[(-0.4, -0.5), (-0.4, 0.5), (0.1, 0.5)] + _arc(0.1, 0.25, 0.3, 0.25, 90, -90)
+          + [(-0.4, 0.0)]],
+    "S": [_arc(0, 0.25, 0.4, 0.25, 20, 270) + _arc(0, -0.25, 0.4, 0.25, 90, -200)],
+}
+
+
+def circled(sk, c, r, letter):
+    """Circle with a modifier letter (Ⓜ Ⓛ Ⓟ Ⓕ Ⓣ Ⓤ Ⓔ Ⓢ) drawn centred."""
+    sk.circle(c, r)
+    strokes = GLYPHS.get(letter)
+    if strokes is None:
+        sk.text(c[0], c[1], letter, size=2.6 * r / (1.8 * sk.k))
+        return
+    gw, gh = r * 0.8, r * 1.05
+    for s in strokes:
+        pts = [(c[0] + x * gw, c[1] + y * gh) for x, y in s]
+        for a, b in zip(pts, pts[1:]):
+            sk.line(a, b, 0.25)
 
 
 def draw_between(sk, cx, cy, a, b):
@@ -623,7 +666,10 @@ def render(sym):
         elif kind == "note":
             anchor = None if getattr(sym, ANCHOR_KIND, "free") == "free" else (ax, ay)
             draw_note(sk, anchor, box, note_lines(p, values))
-        elif kind in ("holetable", "revtable"):
+        elif kind in ("ordinate", "surface", "weld"):
+            from . import drafting
+            fields = drafting.draw(kind, sk, sym, (ax, ay), sdir, box, p, values)
+        elif kind in ("holetable", "revtable", "bom"):
             from . import tables
             tables.draw_table(sk, box, p, values)
         else:
@@ -654,7 +700,9 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset):
     doc = page.Document
     sym = doc.addObject("TechDraw::DrawViewSymbol", {
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
-        "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note"}[kind])
+        "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note",
+        "ordinate": "Ordinate", "surface": "SurfaceFinish", "weld": "Weld",
+        "bom": "PartsList"}[kind])
     page.addView(sym)
     sym.ScaleType = "Custom"
     sym.Scale = 1.0
