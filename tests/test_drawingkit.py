@@ -2139,3 +2139,63 @@ class TestHatchStepped(DocTest):
         xs = [p[0] for a, b in parts["BasePlate"]["segments"] for p in (a, b)]
         self.assertAlmostEqual(min(xs), -50.0, delta=0.5)
         self.assertAlmostEqual(max(xs), 50.0, delta=0.5)
+
+
+class TestHatchAligned(DocTest):
+    """Aligned sections are only drawn in the GUI (checked there off-screen);
+    here: the piece matching, and that an undrawn section is left alone."""
+
+    def test_register_finds_turn_flip_and_shift(self):
+        from DrawingKitTools import hatching
+        corners = [(17.1, -11.5), (17.1, -1.5), (37.1, -1.5), (37.1, 13.5), (51.1, 13.5),
+                   (51.1, -11.5), (25.1, -13.5), (29.1, 0.5)]
+        truth = (True, -1, 1, -11.5, 57.1)
+        drawn = [hatching._orient(truth, u, v) for u, v in corners]
+        drawn += [(5.0, 5.0), (-30.0, 12.0), (2.0, -40.0)]          # other drawn corners
+        fit = hatching._register(corners, drawn)
+        self.assertIsNotNone(fit)
+        for u, v in corners:
+            a, b = hatching._orient(fit, u, v), hatching._orient(truth, u, v)
+            self.assertAlmostEqual(a[0], b[0], places=6)
+            self.assertAlmostEqual(a[1], b[1], places=6)
+
+    def test_mirror_twin_goes_to_the_free_side(self):
+        from DrawingKitTools import hatching
+        corners = [(3, -11.5), (3, 13.5), (40, -11.5), (40, -1.5), (20, -1.5), (20, 13.5)]
+        up = (True, 1, 1, 0.0, 0.0)
+        down = (True, -1, 1, 0.0, 0.0)
+        drawn = [hatching._orient(up, u, v) for u, v in corners] +                 [hatching._orient(down, u, v) for u, v in corners]
+        taken = [(-11.5, 3, 13.5, 40)]                                 # the up side is used
+        fit = hatching._register(corners, drawn, avoid=taken)
+        self.assertEqual(fit[1], -1)
+
+    def test_undrawn_aligned_section_is_skipped(self):
+        import Part
+        from DrawingKitTools import hatching
+        fl = flange(self.doc)
+        asm = self.doc.addObject("App::Part", "Assembly")
+        sleeve = self.doc.addObject("Part::Feature", "Sleeve")
+        sleeve.Shape = Part.makeCylinder(6, 25).cut(Part.makeCylinder(3, 25))
+        for o in (fl, sleeve):
+            asm.addObject(o)
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [asm])
+        self.doc.recompute()
+        f = g.Anchor
+        P = lambda x, y: core.model_to_page(f, App.Vector(x, y, 10))
+        a60 = math.radians(60)
+        pts = [P(45 * math.cos(a60), 45 * math.sin(a60)), P(0, 0), P(0.5, -45)]
+        fx, fy = core.view_center(f)
+        sec = core.add_aligned_section(page, f, pts, (fx + 120, fy))
+        self.doc.recompute()
+        self.assertTrue(hatching.supported(sec))
+        # pieces of both parts on both runs of the cutting line
+        d, _, _ = core.view_axes(f)
+        wp = [App.Vector(v.Point) for v in sec.CuttingToolWireObject.Shape.Vertexes]
+        for a, b in zip(wp, wp[1:]):
+            u = (b - a).normalize()
+            self.assertTrue(hatching._piece_faces(fl.Shape, a, u, d, (b - a).Length))
+        if not hatching.drawn_vertices(sec):
+            sym, parts = hatching.hatch_by_part(page, sec)
+            self.assertIsNone(sym)

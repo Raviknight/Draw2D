@@ -84,10 +84,9 @@ def is_stepped(sec):
 
 
 def supported(sec):
-    """Straight and stepped (offset) sections; aligned ones swing pieces
-    round, which this doesn't follow yet."""
+    """Straight, stepped (offset) and aligned sections."""
     if sec.isDerivedFrom("TechDraw::DrawComplexSection"):
-        return is_stepped(sec)
+        return is_stepped(sec) or is_aligned(sec)
     return sec.isDerivedFrom("TechDraw::DrawViewSection")
 
 
@@ -329,7 +328,8 @@ def plan(sec, overrides=None):
             # where its uncut drawing goes: TechDraw centres a view on the
             # part's box, so the box centre in section-local units
             out[part.Name] = {"skip": True, "segments": [], "dashed": [], "label": part.Label,
-                              "uncut_at": list(_to_local_cache[0](core.shape_of(part).BoundBox.Center))}
+                              "uncut_at": (list(_to_local_cache[0](core.shape_of(part).BoundBox.Center))
+                                           if _to_local_cache[0] else None)}
             continue
         try:
             sig = drafting._signature(part)
@@ -360,7 +360,175 @@ def plan(sec, overrides=None):
     return out
 
 
+def is_aligned(sec):
+    return sec.isDerivedFrom("TechDraw::DrawComplexSection") and \
+        str(getattr(sec, "ProjectionStrategy", "")) == "Aligned"
+
+
+def drawn_vertices(sec):
+    """Corner points TechDraw drew for a view (local units), [] if it hasn't
+    drawn it yet."""
+    out = []
+    seen = set()
+    # complex sections give no vertices of their own: take the edges' ends
+    for i in range(20000):
+        try:
+            e = sec.getEdgeByIndex(i)
+        except Exception:
+            break
+        for v in e.Vertexes:
+            key = (round(v.Point.x, 6), round(v.Point.y, 6))
+            if key not in seen:
+                seen.add(key)
+                out.append((v.Point.x, v.Point.y))
+    return out
+
+
+def _piece_faces(shape, a, u, d, length, big=5000.0):
+    """Cross-section of ``shape`` on the plane through ``a`` spanned by the
+    cutting-line run ``u`` and the view direction ``d``, trimmed to the run
+    (0..length along u). Returns Part faces."""
+    import Part
+    m = u.cross(d)
+    if m.Length < 1e-9:
+        return []
+    m.normalize()
+    try:
+        wires = shape.slice(m, m.dot(a))
+    except Exception:
+        return []
+    if not wires:
+        return []
+    try:
+        face = Part.Face(Part.Shape(wires), "Part::FaceMakerBullseye")
+    except Exception:
+        return []
+    strip = Part.Face(Part.makePolygon([a - d * big, a + u * length - d * big,
+                                        a + u * length + d * big, a + d * big, a - d * big]))
+    try:
+        return [f for f in face.common(strip).Faces if f.Area > 1e-9]
+    except Exception:
+        return []
+
+
+def _orient(fit, u, v):
+    swap, su, sv, tx, ty = fit
+    a, b = su * u, sv * v
+    return (b + tx, a + ty) if swap else (a + tx, b + ty)
+
+
+def _register(corners, drawn, tol=0.02, avoid=()):
+    """Best (swap, su, sv, tx, ty) putting piece corners (u along the cut,
+    v along the view direction) onto drawn corners: any of the eight
+    turns/flips and a shift voted for by every corner pair. Near-equal
+    fits (a piece and its mirror image) are told apart by keeping clear of
+    the boxes in ``avoid`` (pieces already placed). None if under half the
+    corners (and fewer than 3) agree."""
+    corners = list({(round(u, 6), round(v, 6)) for u, v in corners})
+    if not corners or not drawn:
+        return None
+    grid = lambda v: round(v / tol)
+    cands = []
+    for swap in (False, True):
+        for su in (1, -1):
+            for sv in (1, -1):
+                votes = {}
+                for (u, v) in corners:
+                    px, py = _orient((swap, su, sv, 0.0, 0.0), u, v)
+                    for (x, y) in drawn:
+                        key = (grid(x - px), grid(y - py))
+                        votes[key] = votes.get(key, 0) + 1
+                for key, n in votes.items():
+                    cands.append((n, (swap, su, sv, key[0] * tol, key[1] * tol)))
+    need = max(3, 0.5 * len(corners))
+    top = max(n for n, _ in cands)
+    good = [(n, f) for n, f in cands if n >= need and n >= 0.75 * top]
+    if not good:
+        return None
+
+    def overlap(fit):
+        pts = [_orient(fit, u, v) for u, v in corners]
+        bx = (min(p[0] for p in pts), min(p[1] for p in pts),
+              max(p[0] for p in pts), max(p[1] for p in pts))
+        tot = 0.0
+        for a in avoid:
+            w = min(bx[2], a[2]) - max(bx[0], a[0])
+            h = min(bx[3], a[3]) - max(bx[1], a[1])
+            if w > 1e-6 and h > 1e-6:
+                tot += w * h
+        return tot
+    n, fit = min(good, key=lambda nf: (overlap(nf[1]), -nf[0]))
+    # refine the shift: average over the corners that matched
+    swap, su, sv, tx, ty = fit
+    dx, dy, k = 0.0, 0.0, 0
+    for (u, v) in corners:
+        px, py = _orient(fit, u, v)
+        near = min(drawn, key=lambda q: (q[0] - px) ** 2 + (q[1] - py) ** 2)
+        if (near[0] - px) ** 2 + (near[1] - py) ** 2 < (3 * tol) ** 2:
+            dx += near[0] - px
+            dy += near[1] - py
+            k += 1
+    if k:
+        tx, ty = tx + dx / k, ty + dy / k
+    return swap, su, sv, tx, ty
+
+
+def aligned_part_regions(sec):
+    """[(part, [Region...])] for an aligned section: each run of the cutting
+    line gives a piece of every part it cuts; TechDraw swings the pieces
+    flat and lays them side by side, so each run's pieces are matched to
+    what TechDraw drew (flip and shift from the drawn corners). None if the
+    section hasn't been drawn yet."""
+    drawn = drawn_vertices(sec)
+    if not drawn:
+        return None
+    d, _, _ = core.view_axes(sec.BaseView)
+    pts = [App.Vector(v.Point) for v in sec.CuttingToolWireObject.Shape.Vertexes]
+    parts = [(p, core.shape_of(p)) for p in section_parts(sec)]
+    found = {}
+    runs = []
+    for a, b in zip(pts, pts[1:]):
+        run = b - a
+        length = run.Length
+        if length < 1e-9:
+            continue
+        u = run * (1.0 / length)
+        pieces = []
+        for part, shape in parts:
+            if shape is None:
+                continue
+            for f in _piece_faces(shape, a, u, d, length):
+                pieces.append((part, f))
+        if not pieces:
+            continue
+        to_uv = lambda p, a=a, u=u: ((p - a).dot(u), (p - a).dot(d))
+        corners = []
+        for _, f in pieces:
+            for vx in f.Vertexes:
+                c = to_uv(vx.Point)
+                if all(abs(c[0] - q[0]) > 1e-6 or abs(c[1] - q[1]) > 1e-6 for q in corners):
+                    corners.append(c)
+        runs.append((pieces, to_uv, corners))
+    placed = []
+    for pieces, to_uv, corners in sorted(runs, key=lambda r: -len(r[2])):
+        fit = _register(corners, drawn, avoid=placed)
+        if fit is None:
+            continue
+        ps = [_orient(fit, u, v) for u, v in corners]
+        placed.append((min(p[0] for p in ps), min(p[1] for p in ps),
+                       max(p[0] for p in ps), max(p[1] for p in ps)))
+        place = lambda p, f=to_uv, fit=fit: _orient(fit, *f(p))
+        for part, f in pieces:
+            r = _face_2d(f, place)
+            if r is not None:
+                found.setdefault(part.Name, (part, []))[1].append(r)
+    _to_local_cache[0] = None      # no single mapping: uncut overlays not placed
+    return list(found.values())
+
+
 def _part_regions_for(sec):
+    if is_aligned(sec):
+        return aligned_part_regions(sec) or []
     return part_regions(sec)
 
 

@@ -475,6 +475,26 @@ class SpeedToggle:
         say("Fast editing %s for %s" % ("ON" if fast else "OFF (redrawn)", page.Label))
 
 
+def hatch_when_drawn(page, sec, tries=60, every_ms=250):
+    """Hatch an aligned section by part once TechDraw has drawn it (it
+    draws in the background; the hatch is matched to the drawing)."""
+    from . import hatching
+
+    def attempt(left):
+        try:
+            if not hatching.drawn_vertices(sec):
+                if left > 0:
+                    QtCore.QTimer.singleShot(every_ms, lambda: attempt(left - 1))
+                return
+            sym, parts = hatching.hatch_by_part(page, sec)
+            if sym is not None:
+                page.Document.recompute()
+                say("%s hatched part by part" % sec.Label)
+        except Exception as e:
+            App.Console.PrintWarning("DrawingKit hatching: %s\n" % e)
+    QtCore.QTimer.singleShot(every_ms, lambda: attempt(tries))
+
+
 class HatchByPart:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_HatchParts.svg"),
@@ -1241,6 +1261,7 @@ class AlignedSection:
                 doc.recompute()
                 watch_redraw(page)
                 say("%s added" % sec.Label)
+                hatch_when_drawn(page, sec)
 
             interact.PagePicker(page, "DrawingKit: click where the section view goes (Esc to cancel)",
                                 on_move=on_move_place, on_click=lambda pt, pts: True,
