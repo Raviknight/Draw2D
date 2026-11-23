@@ -636,6 +636,11 @@ def fit_page(page):
     redraw([group] + list(group.Views) + list(extras))
     from . import annot
     annot.refresh_page(page)   # datums and frames follow their features
+    try:
+        from . import hatching
+        hatching.refresh_page(page)   # hatch spacing is set on paper
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit hatching: %s\n" % e)
     return scale
 
 

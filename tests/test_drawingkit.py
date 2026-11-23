@@ -1911,3 +1911,90 @@ class TestKeepClear(DocTest):
         shift = self.cl.clear_spot((0, 0, 10, 5), (5, -20), [(0, 0, 10, 5)])
         self.assertIsNotNone(shift)
         self.assertGreater(shift[1], 0)            # pushed further from the anchor below
+
+
+class TestHatchByPart(DocTest):
+    def make(self):
+        import Part
+        z = App.Vector(0, 0, 1)
+        asm = self.doc.addObject("App::Part", "Assembly")
+        plate = self.doc.addObject("Part::Feature", "BasePlate")
+        plate.Shape = Part.makeBox(80, 50, 10).cut(Part.makeCylinder(4, 20, App.Vector(20, 25, -5), z))
+        collar = self.doc.addObject("Part::Feature", "Collar001")
+        collar.Shape = Part.makeCylinder(8, 6, App.Vector(20, 25, 10), z).cut(
+            Part.makeCylinder(4, 10, App.Vector(20, 25, 8), z))
+        pin = self.doc.addObject("Part::Feature", "Pin001")
+        pin.Shape = Part.makeCylinder(4, 30, App.Vector(20, 25, -2), z)
+        for o in (plate, collar, pin):
+            asm.addObject(o)
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [asm], front=FRONT)
+        self.doc.recompute()
+        return page, g, plate, collar, pin
+
+    def test_each_part_its_own_hatch_and_pins_left_uncut(self):
+        from DrawingKitTools import hatching
+        page, g, plate, collar, pin = self.make()
+        front = g.Anchor
+        sec = core.add_section(page, front, direction="Right", origin=App.Vector(20, 25, 5))
+        self.doc.recompute()
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertIsNotNone(sym)
+        self.assertEqual(sec.CutSurfaceDisplay, "Hide")
+        self.assertTrue(parts["Pin001"]["skip"])
+        self.assertFalse(parts["BasePlate"]["skip"])
+        self.assertNotEqual(parts["BasePlate"]["angle"], parts["Collar001"]["angle"])
+        self.assertGreater(len(parts["BasePlate"]["segments"]), 5)
+        self.assertGreater(len(parts["Collar001"]["segments"]), 0)
+        # every hatch line lies inside its part's cut face (checked in 3D)
+        import Part
+        keep, o, n = hatching._kept(sec)
+        to_local = hatching._local_frame(sec, keep)
+        for name in ("BasePlate", "Collar001"):
+            faces = hatching.cut_faces(core.shape_of(self.doc.getObject(name)), sec, keep)
+            f2 = [hatching._face_2d(f, to_local) for f in faces]
+            for (a, b) in parts[name]["segments"]:
+                mid = App.Vector((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0)
+                self.assertTrue(any(f.isInside(mid, 1e-6, True) for f in f2), name)
+        # follows the section when it moves
+        x = float(sym.X)
+        sec.X = float(sec.X) + 10
+        from DrawingKitTools import annot
+        annot.refresh(annot.attached_to(sec))
+        self.assertAlmostEqual(float(sym.X) - x, 10.0, places=6)
+
+    def test_single_part_keeps_techdraw_hatch(self):
+        from DrawingKitTools import hatching
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        sec = core.add_section(page, g.Anchor)
+        self.doc.recompute()
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertIsNone(sym)
+        self.assertNotEqual(sec.CutSurfaceDisplay, "Hide")
+
+
+class TestHatchSameParts(DocTest):
+    def test_identical_parts_share_a_hatch(self):
+        import Part
+        from DrawingKitTools import hatching
+        z = App.Vector(0, 0, 1)
+        asm = self.doc.addObject("App::Part", "Assembly")
+        plate = self.doc.addObject("Part::Feature", "BasePlate")
+        plate.Shape = Part.makeBox(80, 50, 10)
+        asm.addObject(plate)
+        for i, x in enumerate((20, 60)):
+            c = self.doc.addObject("Part::Feature", "Collar%03d" % (i + 1))
+            c.Shape = Part.makeCylinder(8, 6, App.Vector(x, 25, 10), z)
+            asm.addObject(c)
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [asm], front=FRONT)
+        self.doc.recompute()
+        sec = core.add_section(page, g.getItemByLabel("Top"), direction="Up", origin=App.Vector(40, 25, 5))
+        self.doc.recompute()
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertEqual(parts["Collar001"]["angle"], parts["Collar002"]["angle"])
+        self.assertNotEqual(parts["Collar001"]["angle"], parts["BasePlate"]["angle"])

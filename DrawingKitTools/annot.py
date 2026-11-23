@@ -734,6 +734,9 @@ def render(sym):
         elif kind == "note":
             anchor = None if getattr(sym, ANCHOR_KIND, "free") == "free" else (ax, ay)
             draw_note(sk, anchor, box, note_lines(p, values))
+        elif kind == "hatch":
+            from . import hatching
+            hatching.draw(sk, getattr(sym, LINK), p)
         elif kind in ("ordinate", "surface", "weld"):
             from . import drafting
             fields = drafting.draw(kind, sk, sym, (ax, ay), sdir, box, p, values)
@@ -771,7 +774,7 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=Non
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
         "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note",
         "ordinate": "Ordinate", "surface": "SurfaceFinish", "weld": "Weld",
-        "bom": "PartsList"}[kind])
+        "bom": "PartsList", "hatch": "PartHatch"}[kind])
     page.addView(sym)
     sym.ScaleType = "Custom"
     sym.Scale = 1.0

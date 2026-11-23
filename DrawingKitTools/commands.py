@@ -420,8 +420,17 @@ class Section:
                     doc, "DrawingKit section",
                     lambda: core.add_cut_section(page, base, cut, places[-1]))
                 doc.recompute()
+                extra = ""
+                try:
+                    from . import hatching
+                    sym, parts = hatching.hatch_by_part(page, sec)
+                    if sym is not None:
+                        doc.recompute()
+                        extra = " (hatched part by part)"
+                except Exception as e:
+                    App.Console.PrintWarning("DrawingKit hatching: %s\n" % e)
                 watch_redraw(page)
-                say("%s added" % sec.Label)
+                say("%s added%s" % (sec.Label, extra))
 
             interact.PagePicker(page, "DrawingKit: click where the section view goes "
                                       "(Esc to cancel)",
@@ -464,6 +473,50 @@ class SpeedToggle:
                 QtWidgets.QApplication.restoreOverrideCursor()
             watch_redraw(page)
         say("Fast editing %s for %s" % ("ON" if fast else "OFF (redrawn)", page.Label))
+
+
+class HatchByPart:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_HatchParts.svg"),
+                "MenuText": "Hatch by part",
+                "ToolTip": "Assembly sections: each part's cut faces get their own hatch "
+                           "angle (and spacing after six parts); shafts, pins, bolts, "
+                           "screws, keys, nuts and washers are left unhatched. Select a "
+                           "section (or none for every section on the page); run again "
+                           "after changing the model."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import hatching
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select a section on it) first.")
+            return
+        secs = [o for o in Gui.Selection.getSelection()
+                if o.isDerivedFrom("TechDraw::DrawViewSection")]
+        secs = secs or [v for v in page.Views if v.isDerivedFrom("TechDraw::DrawViewSection")]
+        if not secs:
+            warn("There is no section view on this page.")
+            return
+        doc = page.Document
+
+        def work():
+            done = []
+            for s in secs:
+                sym, parts = hatching.hatch_by_part(page, s)
+                if sym is not None:
+                    done.append((s, parts))
+            return done
+        done = run_in_transaction(doc, "DrawingKit hatch by part", work)
+        doc.recompute()
+        if not done:
+            say("Nothing to do: hatching by part needs a straight section through two or more parts")
+        else:
+            say("; ".join("%s: %d part(s) hatched, %d left uncut" % (
+                s.Label, sum(1 for p in parts.values() if not p["skip"]),
+                sum(1 for p in parts.values() if p["skip"])) for s, parts in done))
 
 
 class HiddenLines:
@@ -2095,6 +2148,7 @@ COMMANDS = [
     ("DrawingKit_FitToPage", FitToPage()),
     ("DrawingKit_SpeedToggle", SpeedToggle()),
     ("DrawingKit_HiddenLines", HiddenLines()),
+    ("DrawingKit_HatchByPart", HatchByPart()),
 ]
 
 for _name, _cmd in COMMANDS:
@@ -2104,7 +2158,7 @@ for _name, _cmd in COMMANDS:
 COMMAND_GROUPS = [
     ("DrawingKit views", ["DrawingKit_NewSheet", "DrawingKit_StandardViews",
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
-                          "DrawingKit_AlignedSection", "DrawingKit_DetailView",
+                          "DrawingKit_AlignedSection", "DrawingKit_HatchByPart", "DrawingKit_DetailView",
                           "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_HiddenLines",
                           "DrawingKit_SpeedToggle"]),
     ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
