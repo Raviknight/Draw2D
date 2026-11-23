@@ -480,6 +480,10 @@ def set_horizontal_text(dim):
     vo = getattr(dim, "ViewObject", None)
     if vo is None or "StandardAndStyle" not in vo.PropertiesList:
         return False
+    from . import standards
+    if standards.explicit():
+        vo.StandardAndStyle = standards.dimension_style(referencing=True)
+        return True
     current = str(vo.StandardAndStyle)
     vo.StandardAndStyle = "ASME Referencing" if current.startswith("ASME") else "ISO Referencing"
     return True

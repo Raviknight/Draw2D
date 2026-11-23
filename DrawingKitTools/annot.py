@@ -364,7 +364,7 @@ def frame_segments(p):
     if rows:
         return rows
     return [{k: p.get(k) for k in ("char", "tol", "dia", "mod", "datums", "datum_mods",
-                                   "zones", "uval", "proj")}]
+                                   "zones", "uval", "proj", "std")}]
 
 
 def _field(name, row):
@@ -392,8 +392,13 @@ def tolerance_items(seg):
     if "DP" in zones:
         out.append(("tri", "DP"))      # ASME dynamic profile: open triangle after the value
     if "U" in zones:
-        out.append(("circ", "U"))
-        out.append(("text", seg.get("uval") or "0.1"))
+        val = seg.get("uval") or "0.1"
+        if seg.get("std") == "ISO":
+            # ISO 1101: UZ with a signed offset, e.g. UZ+0.1
+            out.append(("text", "UZ" + (val if val[:1] in "+-" else "+" + val)))
+        else:
+            out.append(("circ", "U"))
+            out.append(("text", val))
     if "CZ" in zones:
         out.append(("text", "CZ"))
     if seg.get("mod"):

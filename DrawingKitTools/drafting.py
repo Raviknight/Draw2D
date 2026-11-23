@@ -81,6 +81,8 @@ def add_baseline(page, view, origin, features, axis="x", chain=False):
             dim.X, dim.Y = mid, (y1 - cy) + ROW + row * STEP
         else:
             dim.X, dim.Y = (x1 - cx) + ROW + row * STEP, mid
+        from . import standards
+        standards.style_dimension(dim)
         dims.append(dim)
     return dims
 

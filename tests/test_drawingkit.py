@@ -2240,3 +2240,80 @@ class TestCutDirection(DocTest):
             g.SetBool("MaterialHatch", old)
             if not old:
                 g.RemBool("MaterialHatch")
+
+
+class TestDrawingStandard(DocTest):
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import standards
+        self.st = standards
+        self.g = App.ParamGet(standards.PREFS)
+        self.old = self.g.GetString("Standard", "")
+
+    def tearDown(self):
+        if self.old:
+            self.g.SetString("Standard", self.old)
+        else:
+            self.g.RemString("Standard")
+        super().tearDown()
+
+    def test_auto_follows_techdraw(self):
+        self.st.set_setting("auto")
+        self.assertEqual(self.st.current(), self.st.techdraw_standard())
+        self.assertFalse(self.st.explicit())
+
+    def test_iso_conventions(self):
+        self.st.set_setting("ISO")
+        self.assertEqual(self.st.section_caption("A"), "A-A")
+        self.assertEqual(self.st.detail_caption("B", "2:1"), "B (2 : 1)")
+        self.assertTrue(self.st.weld_dashed_line())
+        self.assertIn("CZ", self.st.frame_zones())
+        self.assertNotIn("DP", self.st.frame_zones())
+        self.assertNotIn("RFS", self.st.tolerance_modifiers())
+        self.assertNotIn("TR", self.st.datum_modifiers())
+        self.assertFalse(self.st.has_cf())
+        page = core.create_page(self.doc, "A3", "Landscape")
+        self.assertEqual(page.ProjectionType, "First angle")
+        g = core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        sec = core.add_section(page, g.Anchor)
+        self.assertEqual(sec.Caption, "A-A")
+
+    def test_asme_conventions(self):
+        self.st.set_setting("ASME")
+        self.assertEqual(self.st.section_caption("A"), "SECTION A-A")
+        self.assertEqual(self.st.detail_caption("B", "2:1"), "DETAIL B SCALE 2 : 1")
+        self.assertFalse(self.st.weld_dashed_line())
+        self.assertIn("DP", self.st.frame_zones())
+        self.assertNotIn("CZ", self.st.frame_zones())
+        self.assertIn("RFS", self.st.tolerance_modifiers())
+        self.assertTrue(self.st.characteristic_note("symmetry"))
+        page = core.create_page(self.doc, "A3", "Landscape")
+        self.assertEqual(page.ProjectionType, "Third angle")
+        self.assertIn("_3rd", page.Template.Template)
+
+    def test_iso_unequal_zone_is_written_uz(self):
+        from DrawingKitTools import annot
+        page = core.create_page(self.doc, "A3", "Landscape")
+        fr = annot.add_frame(page, (200, 200), {"char": "profile_surface", "tol": "0.2",
+                                                "zones": ["U"], "uval": "0.05", "std": "ISO",
+                                                "datums": ["A", "", ""]})
+        self.assertIn(">UZ+0.05<", fr.Symbol)
+        self.assertEqual(fr.Symbol.count("<circle"), 0)
+
+    def test_apply_to_sheet_updates_captions_and_welds(self):
+        from DrawingKitTools import drafting
+        self.st.set_setting("ASME")
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        sec = core.add_section(page, g.Anchor)
+        x0, y0, x1, y1 = core.view_box(g.Anchor)
+        w = drafting.add_weld(page, x1, y1, {"type": "fillet", "size": "5", "side": "arrow",
+                                             "iso_line": False})
+        self.assertEqual(sec.Caption, "SECTION A-A")
+        self.st.set_setting("ISO")
+        n = self.st.apply_to_page(page)
+        self.assertGreaterEqual(n, 2)
+        self.assertEqual(sec.Caption, "A-A")
+        self.assertIn("stroke-dasharray", w.Symbol)

@@ -290,4 +290,6 @@ def add_dimension(page, view, picks, mouse_local, label_page=None):
     if label_page is None:
         label_page = (cx + mouse_local[0] * s, cy + mouse_local[1] * s)
     dim.X, dim.Y = label_page[0] - cx, label_page[1] - cy
+    from . import standards
+    standards.style_dimension(dim)
     return dim

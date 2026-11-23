@@ -495,6 +495,46 @@ def hatch_when_drawn(page, sec, tries=60, every_ms=250):
     QtCore.QTimer.singleShot(every_ms, lambda: attempt(tries))
 
 
+class DrawingStandard:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Standard.svg"),
+                "MenuText": "Drawing standard (ISO / ASME)",
+                "ToolTip": "One standard for DrawingKit: section and detail captions, the "
+                           "projection of new sheets, dimension style, which GD&T symbols the "
+                           "frame offers and the weld line. Auto follows TechDraw's dimension "
+                           "standard preference."}
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+        from . import standards
+        pop = ui.Popover("Drawing standard")
+        choices = [(v, lab if v != "auto" else "Auto (TechDraw: %s)" % standards.techdraw_standard())
+                   for v, lab in standards.CHOICES]
+        combo = ui.combo(choices, standards.setting(), 170)
+        page = None
+        try:
+            page = target_page()
+        except Exception:
+            page = None
+        apply_now = ui.toggle("Update this sheet", page is not None,
+                              "Bring this sheet's captions, weld lines and dimension style in line")
+        apply_now.setEnabled(page is not None)
+        pop.add_row(combo, apply_now, stretch=True)
+        if not pop.run():
+            return
+        standards.set_setting(combo.currentData())
+        msg = "Drawing standard: %s" % standards.current()
+        if page is not None and apply_now.isChecked():
+            doc = page.Document
+            n = run_in_transaction(doc, "DrawingKit drawing standard",
+                                   lambda: standards.apply_to_page(page))
+            doc.recompute()
+            msg += " (%d item(s) on %s updated)" % (n, page.Label)
+        say(msg)
+
+
 class HatchByPart:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_HatchParts.svg"),
@@ -872,27 +912,43 @@ ZONE_TIPS = [
 ]
 
 
+MOD_LABELS = {"": " · ", "MMC": "Ⓜ", "LMC": "Ⓛ", "RFS": "Ⓢ", "TR": "▷"}
+
+
+def _mod_button(values, value, tip):
+    return ui.Cycle(values, [MOD_LABELS[v] for v in values], value if value in values else "", tip)
+
+
 class _SegmentRow:
-    """One frame row: symbol | ⌀ tol Ⓜ | A Ⓜ | B Ⓜ | C Ⓜ"""
+    """One frame row: symbol | ⌀ tol Ⓜ | A Ⓜ | B Ⓜ | C Ⓜ  (the modifiers
+    offered follow the drawing standard, ISO or ASME)"""
 
     def __init__(self, seg, show_char=True):
-        from . import gdt
-        self.char = ui.combo([(k, "%s  %s" % (GDT_SYMBOLS.get(k, ""), lab))
-                              for k, lab in gdt.CHARACTERISTICS], seg.get("char", "position"), 150)
+        from . import gdt, standards
+        items = []
+        for k, lab in gdt.CHARACTERISTICS:
+            note = standards.characteristic_note(k)
+            items.append((k, "%s  %s%s" % (GDT_SYMBOLS.get(k, ""), lab, ("  (%s)" % note) if note else "")))
+        self.char = ui.combo(items, seg.get("char", "position"), 150)
         if not show_char:
             # never setVisible(True) here: the combo has no parent yet, so it
             # would open as its own window and close the pop-up at once
             self.char.setVisible(False)
         self.dia = ui.toggle("⌀", seg.get("dia", True), "Diameter (cylindrical) zone")
         self.tol = ui.field(seg.get("tol", "0.05"), 52, tip="Tolerance")
-        self.mod = ui.mmc_button(seg.get("mod", ""))
+        tm = standards.tolerance_modifiers()
+        self.mod = _mod_button(tm, seg.get("mod", ""), "Click to change: " + " / ".join(
+            MOD_LABELS[v].strip() or "none" for v in tm))
         self.datums, self.dmods = [], []
         for i in range(3):
             d = ui.field((seg.get("datums") or ["", "", ""])[i], 26, "–",
                          ("Primary", "Secondary", "Tertiary")[i] + " datum")
             d.setMaxLength(3)
             self.datums.append(d)
-            self.dmods.append(ui.mmc_button((seg.get("datum_mods") or ["", "", ""])[i], datum=True))
+            dm = standards.datum_modifiers()
+            self.dmods.append(_mod_button(dm, (seg.get("datum_mods") or ["", "", ""])[i],
+                                          "Click to change: " + " / ".join(
+                                              MOD_LABELS[v].strip() or "none" for v in dm)))
 
     def widgets(self):
         w = [self.char, self.dia, self.tol, self.mod]
@@ -915,35 +971,53 @@ class FrameDialog(ui.Popover):
             "datums": ["A", "B", ""], "datum_mods": ["", "", ""], "count": ""}
 
     def __init__(self, parent=None, count=""):
-        super().__init__("Tolerance frame", parent)
+        from . import standards
+        self.std = standards.current()
+        super().__init__("Tolerance frame (%s)" % self.std, parent)
         self.row1 = _SegmentRow(self.last)
         self.add_row(*self.row1.widgets())
         self.count = ui.field(count or self.last.get("count", ""), 40, "6X",
                               "Count above the frame (filled in when you click one of several holes)")
         self.more = ui.toggle("+ Segment", False, "Second row: composite or stacked frame")
         self.opts = ui.toggle("Modifiers…", False,
-                              "Zone modifiers (Ⓤ CZ Ⓟ Ⓕ Ⓣ △ ST), all around, between, CF")
+                              "Zone modifiers, all around, between" +
+                              (", CF" if standards.has_cf() else ""))
         self.add_row("Count", self.count, self.more, self.opts, stretch=True)
         # zone modifiers and leader symbols, hidden until asked for
         last = self.last
         zones = last.get("zones") or []
         self.z = {}
         tips = dict(ZONE_TIPS)
-        for code, label in (("U", "Ⓤ"), ("CZ", "CZ"), ("P", "Ⓟ"), ("F", "Ⓕ"), ("T", "Ⓣ"),
-                            ("DP", "△"), ("ST", "ST")):
-            self.z[code] = ui.toggle(label, code in zones, tips[code])
-        self.uval = ui.field(last.get("uval", ""), 34, "0.1", "Ⓤ offset towards the outside of the profile")
+        labels = {"U": "UZ" if self.std == "ISO" else "Ⓤ", "CZ": "CZ", "P": "Ⓟ", "F": "Ⓕ",
+                  "T": "Ⓣ", "DP": "△", "ST": "ST"}
+        offered = standards.frame_zones()
+        for code in offered:
+            tip = tips[code]
+            if code == "U" and self.std == "ISO":
+                tip = "UZ: unequal zone (ISO 1101), offset in the next box (+ outwards)"
+            self.z[code] = ui.toggle(labels[code], code in zones, tip)
+        self.uval = ui.field(last.get("uval", ""), 34, "0.1", "Offset of the profile zone (+ outwards)")
         self.proj = ui.field(last.get("proj", ""), 34, "15", "Ⓟ projected zone height")
-        self.zrow = self.add_row(self.z["U"], self.uval, self.z["CZ"], self.z["P"], self.proj,
-                                 self.z["F"], self.z["T"], self.z["DP"], self.z["ST"], stretch=True)
+        row = []
+        for code in offered:
+            row.append(self.z[code])
+            if code == "U":
+                row.append(self.uval)
+            if code == "P":
+                row.append(self.proj)
+        self.zrow = self.add_row(*row, stretch=True)
         self.around = ui.toggle("○ All around", last.get("all_around", False),
                                 "All around: the tolerance applies to the whole outline in this view")
         b = last.get("between") or ["", ""]
         self.b1 = ui.field(b[0], 26, "J", "Between: from point")
         self.b2 = ui.field(b[1], 26, "K", "Between: to point")
-        self.cf = ui.toggle("CF", last.get("cf", False),
-                            "Continuous feature (ASME): interrupted surfaces treated as one")
-        self.lrow = self.add_row(self.around, "Between", self.b1, "↔", self.b2, self.cf, stretch=True)
+        lrow = [self.around, "Between", self.b1, "↔", self.b2]
+        self.cf = None
+        if standards.has_cf():
+            self.cf = ui.toggle("CF", last.get("cf", False),
+                                "Continuous feature (ASME): interrupted surfaces treated as one")
+            lrow.append(self.cf)
+        self.lrow = self.add_row(*lrow, stretch=True)
         for r in (self.zrow, self.lrow):
             r.setVisible(bool(zones or last.get("all_around") or any(b) or last.get("cf")))
         self.opts.setChecked(self.zrow.isVisible())
@@ -962,6 +1036,7 @@ class FrameDialog(ui.Popover):
 
     def choice(self):
         first = self.row1.value()
+        first["std"] = self.std
         first["zones"] = [code for code, b in self.z.items() if b.isChecked()]
         if "U" in first["zones"]:
             first["uval"] = self.uval.text().strip() or "0.1"
@@ -970,7 +1045,7 @@ class FrameDialog(ui.Popover):
         c = dict(first)
         c["count"] = self.count.text().strip()
         c["all_around"] = self.around.isChecked()
-        c["cf"] = self.cf.isChecked()
+        c["cf"] = bool(self.cf is not None and self.cf.isChecked())
         between = [self.b1.text().strip().upper(), self.b2.text().strip().upper()]
         if all(between):
             c["between"] = between
@@ -1879,7 +1954,9 @@ class WeldDialog(ui.Popover):
         self.add_row(self.kind, self.side, self.size, self.length)
         self.around = ui.toggle("○ All around", l["all_around"])
         self.field_ = ui.toggle("⚑ Field weld", l["field"], "Welded on site")
-        self.iso = ui.toggle("ISO dashed line", l["iso_line"], "ISO 2553 system A identification line")
+        from . import standards
+        self.iso = ui.toggle("ISO dashed line", standards.weld_dashed_line(),
+                             "ISO 2553 system A identification line (AWS A2.4, used with ASME, has none)")
         self.process = ui.field(l["process"], 46, "111", "Process number in the tail (ISO 4063)")
         self.add_row(self.around, self.field_, self.iso, "Tail", self.process, stretch=True)
         self.focus_on = self.size
@@ -2210,6 +2287,7 @@ class TextStyle:
 
 COMMANDS = [
     ("DrawingKit_NewSheet", NewSheet()),
+    ("DrawingKit_Standard", DrawingStandard()),
     ("DrawingKit_StandardViews", StandardViews()),
     ("DrawingKit_ProjectedView", ProjectedView()),
     ("DrawingKit_Section", Section()),
@@ -2248,7 +2326,7 @@ for _name, _cmd in COMMANDS:
 
 # toolbars in the DrawingKit workbench
 COMMAND_GROUPS = [
-    ("DrawingKit views", ["DrawingKit_NewSheet", "DrawingKit_StandardViews",
+    ("DrawingKit views", ["DrawingKit_NewSheet", "DrawingKit_Standard", "DrawingKit_StandardViews",
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
                           "DrawingKit_AlignedSection", "DrawingKit_HatchByPart", "DrawingKit_EditHatch",
                           "DrawingKit_DetailView",

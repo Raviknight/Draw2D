@@ -231,6 +231,12 @@ def create_page(doc, size, orientation, templates=None, drawingkit_template=True
     if that fails, FreeCAD's bundled template for the size is used.
     """
     page = doc.addObject("TechDraw::DrawPage", "Page")
+    try:
+        from . import standards
+        if standards.explicit():      # ISO first-angle, ASME third-angle
+            page.ProjectionType = "First angle" if standards.default_first_angle() else "Third angle"
+    except Exception:
+        pass
     tpl = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
     path = None
     if drawingkit_template:
@@ -1091,7 +1097,8 @@ def _new_section(page, base, letter, type_id="TechDraw::DrawViewSection"):
     sec.Source = base.Source
     sec.SectionSymbol = letter
     sec.Label = "Section %s-%s" % (letter, letter)
-    sec.Caption = "SECTION %s-%s" % (letter, letter)
+    from . import standards
+    sec.Caption = standards.section_caption(letter)
     sec.ScaleType = "Page"
     sec.Scale = page.Scale
     return sec
@@ -1659,7 +1666,8 @@ def add_detail(page, base, centre, radius, place, letter=None, scale=None):
     det.Scale = scale
     det.X, det.Y = float(place[0]), float(place[1])
     det.Label = "Detail %s" % letter
-    det.Caption = "DETAIL %s (%s)" % (letter, scale_text(scale).replace(":", " : "))
+    from . import standards
+    det.Caption = standards.detail_caption(letter, scale_text(scale))
     det.touch()
     return det
 

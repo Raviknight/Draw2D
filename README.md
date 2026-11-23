@@ -4,7 +4,7 @@ A FreeCAD 1.1 workbench that makes TechDraw drawings quicker, inspired by how On
 
 The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. The DrawingKit buttons are also added at the end of TechDraw's *TechDraw Pages* toolbar, for when you are in TechDraw. (Double-clicking a page in the tree still switches to TechDraw; that is TechDraw's own preference, *switch workbench on click*.)
 
-Status: early version (0.7), not yet in the Addon Manager.
+Status: early version (0.8), not yet in the Addon Manager.
 
 ## Commands
 
@@ -14,6 +14,7 @@ The buttons sit on four toolbars: **DrawingKit views**, **DrawingKit dimensions*
 
 | Button | What it does |
 |---|---|
+| **Drawing standard (ISO / ASME)** | One standard for everything DrawingKit draws, so conventions never mix. *Auto* (the default) follows TechDraw's dimension standard preference. It sets section and detail captions (ASME "SECTION A-A", "DETAIL B SCALE 2 : 1"; ISO "A-A", "B (2 : 1)"), the projection of new sheets (ISO first-angle, ASME third-angle) and the style of dimensions DrawingKit makes; the tolerance frame offers only that standard's symbols (ISO 1101: UZ, CZ; ASME Y14.5: Ⓤ, Ⓢ, ▷, dynamic profile, ST, CF, with symmetry and concentricity marked as not in ASME Y14.5-2018); weld symbols get ISO 2553's dashed line or none (AWS A2.4). *Update this sheet* brings an existing sheet's captions, weld lines and dimension style in line. |
 | **New drawing sheet** | Pick a paper size (ISO A4–A0, ANSI A–E) and orientation, and get a page with DrawingKit's frame and title block. If a part is selected you can add its standard views in the same step. |
 | **Add standard views, fitted** | With a 3D part selected: adds front, top and right views (and an optional isometric) as a projection group. The front view is the part's most descriptive face, turned so its longest side runs across the page (a flat flange shows its round face). The scale is the largest standard scale (1:1, 1:2, 1:5 … 2:1, 5:1 …) that fits beside the title block. The title block is filled in from the part. |
 | **Projected view by pointing** | Select a view, then move the mouse: a preview shows the view you'd get to the right, left, above, below or at a corner (isometric-style). Click to place it; click again for more; Esc to stop. From the front view it joins the projection group; from any other view it becomes a separate view that stays lined up with its parent. |
