@@ -606,6 +606,8 @@ def page_content(page):
             groups.append(v)
         elif v.isDerivedFrom("TechDraw::DrawViewDetail"):
             continue  # detail views keep their own scale and spot
+        elif "DrawingKitUncutOf" in v.PropertiesList:
+            continue  # uncut parts ride on their section
         elif v.isDerivedFrom("TechDraw::DrawViewPart") and not \
                 v.isDerivedFrom("TechDraw::DrawProjGroupItem"):
             extras.append(v)
@@ -1871,7 +1873,7 @@ def refresh_center_marks(views):
 def part_views(page):
     out = []
     for v in page.getAllViews() if hasattr(page, "getAllViews") else page.Views:
-        if v.isDerivedFrom("TechDraw::DrawViewPart") and "CoarseView" in v.PropertiesList:
+        if v.isDerivedFrom("TechDraw::DrawViewPart") and "CoarseView" in v.PropertiesList                 and "DrawingKitUncutOf" not in v.PropertiesList:   # overlays on a section
             out.append(v)
     return out
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Headless tests for DrawingKit. Run with: freecadcmd tests/run_tests.py"""
 
+import math
 import os
 import unittest
 
@@ -1955,8 +1956,13 @@ class TestHatchByPart(DocTest):
             faces = hatching.cut_faces(core.shape_of(self.doc.getObject(name)), sec, keep)
             f2 = [hatching._face_2d(f, to_local) for f in faces]
             for (a, b) in parts[name]["segments"]:
-                mid = App.Vector((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0)
-                self.assertTrue(any(f.isInside(mid, 1e-6, True) for f in f2), name)
+                mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+                self.assertTrue(any(f.contains(mx, my) for f in f2), name)
+        # wall to wall: across the 10 mm plate a 45 deg line is 14.14 mm long
+        import math as _m
+        plate_angle = parts["BasePlate"]["angle"]
+        longest = max(_m.hypot(b[0] - a[0], b[1] - a[1]) for a, b in parts["BasePlate"]["segments"])
+        self.assertAlmostEqual(longest, 10 / _m.sin(_m.radians(plate_angle)), delta=0.02)
         # follows the section when it moves
         x = float(sym.X)
         sec.X = float(sec.X) + 10
@@ -1998,3 +2004,138 @@ class TestHatchSameParts(DocTest):
         sym, parts = hatching.hatch_by_part(page, sec)
         self.assertEqual(parts["Collar001"]["angle"], parts["Collar002"]["angle"])
         self.assertNotEqual(parts["Collar001"]["angle"], parts["BasePlate"]["angle"])
+
+
+class TestHatchEdgeToEdge(unittest.TestCase):
+    """The hatch lines must run right across the face, wall to wall."""
+
+    def test_rectangle_and_hole(self):
+        from DrawingKitTools import hatching
+        outer = [(0, 0), (16, 0), (16, 10), (0, 10)]
+        hole = [(6, 3), (10, 3), (10, 7), (6, 7)]
+        r = hatching.Region([outer, hole])
+        segs = hatching.hatch_lines(r, 45, 1.0)
+        self.assertGreater(len(segs), 15)
+        on_edge = lambda p: (abs(p[0]) < 1e-9 or abs(p[0] - 16) < 1e-9 or abs(p[1]) < 1e-9 or
+                             abs(p[1] - 10) < 1e-9 or (6 - 1e-9 <= p[0] <= 10 + 1e-9 and
+                             3 - 1e-9 <= p[1] <= 7 + 1e-9))
+        for a, b in segs:
+            self.assertTrue(on_edge(a) and on_edge(b), (a, b))
+            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            self.assertTrue(r.contains(mx, my))
+            self.assertFalse(6 < mx < 10 and 3 < my < 7)       # nothing in the hole
+        plain = hatching.hatch_lines(hatching.Region([outer]), 45, 1.0)
+        longest = max(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in plain)
+        self.assertAlmostEqual(longest, 10 * 2 ** 0.5, delta=0.01)   # wall to wall
+
+
+class TestHatchPatterns(DocTest):
+    def test_material_defaults(self):
+        from DrawingKitTools import hatching as h
+        self.assertEqual(h.material_pattern("Steel-Generic"), "double")
+        self.assertEqual(h.material_pattern("C45 steel"), "double")
+        self.assertEqual(h.material_pattern("Brass"), "alternate")
+        self.assertEqual(h.material_pattern("Aluminum-6061-T6"), "cross")
+        self.assertEqual(h.material_pattern("PA6 nylon"), "dashed")
+        self.assertEqual(h.material_pattern(""), "single")
+        self.assertEqual(h.material_pattern("Compass"), "single")
+
+    def test_patterns(self):
+        from DrawingKitTools import hatching as h
+        r = h.Region([[(0, 0), (20, 0), (20, 10), (0, 10)]])
+        single = h.pattern_lines(r, 45, 1.0, "single")
+        double = h.pattern_lines(r, 45, 1.0, "double")
+        alt = h.pattern_lines(r, 45, 1.0, "alternate")
+        cross = h.pattern_lines(r, 45, 1.0, "cross")
+        dashed = h.pattern_lines(r, 45, 1.0, "dashed")
+        self.assertFalse(single[1])
+        self.assertTrue(alt[0] and alt[1])                   # solid and dashed lines
+        self.assertTrue(dashed[1] and not dashed[0])
+        dirs = {round(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 180) for a, b in cross[0]}
+        self.assertEqual(dirs, {45, 135})
+        self.assertGreater(len(double[0]), len(single[0]) * 1.1)
+
+    def test_user_overrides_survive_a_redo(self):
+        import json
+        from DrawingKitTools import annot, hatching
+        maker = TestHatchByPart("test_each_part_its_own_hatch_and_pins_left_uncut")
+        maker.doc = self.doc
+        page, g, plate, collar, pin = maker.make()
+        sec = core.add_section(page, g.Anchor, direction="Right", origin=App.Vector(20, 25, 5))
+        self.doc.recompute()
+        sym, parts = hatching.hatch_by_part(page, sec)
+        hatching.set_override(sym, "BasePlate", angle=60, spacing=3.0, pattern="cross")
+        hatching.set_override(sym, "Pin001", off=False)          # hatch the pin after all
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertEqual(parts["BasePlate"]["angle"], 60)
+        self.assertEqual(parts["BasePlate"]["pattern"], "cross")
+        self.assertAlmostEqual(parts["BasePlate"]["spacing"], 3.0)
+        self.assertFalse(parts["Pin001"]["skip"])
+        hatching.set_override(sym, "Collar001", off=True)
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertTrue(parts["Collar001"]["skip"])
+        self.assertIn("overrides", json.loads(sym.DrawingKitParams))
+
+
+class TestUncutParts(DocTest):
+    def test_pin_drawn_whole_and_follows(self):
+        from DrawingKitTools import annot, hatching
+        maker = TestHatchByPart("test_each_part_its_own_hatch_and_pins_left_uncut")
+        maker.doc = self.doc
+        page, g, plate, collar, pin = maker.make()
+        sec = core.add_section(page, g.Anchor, direction="Right", origin=App.Vector(20, 25, 5))
+        self.doc.recompute()
+        sym, parts = hatching.hatch_by_part(page, sec)
+        views = hatching.uncut_views(sec)
+        self.assertEqual(list(views), ["Pin001"])
+        v = views["Pin001"]
+        self.assertEqual(v.Direction, sec.Direction)
+        self.assertAlmostEqual(float(v.Scale), core.view_scale(sec))
+        self.assertNotIn(v, core.part_views(page))              # not laid out on its own
+        # sits where the pin is in the section: the pin's box centre
+        keep, o, n = hatching._kept(sec)
+        lx, ly = hatching._local_frame(sec, keep)(pin.Shape.BoundBox.Center)
+        self.assertAlmostEqual(float(v.X), annot.view_point(sec, (lx, ly))[0], places=6)
+        x = float(v.X)
+        sec.X = float(sec.X) + 10
+        annot.refresh(annot.attached_to(sec))
+        self.assertAlmostEqual(float(v.X) - x, 10.0, places=6)
+        # hatching the pin after all removes its uncut view
+        hatching.set_override(sym, "Pin001", off=False)
+        hatching.hatch_by_part(page, sec)
+        self.assertEqual(hatching.uncut_views(sec), {})
+
+
+class TestHatchStepped(DocTest):
+    def test_stepped_section_hatched_by_part(self):
+        import Part
+        from DrawingKitTools import hatching
+        asm = self.doc.addObject("App::Part", "Assembly")
+        plate = self.doc.addObject("Part::Feature", "BasePlate")
+        plate.Shape = Part.makeBox(100, 60, 10)
+        asm.addObject(plate)
+        for i, (x, y) in enumerate(((20, 15), (70, 45))):
+            b = self.doc.addObject("Part::Feature", "Block%03d" % (i + 1))
+            b.Shape = Part.makeBox(16, 16, 12, App.Vector(x - 8, y - 8, 10))
+            asm.addObject(b)
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [asm], front=FRONT)
+        self.doc.recompute()
+        top = g.getItemByLabel("Top")
+        pts = [core.model_to_page(top, App.Vector(x, y, 5))
+               for x, y in ((-5, 15), (45, 15), (45, 45), (105, 45))]
+        bx = core.view_box(top)
+        sec = core.add_cut_section(page, top, pts, (bx[0] + 50, bx[1] - 40))
+        self.doc.recompute()
+        self.assertTrue(hatching.is_stepped(sec))
+        self.assertEqual(len(hatching.cut_planes(sec)), 2)
+        sym, parts = hatching.hatch_by_part(page, sec)
+        self.assertIsNotNone(sym)
+        self.assertEqual(set(parts), {"BasePlate", "Block001", "Block002"})
+        self.assertNotEqual(parts["Block001"]["angle"], parts["BasePlate"]["angle"])
+        self.assertEqual(parts["Block001"]["angle"], parts["Block002"]["angle"])   # same part
+        # the plate is cut on both steps: hatched across the whole width
+        xs = [p[0] for a, b in parts["BasePlate"]["segments"] for p in (a, b)]
+        self.assertAlmostEqual(min(xs), -50.0, delta=0.5)
+        self.assertAlmostEqual(max(xs), 50.0, delta=0.5)

@@ -519,6 +519,67 @@ class HatchByPart:
                 sum(1 for p in parts.values() if p["skip"])) for s, parts in done))
 
 
+class EditHatch:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_EditHatch.svg"),
+                "MenuText": "Edit a part's hatch",
+                "ToolTip": "Click a part in a section hatched by part: change its hatch "
+                           "angle, spacing or pattern, or switch its hatching off (or on, "
+                           "e.g. for a pin). Kept when the hatch is redone."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import annot, hatching
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        syms = [v for v in page.Views if getattr(v, annot.KIND, "") == "hatch"]
+        if not syms:
+            warn("No section on this page is hatched by part yet (use Hatch by part first).")
+            return
+        show_page(page)
+        Gui.updateGui()
+        doc = page.Document
+
+        def done(pt):
+            for sym in syms:
+                part = hatching.part_at(sym, pt[0], pt[1])
+                if part is not None:
+                    break
+            else:
+                warn("Click inside a part's cut face in the section.")
+                return
+            cur = annot._params(sym).get("parts", {}).get(part.Name, {})
+            pop = ui.Popover("Hatch: %s" % part.Label)
+            on = ui.toggle("Hatched", not cur.get("skip", False), "Off: draw this part uncut")
+            angle = ui.field("%g" % cur.get("angle", 45), 40, "45", "Angle (degrees)")
+            spacing = ui.field("%g" % cur.get("spacing", 2.5), 40, "2.5", "Spacing on paper (mm)")
+            pattern = ui.combo(hatching.PATTERNS, cur.get("pattern", "single"), 110)
+            reset = ui.toggle("Reset", False, "Back to the automatic hatch for this part")
+            pop.add_row(on, angle, "°", spacing, "mm", stretch=True)
+            pop.add_row(pattern, reset, stretch=True)
+            if not pop.run():
+                return
+            if reset.isChecked():
+                choice = {"angle": None, "spacing": None, "pattern": None, "off": None}
+            else:
+                choice = {"angle": _num(angle.text()) or cur.get("angle", 45),
+                          "spacing": max(0.5, _num(spacing.text()) or cur.get("spacing", 2.5)),
+                          "pattern": pattern.currentData(), "off": not on.isChecked()}
+
+            def work():
+                hatching.set_override(sym, part.Name, **choice)
+                return hatching.hatch_by_part(page, getattr(sym, annot.LINK))
+            run_in_transaction(doc, "DrawingKit edit hatch", work)
+            doc.recompute()
+            say("Hatch of %s updated" % part.Label)
+
+        _one_click(page, "Click a part in the hatched section.", lambda pt: [], done)
+
+
 class HiddenLines:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_Hidden.svg"),
@@ -2149,6 +2210,7 @@ COMMANDS = [
     ("DrawingKit_SpeedToggle", SpeedToggle()),
     ("DrawingKit_HiddenLines", HiddenLines()),
     ("DrawingKit_HatchByPart", HatchByPart()),
+    ("DrawingKit_EditHatch", EditHatch()),
 ]
 
 for _name, _cmd in COMMANDS:
@@ -2158,7 +2220,8 @@ for _name, _cmd in COMMANDS:
 COMMAND_GROUPS = [
     ("DrawingKit views", ["DrawingKit_NewSheet", "DrawingKit_StandardViews",
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
-                          "DrawingKit_AlignedSection", "DrawingKit_HatchByPart", "DrawingKit_DetailView",
+                          "DrawingKit_AlignedSection", "DrawingKit_HatchByPart", "DrawingKit_EditHatch",
+                          "DrawingKit_DetailView",
                           "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_HiddenLines",
                           "DrawingKit_SpeedToggle"]),
     ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
