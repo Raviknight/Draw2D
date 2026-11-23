@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Headless tests for DrawingKit. Run with: freecadcmd tests/run_tests.py"""
 
+import os
 import unittest
 
 import FreeCAD as App
@@ -1536,3 +1537,141 @@ class TestAsmeFrame(DocTest):
     def test_cycle_buttons_offer_asme_modifiers(self):
         from DrawingKitTools import gdt
         self.assertEqual(gdt.MODIFIERS["RFS"], "S")
+
+
+class TestTablesAndLayout(DocTest):
+    def test_empty_rects_avoid_blockers(self):
+        frame = (0, 0, 400, 280)
+        title = (220, 0, 400, 50)
+        table = (290, 50, 400, 90)
+        rects = core.empty_rects(frame, [title, table], pad=0.0)
+        for r in rects:
+            for b in (title, table):
+                self.assertFalse(r[0] < b[2] and b[0] < r[2] and r[1] < b[3] and b[1] < r[3])
+        self.assertEqual(rects[0], (0, 90, 400, 280))       # biggest: above both
+
+    def test_fit_keeps_views_off_the_parts_list(self):
+        import Part
+        from DrawingKitTools import drafting
+        asm = self.doc.addObject("App::Part", "Assembly")
+        b = self.doc.addObject("Part::Feature", "Base")
+        b.Shape = Part.makeBox(100, 60, 10)
+        p1 = self.doc.addObject("Part::Feature", "Pin001")
+        p1.Shape = Part.makeCylinder(4, 20, App.Vector(20, 30, 10))
+        p2 = self.doc.addObject("Part::Feature", "Pin002")
+        p2.Shape = Part.makeCylinder(4, 20, App.Vector(80, 30, 10))
+        for o in (b, p1, p2):
+            asm.addObject(o)
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [asm])
+        self.doc.recompute()
+        drafting.add_parts_list(page, g.Anchor)
+        core.make_room_for_tables(page)
+        self.doc.recompute()
+        tb = core.table_boxes(page, pad=0.0)
+        for v in core.part_views(page):
+            vb = core.view_box(v)
+            for t in tb:
+                self.assertFalse(vb[0] < t[2] and t[0] < vb[2] and vb[1] < t[3] and t[1] < vb[3], v.Label)
+
+
+class TestExport(DocTest):
+    def test_sheet_names(self):
+        from DrawingKitTools import export
+        p1 = core.create_page(self.doc, "A4", "Landscape")
+        p2 = core.create_page(self.doc, "A4", "Landscape")
+        self.assertEqual(export.sheet_paths("C:/x/Part.pdf", [p1]), ["C:/x/Part.pdf"])
+        self.assertEqual(export.sheet_paths("C:/x/Part.pdf", [p1, p2]),
+                         ["C:/x/Part - Sheet 1.pdf", "C:/x/Part - Sheet 2.pdf"])
+
+    def test_dxf_export_headless(self):
+        import tempfile
+        from DrawingKitTools import export
+        page = core.create_page(self.doc, "A3", "Landscape")
+        core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        d = tempfile.mkdtemp(prefix="dk_export_")
+        done = export.export_pages([page], os.path.join(d, "Box.dxf"), "dxf")
+        self.assertEqual(len(done), 1)
+        self.assertGreater(os.path.getsize(done[0]), 1000)
+        with open(done[0], encoding="utf-8", errors="ignore") as f:
+            self.assertIn("ENTITIES", f.read())
+
+
+def threaded_plate(doc):
+    """PartDesign body: 60 x 40 x 20 plate, two M6 holes through and one
+    M8 blind (drill 15, thread 12) from the top face."""
+    import Part
+    body = doc.addObject("PartDesign::Body", "Body")
+    sk = body.newObject("Sketcher::SketchObject", "Base")
+    pts = [App.Vector(0, 0, 0), App.Vector(60, 0, 0), App.Vector(60, 40, 0), App.Vector(0, 40, 0)]
+    for i in range(4):
+        sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sk
+    pad.Length = 20
+    doc.recompute()
+
+    def hole(name, centres, size, through, depth=0, tdepth=0):
+        hs = body.newObject("Sketcher::SketchObject", name + "Sketch")
+        hs.Placement = App.Placement(App.Vector(0, 0, 20), App.Rotation())
+        for c in centres:
+            hs.addGeometry(Part.Circle(App.Vector(c[0], c[1], 0), App.Vector(0, 0, 1), 3))
+        h = body.newObject("PartDesign::Hole", name)
+        h.Profile = hs
+        h.ThreadType = "ISOMetricProfile"
+        h.Threaded = True
+        doc.recompute()
+        h.ThreadSize = size
+        h.ThreadClass = "6H"
+        if through:
+            h.DepthType = "ThroughAll"
+        else:
+            h.DepthType = "Dimension"
+            h.Depth = depth
+            h.ThreadDepthType = "Dimension"
+            h.ThreadDepth = tdepth
+        doc.recompute()
+        return h
+
+    hole("M6Holes", [(10, 10), (50, 10)], "M6x1.0", True)
+    hole("M8Hole", [(30, 28)], "M8x1.25", False, 15, 12)
+    doc.recompute()
+    return body
+
+
+class TestThreads(DocTest):
+    def test_thread_callouts(self):
+        from DrawingKitTools import holes
+        body = threaded_plate(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [body])
+        self.doc.recompute()
+        view = [v for v in core.part_views(page) if holes.holes_seen_end_on(v)][0]
+        hs = holes.holes_seen_end_on(view)
+        texts = sorted(holes.callout_text(gr) for gr in holes.group_holes(hs))
+        self.assertEqual(texts, ["2X M6 - 6H THRU", "⌀%.2f ↧ 15.00 M8 - 6H ↧ 12.00"])
+        made = holes.add_callouts(page, view)
+        self.doc.recompute()
+        thru = [d for d in made if "THRU" in d.FormatSpec][0]
+        self.assertTrue(thru.Arbitrary)
+
+    def test_designations(self):
+        from DrawingKitTools import holes
+
+        class F:
+            pass
+        f = F()
+        f.ThreadType, f.ThreadSize, f.ThreadClass = "ISOMetricFineProfile", "M8x1.0", "6H"
+        self.assertEqual(holes.thread_designation(f), "M8x1 - 6H")
+        f.ThreadType, f.ThreadSize, f.ThreadClass = "UNC", "1/4", "2B"
+        self.assertEqual(holes.thread_designation(f), "1/4 UNC - 2B")
+
+
+class TestBalloonLeaders(unittest.TestCase):
+    def test_crossing_leaders_are_swapped(self):
+        from DrawingKitTools import drafting
+        plan = [["a", (0, 10), (10, 0)], ["b", (0, 0), (10, 10)]]   # an X
+        drafting.uncross(plan)
+        self.assertFalse(drafting._segments_cross(plan[0][1], plan[0][2], plan[1][1], plan[1][2]))

@@ -572,7 +572,7 @@ def auto_balloons(page, view):
     except Exception:
         pass
     taken = []
-    out = []
+    plan = []
     for it in items:
         pt = None
         for o in it["objects"]:
@@ -583,8 +583,31 @@ def auto_balloons(page, view):
             continue
         place = balloon_place(pt, box, taken, avoid=avoid, area=area)
         taken.append(place)
-        out.append(add_balloon(page, view, pt, place, it["item"]))
-    return out
+        plan.append([it, pt, place])
+    uncross(plan)
+    return [add_balloon(page, view, pt, place, it["item"]) for it, pt, place in plan]
+
+
+def _segments_cross(a, b, c, d):
+    def orient(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    return (orient(a, b, c) * orient(a, b, d) < 0) and (orient(c, d, a) * orient(c, d, b) < 0)
+
+
+def uncross(plan, rounds=10):
+    """Swap bubble positions of balloons whose leaders cross (in place).
+    ``plan``: [[item, point, place], ...]."""
+    for _ in range(rounds):
+        swapped = False
+        for i in range(len(plan)):
+            for j in range(i + 1, len(plan)):
+                a, b = plan[i], plan[j]
+                if _segments_cross(a[1], a[2], b[1], b[2]):
+                    a[2], b[2] = b[2], a[2]
+                    swapped = True
+        if not swapped:
+            break
+    return plan
 
 
 # ---------------------------------------------------------------------------

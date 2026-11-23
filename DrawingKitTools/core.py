@@ -264,10 +264,83 @@ def page_size(page):
 
 
 def page_regions(page):
+    """Free rectangles of the drawing area for views: not on the title
+    block, nor on DrawingKit tables (parts list, hole and revision tables)."""
     w, h = page_size(page)
     path = getattr(page.Template, "Template", "") or ""
     frame, title = drawing_area(path, w, h)
-    return free_regions(frame, title)
+    blockers = table_boxes(page)
+    if not blockers:
+        return free_regions(frame, title)
+    return empty_rects(frame, ([title] if title else []) + blockers)
+
+
+def make_room_for_tables(page):
+    """If a view sits on a DrawingKit table, fit the page again (the fit
+    keeps views off tables). Returns True if it re-fitted."""
+    boxes = table_boxes(page, pad=0.0)
+    if not boxes:
+        return False
+    for v in part_views(page):
+        try:
+            vb = view_box(v)
+        except Exception:
+            continue
+        if any(vb[0] < b[2] and b[0] < vb[2] and vb[1] < b[3] and b[1] < vb[3] for b in boxes):
+            group, _ = page_content(page)
+            if group is None:
+                return False
+            fit_page(page)
+            return True
+    return False
+
+
+def table_boxes(page, pad=3.0):
+    """Page rectangles of the DrawingKit tables on a page."""
+    out = []
+    try:
+        from . import annot, tables
+    except Exception:
+        return out
+    for v in page.Views:
+        if getattr(v, "DrawingKitAnnot", "") in ("bom", "holetable", "revtable"):
+            try:
+                w, h = tables.table_size(annot._params(v))
+            except Exception:
+                continue
+            x, y = float(v.X), float(v.Y)
+            out.append((x - w / 2 - pad, y - h / 2 - pad, x + w / 2 + pad, y + h / 2 + pad))
+    return out
+
+
+def empty_rects(frame, blockers, pad=5.0):
+    """Largest rectangles inside ``frame`` that touch none of ``blockers``,
+    biggest first (each padded inwards like free_regions)."""
+    fx0, fy0, fx1, fy1 = frame
+    xs = sorted({fx0, fx1} | {min(max(b[i], fx0), fx1) for b in blockers for i in (0, 2)})
+    ys = sorted({fy0, fy1} | {min(max(b[i], fy0), fy1) for b in blockers for i in (1, 3)})
+
+    def clear(r):
+        return all(not (r[0] < b[2] - 1e-9 and b[0] < r[2] - 1e-9 and
+                        r[1] < b[3] - 1e-9 and b[1] < r[3] - 1e-9) for b in blockers)
+
+    cands = []
+    for i, x0 in enumerate(xs):
+        for x1 in xs[i + 1:]:
+            for j, y0 in enumerate(ys):
+                for y1 in ys[j + 1:]:
+                    r = (x0, y0, x1, y1)
+                    if clear(r):
+                        cands.append(r)
+    maximal = [r for r in cands if not any(
+        o != r and o[0] <= r[0] and o[1] <= r[1] and o[2] >= r[2] and o[3] >= r[3] for o in cands)]
+    maximal.sort(key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
+    out = []
+    for x0, y0, x1, y1 in maximal:
+        x0, y0, x1, y1 = x0 + pad, y0 + pad, x1 - pad, y1 - pad
+        if x1 > x0 and y1 > y0:
+            out.append((x0, y0, x1, y1))
+    return out
 
 
 # ---------------------------------------------------------------------------

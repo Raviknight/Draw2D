@@ -1161,6 +1161,8 @@ class HoleTable:
             place = points[-1] if points else None
             table, tags = run_in_transaction(doc, "DrawingKit hole table",
                                              lambda: tables.add_hole_table(page, base, place))
+            if place is None:
+                core.make_room_for_tables(page)   # default spot: move views off it
             doc.recompute()
             say("Hole table with %d hole(s) added" % len(tags))
 
@@ -1789,6 +1791,7 @@ class PartsList:
 
         def work():
             table, items = drafting.add_parts_list(page, view)
+            core.make_room_for_tables(page)     # views off the new table
             made = drafting.auto_balloons(page, view) if balloons.isChecked() else []
             return items, made
 
@@ -1839,6 +1842,49 @@ class Balloon:
             say("Balloon %s placed" % text)
 
         _two_click(page, "Click the part,", "click where the balloon goes.", preview, done)
+
+
+class ExportSheets:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Export.svg"),
+                "MenuText": "Export PDF / DXF",
+                "ToolTip": "Save the current sheet, or all sheets, as PDF, DXF or SVG "
+                           "(one file per sheet), named after the drawing number."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    last = {"fmt": "pdf", "all": False}
+
+    def Activated(self):
+        from . import export
+        page = target_page()
+        if page is None:
+            warn("Open the sheet to export first.")
+            return
+        sheets = sorted(pages(page.Document), key=lambda p: p.Label)
+        pop = ui.Popover("Export")
+        fmt = ui.combo(export.FORMATS, self.last["fmt"], 70)
+        every = ui.toggle("All %d sheets" % len(sheets), self.last["all"] and len(sheets) > 1)
+        every.setEnabled(len(sheets) > 1)
+        pop.add_row(fmt, every, stretch=True)
+        if not pop.run():
+            return
+        f = fmt.currentData()
+        ExportSheets.last = {"fmt": f, "all": every.isChecked()}
+        chosen = sheets if every.isChecked() else [page]
+        folder, base = export.default_base(page)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            Gui.getMainWindow(), "Export as %s" % f.upper(),
+            os.path.join(folder, "%s.%s" % (base, f)), "%s (*.%s)" % (f.upper(), f))
+        if not path:
+            return
+        try:
+            done = export.export_pages(chosen, path, f)
+        except Exception as e:
+            warn("Export failed: %s" % e)
+            return
+        say("Exported %d file(s): %s" % (len(done), ", ".join(os.path.basename(d) for d in done)))
 
 
 def _one_click(page, hint, preview, done):
@@ -2016,6 +2062,7 @@ COMMANDS = [
     ("DrawingKit_Weld", WeldSymbol()),
     ("DrawingKit_PartsList", PartsList()),
     ("DrawingKit_Balloon", Balloon()),
+    ("DrawingKit_Export", ExportSheets()),
     ("DrawingKit_HoleTable", HoleTable()),
     ("DrawingKit_FillTitleBlock", FillTitleBlock()),
     ("DrawingKit_Revision", AddRevision()),
@@ -2041,7 +2088,7 @@ COMMAND_GROUPS = [
                                "DrawingKit_TextStyle"]),
     ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
                            "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
-                           "DrawingKit_Revision"]),
+                           "DrawingKit_Revision", "DrawingKit_Export"]),
 ]
 
 

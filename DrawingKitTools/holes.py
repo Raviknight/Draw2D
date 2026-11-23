@@ -32,12 +32,14 @@ class Hole:
         self.cbore = None         # (diameter, depth) of a counterbore / spotface
         self.spotface = False
         self.csink = None         # (diameter at the surface, included angle)
+        self.thread = None        # (designation e.g. 'M6 - 6H', thread depth or None)
 
     def key(self):
         """What makes two holes 'the same' for counting (3X ...)."""
         return (round(self.radius * 2, 3), True if self.through else round(self.depth, 3),
                 tuple(round(x, 3) for x in self.cbore) if self.cbore else None, self.spotface,
-                tuple(round(x, 2) for x in self.csink) if self.csink else None)
+                tuple(round(x, 2) for x in self.csink) if self.csink else None,
+                self.thread)
 
     @property
     def depth(self):
@@ -98,8 +100,14 @@ def find_holes(shape):
             side = axis.cross(App.Vector(0, 1, 0))
         side.normalize()
         w = side * (r * 0.9)
-        open0 = not shape.isInside(c + w + axis * (lo - eps), 1e-6, True)
-        open1 = not shape.isInside(c + w + axis * (hi + eps), 1e-6, True)
+        # a second probe further on: past a drill point's cone (blind holes)
+        far = eps + r * 1.2
+
+        def is_open(t, sgn):
+            return not shape.isInside(c + w + axis * (t + sgn * eps), 1e-6, True) and \
+                not shape.isInside(c + w + axis * (t + sgn * far), 1e-6, True)
+        open0 = is_open(lo, -1)
+        open1 = is_open(hi, 1)
         holes.append(Hole(c, axis, r, lo, hi, open0 and open1))
     return _merge_coaxial(holes, _countersinks(shape))
 
@@ -178,7 +186,12 @@ def holes_seen_end_on(view, shape=None):
     """Holes whose axis points along the view direction (drawn as circles)."""
     shape = shape or core.source_shape(view.Source)
     d, _, _ = core.view_axes(view)
-    return [h for h in find_holes(shape) if abs(abs(h.axis.dot(d)) - 1.0) < 1e-6]
+    found = [h for h in find_holes(shape) if abs(abs(h.axis.dot(d)) - 1.0) < 1e-6]
+    try:
+        attach_threads(found, view.Source)
+    except Exception as e:      # thread names are a bonus; never lose the holes
+        App.Console.PrintWarning("DrawingKit threads: %s\n" % e)
+    return found
 
 
 def group_holes(holes):
@@ -189,6 +202,94 @@ def group_holes(holes):
     return list(groups.values())
 
 
+# ---------------------------------------------------------------------------
+# Threads (FreeCAD models them as plain tap-drill holes; the PartDesign Hole
+# feature knows the thread)
+# ---------------------------------------------------------------------------
+def _hole_features(objs):
+    """PartDesign::Hole features behind the given source objects."""
+    seen, out = set(), []
+
+    def visit(o):
+        if o is None or o.Name in seen:
+            return
+        seen.add(o.Name)
+        if o.isDerivedFrom("PartDesign::Hole"):
+            out.append(o)
+        if hasattr(o, "getLinkedObject"):
+            lo = o.getLinkedObject(True)
+            if lo is not None and lo is not o:
+                visit(lo)
+        for c in (getattr(o, "Group", None) or []):
+            visit(c)
+        body = getattr(o, "_Body", None)
+        if body is not None:
+            visit(body)
+
+    for o in objs:
+        visit(o)
+    return out
+
+
+def thread_designation(feat):
+    """'M6 - 6H' (ISO coarse: pitch left out), 'M8x1 - 6H', '1/4-20 UNC - 2B'..."""
+    size = str(feat.ThreadSize)
+    ttype = str(feat.ThreadType)
+    if ttype == "ISOMetricProfile":
+        size = size.split("x")[0]                       # coarse pitch is implied
+    elif ttype == "ISOMetricFineProfile":
+        size = size.replace(".0", "") if size.endswith(".0") else size
+    elif ttype in ("UNC", "UNF", "UNEF"):
+        size = "%s %s" % (size, ttype)
+    elif ttype not in ("None", ""):
+        size = "%s %s" % (ttype, size)
+    cls = str(getattr(feat, "ThreadClass", "") or "")
+    if cls and cls != "None":
+        size = "%s - %s" % (size, cls)
+    return size
+
+
+def _profile_centres(feat):
+    """Global centres and axis of the circles a Hole feature was made from."""
+    prof = feat.Profile
+    sk = prof[0] if isinstance(prof, (tuple, list)) else prof
+    if sk is None:
+        return [], None
+    pl = sk.getGlobalPlacement() if hasattr(sk, "getGlobalPlacement") else sk.Placement
+    axis = pl.Rotation.multVec(App.Vector(0, 0, 1))
+    pts = []
+    for g in getattr(sk, "Geometry", []):
+        if "Circle" in type(g).__name__ and not getattr(g, "Construction", False):
+            pts.append(pl.multVec(App.Vector(g.Center)))
+    return pts, axis
+
+
+def attach_threads(holes, objs):
+    """Mark the holes that come from a threaded PartDesign Hole feature."""
+    for feat in _hole_features(objs):
+        if not getattr(feat, "Threaded", False):
+            continue
+        try:
+            centres, axis = _profile_centres(feat)
+            drill_r = float(feat.Diameter) / 2.0
+        except Exception:
+            continue
+        if axis is None:
+            continue
+        through = str(feat.DepthType) == "ThroughAll"
+        tdepth = None
+        if not through:
+            tdt = str(getattr(feat, "ThreadDepthType", "Hole Depth"))
+            tdepth = float(feat.Depth) if tdt == "Hole Depth" else float(feat.ThreadDepth)
+        info = (thread_designation(feat), tdepth)
+        for h in holes:
+            if abs(h.radius - drill_r) > 1e-3:
+                continue
+            if any(_same_line(h.centre, h.axis, c, axis) for c in centres):
+                h.thread = info
+    return holes
+
+
 def callout_text(group, decimals=2):
     """FormatSpec for TechDraw, ASME / ISO 129-1 style:
     '3X ⌀%.2f THRU', '⌀%.2f ↧ 10.00',
@@ -196,13 +297,23 @@ def callout_text(group, decimals=2):
     '⌀%.2f THRU SF ⌀16.00 ↧ 1.00'     (spotface),
     '⌀%.2f THRU ⌵ ⌀12.40 X 90°'      (countersink)."""
     h = group[0]
-    spec = "%s%%.%df" % (DIAMETER, decimals)
-    if len(group) > 1:
-        spec = "%dX %s" % (len(group), spec)
-    if h.through:
-        spec += " THRU"
+    count = ("%dX " % len(group)) if len(group) > 1 else ""
+    if h.thread:
+        # tapped: 'M6 - 6H THRU', or the drill then the thread for a blind
+        # hole: '⌀5.00 ↧ 15.00 M6 - 6H ↧ 12.00' (ASME / ISO 6410 order)
+        name, tdepth = h.thread
+        if h.through:
+            spec = "%s%s THRU" % (count, name)
+        else:
+            spec = "%s%s%%.%df %s %.*f %s %s %.*f" % (
+                count, DIAMETER, decimals, DEPTH_SYMBOL, decimals, h.depth,
+                name, DEPTH_SYMBOL, decimals, tdepth if tdepth is not None else h.depth)
     else:
-        spec += " %s %.*f" % (DEPTH_SYMBOL, decimals, h.depth)
+        spec = "%s%s%%.%df" % (count, DIAMETER, decimals)
+        if h.through:
+            spec += " THRU"
+        else:
+            spec += " %s %.*f" % (DEPTH_SYMBOL, decimals, h.depth)
     if h.cbore:
         dia, depth = h.cbore
         spec += " %s %s%.*f %s %.*f" % (SPOTFACE if h.spotface else COUNTERBORE, DIAMETER,
@@ -335,6 +446,8 @@ def add_callout(page, view, group, shape=None, used_angles=None, clearance=10.0,
     dim.MeasureType = "Projected"
     dim.References2D = [(view, edge)]
     dim.FormatSpec = callout_text(group)
+    if "%" not in dim.FormatSpec:
+        dim.Arbitrary = True        # e.g. 'M6 - 6H THRU': text as written
     page.addView(dim)
     dim.X, dim.Y = rel   # relative to the view centre, page mm
     set_horizontal_text(dim)
