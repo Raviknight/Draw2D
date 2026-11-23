@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Holes: find them in the 3D part, group the same ones, and label them
-with a TechDraw diameter dimension reading e.g. '3X Ø6.40 THRU'.
+with a TechDraw diameter dimension reading e.g. '3X ⌀6.4 THRU'.
 
 No GUI needed (testable with freecadcmd).
 """
 
 import math
+import re
 
 import FreeCAD as App
 
@@ -290,12 +291,29 @@ def attach_threads(holes, objs):
     return holes
 
 
+def _n(v, decimals=2):
+    """A number as drawings write it: no trailing zeros ('6.4', '11', '90')."""
+    t = "%.*f" % (decimals, v)
+    return t.rstrip("0").rstrip(".") if "." in t else t
+
+
+def value_spec(decimals=2):
+    """TechDraw format for the measured diameter: '%.2w' drops trailing
+    zeros like TechDraw's own dimensions, so a sheet reads consistently."""
+    return "%%.%dw" % decimals
+
+
+def fill_value(spec, value, decimals=2):
+    """The callout as printed: the measured value put into its format."""
+    return re.sub(r"%\.\d+[wf]", _n(value, decimals), spec, count=1)
+
+
 def callout_text(group, decimals=2):
     """FormatSpec for TechDraw, ASME / ISO 129-1 style:
-    '3X ⌀%.2f THRU', '⌀%.2f ↧ 10.00',
-    '4X ⌀%.2f THRU ⌴ ⌀11.00 ↧ 6.40'  (counterbore),
-    '⌀%.2f THRU SF ⌀16.00 ↧ 1.00'     (spotface),
-    '⌀%.2f THRU ⌵ ⌀12.40 X 90°'      (countersink)."""
+    '3X ⌀6.6 THRU', '⌀5 ↧ 10',
+    '4X ⌀6.6 THRU ⌴ ⌀11 ↧ 6.4'  (counterbore),
+    '⌀6.6 THRU SF ⌀16 ↧ 1'         (spotface),
+    '⌀6.6 THRU ⌵ ⌀12.4 X 90°'      (countersink)."""
     h = group[0]
     count = ("%dX " % len(group)) if len(group) > 1 else ""
     if h.thread:
@@ -305,22 +323,22 @@ def callout_text(group, decimals=2):
         if h.through:
             spec = "%s%s THRU" % (count, name)
         else:
-            spec = "%s%s%%.%df %s %.*f %s %s %.*f" % (
-                count, DIAMETER, decimals, DEPTH_SYMBOL, decimals, h.depth,
-                name, DEPTH_SYMBOL, decimals, tdepth if tdepth is not None else h.depth)
+            spec = "%s%s%s %s %s %s %s %s" % (
+                count, DIAMETER, value_spec(decimals), DEPTH_SYMBOL, _n(h.depth, decimals),
+                name, DEPTH_SYMBOL, _n(tdepth if tdepth is not None else h.depth, decimals))
     else:
-        spec = "%s%s%%.%df" % (count, DIAMETER, decimals)
+        spec = "%s%s%s" % (count, DIAMETER, value_spec(decimals))
         if h.through:
             spec += " THRU"
         else:
-            spec += " %s %.*f" % (DEPTH_SYMBOL, decimals, h.depth)
+            spec += " %s %s" % (DEPTH_SYMBOL, _n(h.depth, decimals))
     if h.cbore:
         dia, depth = h.cbore
-        spec += " %s %s%.*f %s %.*f" % (SPOTFACE if h.spotface else COUNTERBORE, DIAMETER,
-                                        decimals, dia, DEPTH_SYMBOL, decimals, depth)
+        spec += " %s %s%s %s %s" % (SPOTFACE if h.spotface else COUNTERBORE, DIAMETER,
+                                    _n(dia, decimals), DEPTH_SYMBOL, _n(depth, decimals))
     if h.csink:
         dia, ang = h.csink
-        spec += " %s %s%.*f X %g°" % (COUNTERSINK, DIAMETER, decimals, dia, round(ang, 1))
+        spec += " %s %s%s X %g°" % (COUNTERSINK, DIAMETER, _n(dia, decimals), round(ang, 1))
     return spec
 
 
@@ -378,7 +396,7 @@ LABEL_FONT = 5.0     # TechDraw's default dimension text height here (mm)
 
 
 def label_width(group):
-    txt = callout_text(group).replace("%.2f", "%.2f" % (group[0].radius * 2))
+    txt = fill_value(callout_text(group), group[0].radius * 2)
     return len(txt) * LABEL_FONT * 0.58
 
 
@@ -451,7 +469,7 @@ def add_callout(page, view, group, shape=None, used_angles=None, clearance=10.0,
     page.addView(dim)
     dim.X, dim.Y = rel   # relative to the view centre, page mm
     set_horizontal_text(dim)
-    dim.Label = "Hole %s" % dim.FormatSpec.replace("%.2f", "%.2f" % (hole.radius * 2))
+    dim.Label = "Hole %s" % fill_value(dim.FormatSpec, hole.radius * 2)
     return dim
 
 
@@ -481,6 +499,12 @@ def add_callouts(page, view, holes=None):
                 boxes.append(core.view_box(v))
             except Exception:
                 pass
+    # and the texts already there: dimensions, captions, symbols, balloons
+    try:
+        from . import clearance
+        boxes.extend(clearance.obstacles(page, views=False))
+    except Exception:
+        pass
     # bigger holes first: they usually sit in the middle and need the space
     for g in sorted(group_holes(holes), key=lambda g: -g[0].radius):
         try:

@@ -564,16 +564,16 @@ class TestHoles(DocTest):
     def test_callout_texts(self):
         groups = self.holes.group_holes(self.holes.find_holes(self.part.Shape))
         texts = sorted(self.holes.callout_text(g) for g in groups)
-        self.assertIn("3X ⌀%.2f THRU", texts)
-        self.assertIn("⌀%.2f THRU", texts)
-        self.assertTrue(any(t.startswith("⌀%.2f ↧ 4.0") for t in texts), texts)
+        self.assertIn("3X ⌀%.2w THRU", texts)
+        self.assertIn("⌀%.2w THRU", texts)
+        self.assertTrue(any(t.startswith("⌀%.2w ↧ 4") for t in texts), texts)
 
     def test_callouts_on_top_view(self):
         dims = self.holes.add_callouts(self.page, self.top)
         self.doc.recompute()
         self.assertEqual(len(dims), 3)          # bolt holes, bore, blind hole
         texts = [d.FormatSpec for d in dims]
-        self.assertIn("3X ⌀%.2f THRU", texts)
+        self.assertIn("3X ⌀%.2w THRU", texts)
         for d in dims:
             self.assertEqual(d.Type, "Diameter")
             self.assertIn("Up-to-date", d.State)
@@ -1114,7 +1114,7 @@ class TestTitleAndTables(DocTest):
         bore = rows[0]
         self.assertAlmostEqual(bore[1], 25.0, places=3)   # disc r25: centre is 25 from lower-left
         self.assertAlmostEqual(bore[2], 25.0, places=3)
-        self.assertEqual(bore[3], "⌀16.00 THRU")
+        self.assertEqual(bore[3], "⌀16 THRU")
         table, tags = tables.add_hole_table(page, top)
         self.assertEqual(len(tags), 5)
         self.assertIn("HOLE TABLE", table.Symbol)
@@ -1488,18 +1488,18 @@ class TestAsmeHoles(DocTest):
         self.assertAlmostEqual(h.cbore[0], 11.0, places=3)
         self.assertAlmostEqual(h.cbore[1], 6.4, places=3)
         self.assertFalse(h.spotface)
-        self.assertEqual(self.h.callout_text([h]), "⌀%.2f THRU ⌴ ⌀11.00 ↧ 6.40")
+        self.assertEqual(self.h.callout_text([h]), "⌀%.2w THRU ⌴ ⌀11 ↧ 6.4")
 
     def test_countersink(self):
         h = self.at(30, 10)
         self.assertAlmostEqual(h.csink[0], 12.4, places=3)
         self.assertAlmostEqual(h.csink[1], 90.0, delta=0.1)
-        self.assertEqual(self.h.callout_text([h]), "⌀%.2f THRU ⌵ ⌀12.40 X 90°")
+        self.assertEqual(self.h.callout_text([h]), "⌀%.2w THRU ⌵ ⌀12.4 X 90°")
 
     def test_spotface(self):
         h = self.at(50, 10)
         self.assertTrue(h.spotface)
-        self.assertEqual(self.h.callout_text([h]), "⌀%.2f THRU SF ⌀16.00 ↧ 1.00")
+        self.assertEqual(self.h.callout_text([h]), "⌀%.2w THRU SF ⌀16 ↧ 1")
 
     def test_plain_and_counted_separately(self):
         groups = self.h.group_holes(self.found)
@@ -1507,7 +1507,7 @@ class TestAsmeHoles(DocTest):
         plain = self.at(50, 30)
         self.assertIsNone(plain.cbore)
         self.assertIsNone(plain.csink)
-        self.assertEqual(self.h.callout_text([plain, plain]), "2X ⌀%.2f THRU")
+        self.assertEqual(self.h.callout_text([plain, plain]), "2X ⌀%.2w THRU")
 
 
 class TestAsmeFrame(DocTest):
@@ -1651,7 +1651,7 @@ class TestThreads(DocTest):
         view = [v for v in core.part_views(page) if holes.holes_seen_end_on(v)][0]
         hs = holes.holes_seen_end_on(view)
         texts = sorted(holes.callout_text(gr) for gr in holes.group_holes(hs))
-        self.assertEqual(texts, ["2X M6 - 6H THRU", "⌀%.2f ↧ 15.00 M8 - 6H ↧ 12.00"])
+        self.assertEqual(texts, ["2X M6 - 6H THRU", "⌀%.2w ↧ 15 M8 - 6H ↧ 12"])
         made = holes.add_callouts(page, view)
         self.doc.recompute()
         thru = [d for d in made if "THRU" in d.FormatSpec][0]
@@ -1675,3 +1675,239 @@ class TestBalloonLeaders(unittest.TestCase):
         plan = [["a", (0, 10), (10, 0)], ["b", (0, 0), (10, 10)]]   # an X
         drafting.uncross(plan)
         self.assertFalse(drafting._segments_cross(plan[0][1], plan[0][2], plan[1][1], plan[1][2]))
+
+
+class TestAssemblyFromFile(DocTest):
+    """An App::Part assembly saved and opened again (Forge's finding #1)."""
+
+    def test_saved_assembly_draws_and_lists(self):
+        import Part
+        import tempfile
+        from DrawingKitTools import drafting
+        doc = App.newDocument("AsmSave")
+        asm = doc.addObject("App::Part", "Assembly")
+        asm.Placement.Base = App.Vector(100, 0, 0)          # moved assembly
+        b = doc.addObject("Part::Feature", "BasePlate")
+        b.Shape = Part.makeBox(80, 50, 10)
+        asm.addObject(b)
+        for i, x in enumerate((20, 60)):
+            p = doc.addObject("Part::Feature", "Pin%03d" % (i + 1))
+            p.Shape = Part.makeCylinder(4, 20, App.Vector(x, 25, 10))
+            asm.addObject(p)
+        doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(prefix="dk_asm_"), "asm.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        try:
+            asm = doc.getObject("Assembly")
+            self.assertEqual([(i["name"], i["qty"]) for i in drafting.bom_items([asm])],
+                             [("BasePlate", 1), ("Pin", 2)])
+            page = core.create_page(doc, "A3", "Landscape")
+            g = core.add_standard_views(page, [asm])
+            doc.recompute()
+            self.assertEqual(core.page_part(page).Name, "Assembly")
+            # a pin is found where the moved assembly shows it
+            items = drafting.bom_items([asm])
+            v = g.Anchor
+            d, right, up = core.view_axes(v)
+            pin_top = App.Vector(120, 25, 30)
+            hits = [drafting.part_at(v, *core.model_to_page(v, pin_top - d * 0.0))[0]]
+            self.assertTrue(any(h is not None for h in hits))
+        finally:
+            App.closeDocument(doc.Name)
+
+
+class TestSectionFromTopView(DocTest):
+    """Forge's finding #2: a section cut on the Top view must stay in line
+    with the Top view after Fit to page (not jump to the Front row)."""
+
+    def test_stays_lined_up_with_its_base_after_fit(self):
+        import Part
+        s = Part.makeBox(100, 60, 12).fuse(Part.makeBox(100, 12, 60))
+        for x in (20, 80):
+            s = s.cut(Part.makeCylinder(3.3, 30, App.Vector(x, 40, -5)))
+        part = self.doc.addObject("Part::Feature", "Bracket")
+        part.Shape = s
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = g.getItemByLabel("Top")
+        hx, hy = core.model_to_page(top, App.Vector(20, 40, 12))
+        bx = max(core.view_box(v)[2] for v in g.Views)
+        sec = core.add_cut_section(page, top, [(hx, hy)], (bx + 45, hy))
+        self.assertEqual(core.section_side(sec), "Right")
+        core.fit_page(page)
+        self.doc.recompute()
+        self.assertAlmostEqual(float(sec.Y), core.view_center(top)[1], places=6)
+        self.assertGreater(core.view_box(sec)[0], core.view_box(top)[2])
+        for v in core.part_views(page):
+            if core.same(v, sec):
+                continue
+            a, b = core.view_box(sec), core.view_box(v)
+            self.assertFalse(a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3], v.Label)
+
+    def test_detail_box_is_its_circle(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        front = g.Anchor
+        cx, cy = core.view_center(front)
+        det = core.add_detail(page, front, (cx, cy), 8.0, (cx + 120, cy))
+        self.doc.recompute()
+        spin_event_loop(3.0)   # detail cut runs in a thread, finished via Qt signals
+        x0, y0, x1, y1 = core.view_box(det)
+        r = float(det.Radius) * core.view_scale(det)
+        self.assertAlmostEqual(x1 - x0, 2 * r, places=6)
+
+
+class TestTurnedPart(DocTest):
+    """Forge's finding #3: end faces and shoulders of a turned part."""
+
+    def test_end_faces_can_be_dimensioned(self):
+        import Part
+        from DrawingKitTools import smartdim
+        x = App.Vector(1, 0, 0)
+        s = Part.makeCylinder(12.5, 70, App.Vector(-60, 0, 0), x).fuse(
+            Part.makeCylinder(10, 50, App.Vector(10, 0, 0), x))
+        s = s.removeSplitter()
+        shaft = self.doc.addObject("Part::Feature", "Shaft")
+        shaft.Shape = s
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [shaft])
+        self.doc.recompute()
+        v = [w for w in g.Views if abs(App.Vector(w.Direction).dot(x)) < 1e-6][0]   # side-on
+        ents = smartdim.entities(v)
+        lines = [e for e in ents if e.kind == "line"]
+        span = lambda e: (e.pts[0], e.pts[1])
+        # the two end faces seen edge-on: lines across the axis at the extremes
+        d, right, up = core.view_axes(v)
+        horiz = abs(right.dot(x)) > 0.5
+        k = 0 if horiz else 1
+        across = [e for e in lines if abs(e.pts[0][k] - e.pts[1][k]) < 1e-6]
+        self.assertGreaterEqual(len(across), 3)          # two ends + the shoulder
+        ends = sorted(across, key=lambda e: e.pts[0][k])
+        a, b = ends[0], ends[-1]
+        t, refs, _ = smartdim.plan([a, b], (0, 40) if horiz else (40, 0))
+        dim = smartdim.add_dimension(page, v, [a, b], (0, 40) if horiz else (40, 0))
+        self.doc.recompute()
+        self.assertAlmostEqual(dim.getRawValue(), 120.0, places=4)
+
+
+class TestForgeLayoutFixes(DocTest):
+    def test_revision_table_inside_frame(self):
+        from DrawingKitTools import tables
+        page = core.create_page(self.doc, "A3", "Landscape")
+        tables.add_revision(page, "Initial release", "QA", "2026-11-23")
+        frame, _ = core.drawing_area(page.Template.Template, *core.page_size(page))
+        (x0, y0, x1, y1), = core.table_boxes(page, pad=0.0)
+        self.assertLessEqual(x1, frame[2] + 0.01)
+        self.assertLessEqual(y1, frame[3] + 0.01)
+        import re
+        t = tables.revision_table(page)
+        w = float(re.search(r'width="([\d.]+)mm"', t.Symbol).group(1))
+        self.assertAlmostEqual(w - 2.0, x1 - x0, delta=0.5)        # drawn as big as planned
+
+    def test_datum_on_a_line_to_line_distance(self):
+        from DrawingKitTools import annot, smartdim
+        part = plate_two_holes(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part])
+        self.doc.recompute()
+        v = g.Anchor
+        ents = smartdim.entities(v)
+        top = smartdim.pick(v, (0, 25), [e for e in ents if e.kind == "line"], tol=1.0)
+        bottom = smartdim.pick(v, (0, -25), [e for e in ents if e.kind == "line"], tol=1.0)
+        dim = smartdim.add_dimension(page, v, [top, bottom], (55, 0))
+        self.doc.recompute()
+        self.assertEqual(dim.Type, "Distance")
+        p0, p1, u = annot.dimension_ends(dim)
+        s = core.view_scale(v)
+        self.assertAlmostEqual(math_dist(p0, p1), 50 * s, places=4)   # square across the plate
+        cx, cy = core.view_center(v)
+        self.assertAlmostEqual(p0[0], cx + 55 * s, places=4)          # through the label
+
+
+class TestKeywayCentreLines(DocTest):
+    def test_no_axis_lines_for_keyway_ends_seen_side_on(self):
+        import Part
+        x, z = App.Vector(1, 0, 0), App.Vector(0, 0, 1)
+        shaft = Part.makeCylinder(10, 100, App.Vector(0, 0, 0), x)
+        slot = Part.makeBox(20, 6, 10, App.Vector(40, -3, 7)) \
+            .fuse(Part.makeCylinder(3, 10, App.Vector(40, 0, 7), z)) \
+            .fuse(Part.makeCylinder(3, 10, App.Vector(60, 0, 7), z))
+        obj = self.doc.addObject("Part::Feature", "KeyedShaft")
+        obj.Shape = shaft.cut(slot)
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [obj])
+        self.doc.recompute()
+        for v in core.part_views(page):
+            d = App.Vector(v.Direction)
+            marks, lines = core.center_features(v)
+            if abs(d.dot(x)) < 1e-6 and abs(d.dot(z)) < 0.99:   # side-on: only the shaft's axis
+                self.assertEqual(len(lines), 1, v.Label)
+
+
+class TestHiddenLines(DocTest):
+    def test_toggle_hidden_lines(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box], front=FRONT)
+        self.doc.recompute()
+        views = core.part_views(page)
+        self.assertFalse(core.has_hidden_lines(views))
+        changed = core.set_hidden_lines(views, True)
+        self.assertEqual(len(changed), len(views))
+        self.assertTrue(all(v.HardHidden for v in views))
+        core.set_hidden_lines(views, False)
+        self.assertFalse(core.has_hidden_lines(views))
+
+
+class TestKeepClear(DocTest):
+    """Forge's finding #6: new symbols keep off texts and each other."""
+
+    def setUp(self):
+        super().setUp()
+        from DrawingKitTools import annot, clearance, smartdim
+        self.annot, self.cl, self.sd = annot, clearance, smartdim
+        self.part = plate_two_holes(self.doc)
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        self.g = core.add_standard_views(self.page, [self.part])
+        self.doc.recompute()
+        self.v = self.g.Anchor
+
+    @staticmethod
+    def overlap(a, b):
+        return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+    def test_two_datums_at_one_spot_do_not_pile_up(self):
+        x0, y0, x1, y1 = core.view_box(self.v)
+        a = self.annot.add_datum(self.page, (x0 + x1) / 2, y1)
+        b = self.annot.add_datum(self.page, (x0 + x1) / 2 + 1, y1, "B")
+        self.assertFalse(self.overlap(self.annot.body_box(a), self.annot.body_box(b)))
+
+    def test_frame_keeps_off_dimension_text(self):
+        ents = self.sd.entities(self.v)
+        top = self.sd.pick(self.v, (0, 25), [e for e in ents if e.kind == "line"], tol=1.0)
+        dim = self.sd.add_dimension(self.page, self.v, [top], (0, 40))   # text above the view
+        self.doc.recompute()
+        label = self.cl.dimension_label_box(dim)
+        # ask for the frame right on top of the dimension text, by default placement
+        cx, cy = core.view_center(self.v)
+        s = core.view_scale(self.v)
+        anchor = (cx, cy + 25 * s)
+        fr = self.annot.add_frame(self.page, None, {"char": "flatness", "tol": "0.05",
+                                                   "datums": ["", "", ""]}, anchor=anchor)
+        fr2 = self.annot.add_frame(self.page, ((label[0] + label[2]) / 2, (label[1] + label[3]) / 2),
+                                   {"char": "flatness", "tol": "0.05", "datums": ["", "", ""]},
+                                   anchor=anchor)
+        for f in (fr, fr2):
+            self.assertFalse(self.overlap(self.annot.body_box(f), label), f.Name)
+        self.assertFalse(self.overlap(self.annot.body_box(fr), core.view_box(self.v)))
+
+    def test_clear_spot_moves_away_from_anchor(self):
+        shift = self.cl.clear_spot((0, 0, 10, 5), (5, -20), [(0, 0, 10, 5)])
+        self.assertIsNotNone(shift)
+        self.assertGreater(shift[1], 0)            # pushed further from the anchor below

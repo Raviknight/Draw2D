@@ -218,11 +218,14 @@ def add_surface(page, x, y, params, box=None):
     p["dir"] = [sdir[0], sdir[1]]
     if box is None:
         # sitting right on a top surface; otherwise on a leader out from it
-        off = (0.0, 0.0) if sdir[1] > 0.9 else (sdir[0] * 12.0 + 4.0, sdir[1] * 12.0 + 6.0)
+        on_top = sdir[1] > 0.9
+        off = (0.0, 0.0) if on_top else (sdir[0] * 12.0 + 4.0, sdir[1] * 12.0 + 6.0)
+        avoid = "on-surface" if on_top else "default"
     else:
         off = (box[0] - x, box[1] - y)
+        avoid = "explicit"
     return annot._new(page, "surface", "Surface %s" % p.get("ra", ""), p, kind, view,
-                      local if kind == "view" else (x, y), off)
+                      local if kind == "view" else (x, y), off, avoid=avoid)
 
 
 def draw_surface(sk, anchor, box, p, values):
@@ -246,6 +249,7 @@ def draw_surface(sk, anchor, box, p, values):
     ra = values.get("ra", p.get("ra", ""))
     method = values.get("method", p.get("method", ""))
     w = max(len(ra), len(method), 3) * 2.2 * k + 2.0 * k
+    sk.body = (left[0], by, right[0] + w, right[1] + (4.5 * k if method else 1.0 * k))
     if ra or method or p.get("all_around"):
         sk.line(right, (right[0] + w, right[1]))
     if p.get("all_around"):
@@ -281,7 +285,8 @@ def add_weld(page, x, y, params, box=None):
     off = (15.0, 12.0) if box is None else (box[0] - x, box[1] - y)
     p = dict(params)
     return annot._new(page, "weld", "Weld %s %s" % (p.get("type", ""), p.get("size", "")), p,
-                      kind, view, local if kind == "view" else (x, y), off)
+                      kind, view, local if kind == "view" else (x, y), off,
+                      avoid="default" if box is None else "explicit")
 
 
 def _weld_glyph(sk, kind, cx, base, up, k):
@@ -319,6 +324,7 @@ def draw_weld(sk, anchor, box, p, values):
     L = 22.0 * k
     right = ax <= bx                   # reference line runs away from the joint
     x_end = bx + L if right else bx - L
+    sk.body = (min(bx, x_end), by - 5.0 * k, max(bx, x_end), by + 6.0 * k)
     sk.line((bx, by), (x_end, by))
     sk.line((bx, by), anchor)
     annot.draw_arrow(sk, anchor, (bx, by))
@@ -366,13 +372,23 @@ def _leaf_parts(objs, out=None):
         group = getattr(o, "Group", None)
         if o.isDerivedFrom("App::Part") or (group and not hasattr(o, "Tip")
                                              and o.TypeId not in ("PartDesign::Body",)):
-            _leaf_parts([g for g in (group or []) if getattr(g, "Visibility", True)], out)
+            # every child counts, shown or not (a file opened without the GUI
+            # reports them all hidden) - except shapes another one is built
+            # from, like the inputs of a boolean cut
+            _leaf_parts([g for g in (group or []) if not _consumed(g)], out)
             continue
-        shp = getattr(o, "Shape", None)
-        if shp is None or shp.isNull() or not shp.Solids:
+        shp = core.shape_of(o)
+        if shp is None or not shp.Solids:
             continue
         out.append(o)
     return out
+
+
+def _consumed(o):
+    for parent in getattr(o, "InList", []):
+        if parent.isDerivedFrom("Part::Feature") and not parent.isDerivedFrom("PartDesign::Body"):
+            return True
+    return False
 
 
 def _base_name(label):
@@ -380,7 +396,7 @@ def _base_name(label):
 
 
 def _signature(o):
-    s = o.Shape
+    s = core.shape_of(o)
     bb = s.BoundBox
     dims = sorted([round(bb.XLength, 3), round(bb.YLength, 3), round(bb.ZLength, 3)])
     src = o.getLinkedObject(True) if hasattr(o, "getLinkedObject") else o
@@ -443,7 +459,7 @@ def part_at(view, px, py, items=None):
     for it in (items or bom_items(view.Source)):
         for o in it["objects"]:
             try:
-                dist, pairs, _ = o.Shape.distToShape(ray)
+                dist, pairs, _ = core.shape_of(o).distToShape(ray)
             except Exception:
                 continue
             if dist > tol or not pairs:
@@ -478,14 +494,15 @@ def visible_point(view, obj, item, items):
     """A page point on ``obj`` that is visible in the view (for auto balloons)."""
     shape = core.source_shape(view.Source)
     cands = []
-    bb = obj.Shape.BoundBox
+    oshape = core.shape_of(obj)
+    bb = oshape.BoundBox
     cands.append(bb.Center)
-    for f in obj.Shape.Faces[:40]:
+    for f in oshape.Faces[:40]:
         try:
             cands.append(f.CenterOfMass)
         except Exception:
             pass
-    for v in obj.Shape.Vertexes[:40]:
+    for v in oshape.Vertexes[:40]:
         cands.append(v.Point)
         cands.append(bb.Center + (v.Point - bb.Center) * 0.8)   # just inside a corner
     # visible spots on the part; prefer one near the view's edge (short

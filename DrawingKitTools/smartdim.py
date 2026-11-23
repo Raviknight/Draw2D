@@ -73,6 +73,23 @@ def _vertices(view):
     return out
 
 
+def _is_straight(edge, tol=1e-6):
+    """True if the edge runs straight from its first to its last vertex."""
+    try:
+        a, b = edge.Vertexes[0].Point, edge.Vertexes[-1].Point
+        chord = a.distanceToPoint(b)
+        if chord < 1e-9:
+            return False
+        if abs(edge.Length - chord) > tol * max(1.0, chord):
+            return False
+        mid = edge.valueAt((edge.FirstParameter + edge.LastParameter) / 2.0)
+        u = (b - a) * (1.0 / chord)
+        d = mid - a
+        return (d - u * d.dot(u)).Length < 1e-6 * max(1.0, chord)
+    except Exception:
+        return False
+
+
 def entities(view):
     """Everything pickable in a view."""
     ents = []
@@ -89,7 +106,10 @@ def entities(view):
             ents.append(Ent("centre", i, [(c.Center.x, c.Center.y)], c.Radius))
             if full:
                 seams.extend((v.Point.x, v.Point.y) for v in e.Vertexes)
-        elif t in ("Part::GeomLine", "Part::GeomLineSegment") and len(e.Vertexes) >= 2:
+        elif len(e.Vertexes) >= 2 and (t in ("Part::GeomLine", "Part::GeomLineSegment")
+                                       or _is_straight(e)):
+            # TechDraw returns some straight edges as B-splines, e.g. a turned
+            # part's end faces and shoulders (circles seen edge-on)
             a, b = e.Vertexes[0].Point, e.Vertexes[-1].Point
             ents.append(Ent("line", i, [(a.x, a.y), (b.x, b.y)]))
     centres = [e.point for e in ents if e.kind == "centre"]

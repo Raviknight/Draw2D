@@ -83,8 +83,7 @@ def target_page():
 
 def selected_parts():
     return [o for o in Gui.Selection.getSelection()
-            if hasattr(o, "Shape") and not o.isDerivedFrom("TechDraw::DrawView")
-            and not o.Shape.isNull()]
+            if not o.isDerivedFrom("TechDraw::DrawView") and core.shape_of(o) is not None]
 
 
 def selected_part_view():
@@ -467,6 +466,34 @@ class SpeedToggle:
         say("Fast editing %s for %s" % ("ON" if fast else "OFF (redrawn)", page.Label))
 
 
+class HiddenLines:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Hidden.svg"),
+                "MenuText": "Hidden lines on/off",
+                "ToolTip": "Show hidden edges as dashed lines (e.g. counterbores seen from "
+                           "the side) in the selected views, or in every view on the page "
+                           "if none is selected. Click again to hide them."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select a view on it) first.")
+            return
+        picked = [o for o in Gui.Selection.getSelection()
+                  if o.isDerivedFrom("TechDraw::DrawViewPart")]
+        views = picked or core.part_views(page)
+        on = not core.has_hidden_lines(views)
+        doc = page.Document
+        changed = run_in_transaction(doc, "DrawingKit hidden lines",
+                                     lambda: core.set_hidden_lines(views, on))
+        core.redraw(changed)
+        doc.recompute()
+        say("Hidden lines %s in %d view(s)" % ("shown" if on else "hidden", len(changed)))
+
+
 def _base_view_and_page():
     base = selected_part_view()
     if base is None:
@@ -638,7 +665,7 @@ class HoleCallout:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_HoleCallout.svg"),
                 "MenuText": "Hole callouts",
-                "ToolTip": "Labels holes like '3X ⌀ 6.40 THRU' or '⌀ 5 ↧ 10'. "
+                "ToolTip": "Labels holes like '3X ⌀6.4 THRU', '⌀5 ↧ 10' or '4X ⌀6.6 THRU ⌴ ⌀11 ↧ 6.4'. "
                            "Select hole circles on a view for just those, or a view "
                            "(or the page) for every kind of hole seen end-on."}
 
@@ -904,8 +931,7 @@ class ToleranceFrame:
             p = dict(c)
             if not p.get("count"):
                 p["count"] = _hole_count_at(page, anchor)
-            box = box or (anchor[0] + 25, anchor[1] + 15)
-            doc = page.Document
+            doc = page.Document     # no box (Enter): add_frame picks a clear spot
             sym = run_in_transaction(doc, "DrawingKit tolerance frame",
                                      lambda: annot.add_frame(page, box, p, anchor=anchor))
             doc.recompute()
@@ -2068,6 +2094,7 @@ COMMANDS = [
     ("DrawingKit_Revision", AddRevision()),
     ("DrawingKit_FitToPage", FitToPage()),
     ("DrawingKit_SpeedToggle", SpeedToggle()),
+    ("DrawingKit_HiddenLines", HiddenLines()),
 ]
 
 for _name, _cmd in COMMANDS:
@@ -2078,7 +2105,8 @@ COMMAND_GROUPS = [
     ("DrawingKit views", ["DrawingKit_NewSheet", "DrawingKit_StandardViews",
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
                           "DrawingKit_AlignedSection", "DrawingKit_DetailView",
-                          "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_SpeedToggle"]),
+                          "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_HiddenLines",
+                          "DrawingKit_SpeedToggle"]),
     ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
                                "DrawingKit_CenterMarks", "DrawingKit_Centerline",
                                "DrawingKit_HoleCallout", "DrawingKit_Chamfer"]),

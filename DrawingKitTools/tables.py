@@ -97,7 +97,7 @@ def hole_rows(view, shape=None):
             lx, ly = core.model_to_local(view, h.centre, shape)
             pts.append((lx - ox, ly - oy, h))
         pts.sort(key=lambda p: (-round(p[1], 3), round(p[0], 3)))   # top to bottom, left to right
-        size = holes.callout_text([g[0]]).replace("%.2f", _fmt(g[0].radius * 2))
+        size = holes.fill_value(holes.callout_text([g[0]]), g[0].radius * 2)
         for i, (x, y, h) in enumerate(pts):
             out.append(("%s%d" % (letter, i + 1), x, y, size, h))
     return out
@@ -119,7 +119,8 @@ def add_hole_table(page, view, place=None):
     p = {"title": "HOLE TABLE  (X, Y from the lower-left corner of %s)" % view.Label,
          "headers": ["TAG", "X", "Y", "SIZE"],
          "rows": [[t, _fmt(x), _fmt(y), size] for t, x, y, size, _ in rows],
-         "widths": [14.0, 20.0, 20.0, 40.0]}
+         "widths": [14.0, 20.0, 20.0, 40.0],
+         "tsize": 3.5}   # fixed: its size is worked out before it is drawn
     W, Ht = table_size(p)
     p["widths"][-1] = max(40.0, W - 54.0)
     W, Ht = table_size(p)
@@ -158,7 +159,7 @@ def add_revision(page, description, approved="", date=None):
     table = revision_table(page)
     if table is None:
         p = {"title": "", "headers": list(REV_HEADERS), "rows": [], "widths": list(REV_WIDTHS),
-             "editable": True}
+             "editable": True, "tsize": 3.5}
     else:
         p = annot._params(table)
         # keep edits the user made in the table's texts

@@ -4,11 +4,11 @@ A FreeCAD 1.1 workbench that makes TechDraw drawings quicker, inspired by how On
 
 The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. The DrawingKit buttons are also added at the end of TechDraw's *TechDraw Pages* toolbar, for when you are in TechDraw. (Double-clicking a page in the tree still switches to TechDraw; that is TechDraw's own preference, *switch workbench on click*.)
 
-Status: early version (0.5.0), not yet in the Addon Manager.
+Status: early version (0.7), not yet in the Addon Manager.
 
 ## Commands
 
-The buttons sit on three toolbars: **DrawingKit views**, **DrawingKit annotation** and **DrawingKit tables**.
+The buttons sit on four toolbars: **DrawingKit views**, **DrawingKit dimensions**, **DrawingKit annotation** and **DrawingKit tables**.
 
 ### Views
 
@@ -21,7 +21,8 @@ The buttons sit on three toolbars: **DrawingKit views**, **DrawingKit annotation
 | **Aligned section** | For features at an angle, like holes on a bolt circle: click out through one feature, the centre, then out through another at any angle; the angled part is swung flat into the section (TechDraw's aligned complex section). |
 | **Detail view by clicking** | Click the centre of the area to enlarge, click again to set the circle, then click where the detail goes. It gets the next free letter and a standard scale, e.g. "DETAIL A (5 : 1)". |
 | **Auxiliary view** | Select a slanted straight edge (a face seen edge-on), then click on the side where the view goes: it looks square-on at that face, so the face shows true size, and stays lined up with its parent along the face's normal. |
-| **Fit to page** | Picks the scale again so the projection group and the other views fit, then re-centres them. Datums and frames follow. |
+| **Fit to page** | Picks the scale again so the projection group and the other views fit, then re-centres them, keeping views off tables. A section stays in line with the view it was cut from (a section of the Top view stays beside the Top view); if that doesn't fit, a smaller scale is used. Datums and frames follow. |
+| **Hidden lines on/off** | Shows hidden edges as dashed lines (a counterbore seen from the side, say) in the selected views, or in every view on the sheet; click again to hide them. |
 | **Fast editing on/off** | On: the page stops updating itself and views switch to Coarse View, so small edits don't freeze FreeCAD. Off: views go back to full quality and the page redraws once. |
 
 ### Annotation
@@ -55,6 +56,8 @@ The buttons sit on three toolbars: **DrawingKit views**, **DrawingKit annotation
 | **Export PDF / DXF** | Saves the current sheet, or all sheets (one file each: "Bracket - Sheet 1.pdf" …), as PDF, DXF or SVG, named after the drawing number and put next to the FreeCAD file. |
 
 Settings open in small pop-ups next to the mouse that show only what's needed (Enter = OK, Esc = cancel); extras such as a frame's second segment sit behind a toggle. In the Note pop-up Enter starts a new line; click ✓ to finish.
+
+New frames, datums, targets, surface and weld symbols keep clear of dimension texts, view captions, balloons, tables and each other: left to their default place they also stay off the views; a spot you click is only nudged off text. A frame put under a dimension moves out together with that dimension's text when it would land on a view.
 
 Datums, frames, targets, tags and tables are TechDraw symbols drawn by DrawingKit: drag them like views, and edit their texts (datum letters, tolerance values, table cells) in their *Editable Texts* property.
 

@@ -346,9 +346,47 @@ def empty_rects(frame, blockers, pad=5.0):
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
+def shape_of(o):
+    """3D shape of an object, including containers that have no Shape
+    property of their own (App::Part assemblies, links) - via Part.getShape,
+    which also applies their placements."""
+    import Part
+    s = getattr(o, "Shape", None)
+    if s is not None and not s.isNull():
+        # a part inside a moved App::Part: put it where the assembly shows it
+        try:
+            gp = o.getGlobalPlacement()
+            if not gp.isSame(o.Placement, 1e-9):
+                s = s.copy()
+                s.Placement = gp
+        except Exception:
+            pass
+        return s
+    try:
+        s = Part.getShape(o)
+    except Exception:
+        s = None
+    if s is not None and not s.isNull() and s.Solids:
+        return s
+    # Part.getShape leaves out children it takes as hidden (in the GUI, a
+    # file saved without it has every child hidden): build it ourselves
+    group = getattr(o, "Group", None)
+    if group:
+        parts = []
+        for c in group:
+            if any(p.isDerivedFrom("Part::Feature") for p in getattr(c, "InList", [])):
+                continue        # input of a boolean etc.
+            cs = shape_of(c)
+            if cs is not None and cs.Solids:
+                parts.append(cs)
+        if parts:
+            return parts[0] if len(parts) == 1 else Part.makeCompound(parts)
+    return s if s is not None and not s.isNull() else None
+
+
 def source_shape(objs):
     import Part
-    shapes = [o.Shape for o in objs if hasattr(o, "Shape") and not o.Shape.isNull()]
+    shapes = [s for s in (shape_of(o) for o in objs) if s is not None]
     if not shapes:
         raise ValueError("Nothing with a 3D shape selected")
     return shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)
@@ -503,11 +541,11 @@ def _arrangements(gw, gh, extras, s):
     yield max(gw, rw), gh + GAP + rh, "below"
 
 
-def plan_page(page, group, extras_views=(), layout=None):
+def plan_page(page, group, extras_views=(), layout=None, max_scale=None):
     """Pick the scale and positions for the group and the extra views.
 
     Returns (scale, {view_name: (x, y)}) where the group entry is the
-    position of its anchor (Front view).
+    position of its anchor (Front view). ``max_scale`` skips larger scales.
     """
     layout = layout or group_layout(group)
     extras = [(v, extra_view_size(v)) for v in extras_views]
@@ -517,6 +555,8 @@ def plan_page(page, group, extras_views=(), layout=None):
     best = None
     for ratio in STANDARD_SCALES:
         s = scale_value(ratio)
+        if max_scale is not None and s > max_scale + 1e-12:
+            continue
         gw, gh = group_box(layout, s)
         for region in regions:
             rw, rh = region[2] - region[0], region[3] - region[1]
@@ -578,12 +618,122 @@ def fit_page(page):
     group, extras = page_content(page)
     if group is None:
         raise ValueError("This page has no projection group to fit")
-    scale, positions = plan_page(page, group, extras)
-    apply_plan(page, group, extras, scale, positions)
+    regions = page_regions(page)
+    max_scale = None
+    for _ in range(len(STANDARD_SCALES)):
+        scale, positions = plan_page(page, group, extras, max_scale=max_scale)
+        apply_plan(page, group, extras, scale, positions)
+        realign_sections(page, extras)
+        # sections kept in line with their views need room in that row or
+        # column; if one ends up off the drawing area, try the next scale down
+        if all(_inside_regions(view_box(v), regions) for v in part_views(page)
+               if not v.isDerivedFrom("TechDraw::DrawViewDetail")):
+            break
+        smaller = [scale_value(r) for r in STANDARD_SCALES if scale_value(r) < scale - 1e-12]
+        if not smaller:
+            break
+        max_scale = max(smaller)
     redraw([group] + list(group.Views) + list(extras))
     from . import annot
     annot.refresh_page(page)   # datums and frames follow their features
     return scale
+
+
+def _inside_regions(box, regions, tol=0.01):
+    """True if the box lies within one of the free regions (allowing for
+    regions' padding: they are inset 5 mm from the frame)."""
+    pad = 5.0
+    return any(box[0] >= r[0] - pad - tol and box[1] >= r[1] - pad - tol and
+               box[2] <= r[2] + pad + tol and box[3] <= r[3] + pad + tol for r in regions)
+
+
+def section_side(sec):
+    """'Right', 'Left', 'Up' or 'Down': where a section sits from its base
+    view (from its viewing direction, so stepped sections work too)."""
+    base = getattr(sec, "BaseView", None)
+    if base is None:
+        return None
+    d, right, up = view_axes(base)
+    sd = App.Vector(sec.Direction)
+    sd.normalize()
+    for side in ("Right", "Left", "Up", "Down"):
+        if (sd - _section_vectors(base, side)[0]).Length < 1e-6:
+            return side
+    return None
+
+
+def realign_sections(page, extras):
+    """Put each section back in line with the view it was cut from (a fit
+    lays extra views out in a column, which would turn a section of the Top
+    view into what looks like a rotated side view), on the side its arrows
+    point to, and clear of the other views."""
+    views = [v for v in part_views(page)]
+    for sec in extras:
+        if not sec.isDerivedFrom("TechDraw::DrawViewSection"):
+            continue
+        side = section_side(sec)
+        if side is None:
+            continue
+        base = sec.BaseView
+        bx, by = view_center(base)
+        x0, y0, x1, y1 = view_box(base)
+        try:
+            w, h = extra_view_size(sec)
+        except Exception:
+            continue
+        s = view_scale(sec)
+        w, h = w * s, h * s
+        if side in ("Right", "Left"):
+            x = max(float(sec.X), x1 + GAP + w / 2) if side == "Right" else \
+                min(float(sec.X), x0 - GAP - w / 2)
+            sec.X, sec.Y = x, by
+        else:
+            y = max(float(sec.Y), y1 + GAP + h / 2) if side == "Up" else \
+                min(float(sec.Y), y0 - GAP - h / 2)
+            sec.X, sec.Y = bx, y
+        # step further out while it lands on another view
+        for _ in range(20):
+            box = (float(sec.X) - w / 2, float(sec.Y) - h / 2, float(sec.X) + w / 2, float(sec.Y) + h / 2)
+            hit = None
+            for v in views:
+                if same(v, sec):
+                    continue
+                try:
+                    vb = view_box(v)
+                except Exception:
+                    continue
+                if box[0] < vb[2] and vb[0] < box[2] and box[1] < vb[3] and vb[1] < box[3]:
+                    hit = vb
+                    break
+            if hit is None:
+                break
+            if side == "Right":
+                sec.X = hit[2] + GAP + w / 2
+            elif side == "Left":
+                sec.X = hit[0] - GAP - w / 2
+            elif side == "Up":
+                sec.Y = hit[3] + GAP + h / 2
+            else:
+                sec.Y = hit[1] - GAP - h / 2
+
+
+def set_hidden_lines(views, on=True):
+    """Show (dashed) or hide the hidden edges of part views, e.g. a
+    counterbore seen from the side. Sections and details are left alone."""
+    changed = []
+    for v in views:
+        if not v.isDerivedFrom("TechDraw::DrawViewPart") or \
+                v.isDerivedFrom("TechDraw::DrawViewSection") or \
+                v.isDerivedFrom("TechDraw::DrawViewDetail"):
+            continue
+        if "HardHidden" in v.PropertiesList and bool(v.HardHidden) != bool(on):
+            v.HardHidden = bool(on)
+            changed.append(v)
+    return changed
+
+
+def has_hidden_lines(views):
+    return any(getattr(v, "HardHidden", False) for v in views)
 
 
 def redraw(views):
@@ -895,9 +1045,13 @@ def add_standard_views(page, objs, isometric=False, front=None):
 # ---------------------------------------------------------------------------
 def view_box(view):
     """Approximate (x0, y0, x1, y1) of a placed view on the page."""
-    w, h = extra_view_size(view)
     s = float(view.getScale()) if hasattr(view, "getScale") else float(view.Scale)
     x, y = float(view.X), float(view.Y)
+    if view.isDerivedFrom("TechDraw::DrawViewDetail"):
+        # only the circle is drawn, not the whole part
+        r = float(getattr(view.Radius, "Value", view.Radius)) * s
+        return (x - r, y - r, x + r, y + r)
+    w, h = extra_view_size(view)
     if view.isDerivedFrom("TechDraw::DrawProjGroupItem"):
         group = view.InList[0] if view.InList else None
         for parent in view.InList:
@@ -1541,6 +1695,7 @@ def center_features(view, shape=None, with_radius=False):
     s = view_scale(view)
     over = OVERSHOOT / s
     marks, lines, radii = {}, {}, {}
+    cover = {}          # (line key, radius) -> angle covered round that axis
     for face in _round_faces(shape):
         axis = App.Vector(face.Surface.Axis)
         axis.normalize()
@@ -1577,6 +1732,16 @@ def center_features(view, shape=None, with_radius=False):
             if key in lines:
                 lo, hi = min(lo, lines[key][0]), max(hi, lines[key][1])
             lines[key] = (lo, hi)
+            try:
+                u0, u1 = face.ParameterRange[:2]
+            except Exception:
+                u0, u1 = 0.0, 2 * math.pi
+            ck = (key, round(radius, 4))
+            cover[ck] = cover.get(ck, 0.0) + (u1 - u0)
+    # an axis line only where something goes all the way round it (a hole,
+    # shaft or boss), not for part-round ends such as a keyway's seen side-on
+    full = {ck[0] for ck, ang in cover.items() if ang >= 2 * math.pi - 1e-3}
+    lines = {k: v for k, v in lines.items() if k in full}
     if with_radius:
         mark_list = [(k[0], k[1], half, radii[k]) for k, half in marks.items()]
     else:

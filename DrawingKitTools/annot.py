@@ -78,6 +78,7 @@ def text_scale(p):
         return 1.0
 
 _busy = set()
+_bodies = {}      # (doc, name) -> page box of the symbol's main part, from the last render
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +123,34 @@ def dimension_ends(dim):
     cx, cy = core.view_center(view)
     lab = App.Vector(float(dim.X) / s, float(dim.Y) / s, 0)   # label, unscaled local
     pts, radius = [], None
+    items = []          # per reference: ('pt', p) or ('line', a, b)
     for n in names:
         p, r = _edge_points(view, n)
         pts.extend(p)
         radius = radius or r
+        if n.startswith("Edge") and r is None and len(p) >= 2:
+            items.append(("line", p[0], p[-1]))
+        else:
+            items.append(("pt", p[0]))
     t = dim.Type
+    if t == "Distance" and len(items) == 2 and any(i[0] == "line" for i in items):
+        # line to line / point to line: measured square to the line
+        def foot(q, a, b):
+            u = b - a
+            u.normalize()
+            return a + u * (q - a).dot(u)
+        if items[0][0] == "line" and items[1][0] == "line":
+            a = foot(lab, items[0][1], items[0][2])
+            b = foot(a, items[1][1], items[1][2])
+        else:
+            pt = items[0][1] if items[0][0] == "pt" else items[1][1]
+            ln = items[1] if items[1][0] == "line" else items[0]
+            a, b = pt, foot(pt, ln[1], ln[2])
+        u = b - a
+        if u.Length < 1e-9:
+            raise ValueError("Cannot place a datum on this dimension")
+        u.normalize()
+        return (cx + a.x * s, cy + a.y * s), (cx + b.x * s, cy + b.y * s), (u.x, u.y)
     if t in ("Diameter", "Radius") and radius:
         c = pts[0]
         u = lab - c
@@ -190,6 +214,7 @@ class Sketch:
         self.xs, self.ys = [], []
         self.k = k                       # text size / 3.5 mm
         self.font = font or "osifont"
+        self.body = None                 # the part that must not clash (no leader)
 
     def _p(self, x, y):
         self.xs.append(x)
@@ -308,6 +333,7 @@ def draw_datum(sk, anchor, sdir, box_centre, letter):
     sk.poly([base0, base1, apex], fill=True)
     bx, by = box_centre
     sk.rect(bx - Hk / 2, by - Hk / 2, bx + Hk / 2, by + Hk / 2)
+    sk.body = (bx - Hk / 2, by - Hk / 2, bx + Hk / 2, by + Hk / 2)
     sk.text(bx, by, letter, editable="datum")
     end = _box_edge_towards(bx, by, Hk, Hk, apex[0], apex[1])
     knee = (apex[0] + sx * 2.0 * k, apex[1] + sy * 2.0 * k)
@@ -526,6 +552,7 @@ def draw_frame(sk, anchor, box_centre, p, values, align=None):
                 circled(sk, (mx, cy), 1.5 * k, gdt.MODIFIERS[m])
             x += w
     count = values.get("count", p.get("count", ""))
+    sk.body = (x0, ytop - n * H, x0 + W, ytop + (5.0 * k if (count or p.get("cf")) else 0.0))
     if count:
         sk.text(x0, ytop + 2.5 * k, count, anchor="start", editable="count")
     if p.get("cf"):
@@ -620,6 +647,7 @@ def draw_target(sk, anchor, box_centre, label, size_text):
     sk.line((ax - c, ay + c), (ax + c, ay - c), 0.5)
     r = 5.0 * s
     bx, by = box_centre
+    sk.body = (bx - r, by - r, bx + r, by + r)
     sk.circle((bx, by), r)
     sk.line((bx - r, by), (bx + r, by))
     if size_text:
@@ -640,11 +668,13 @@ def draw_note(sk, anchor, box_centre, lines):
     (horizontal shoulder, then to the arrow tip) when anchor is given."""
     size = gdt.FONT * sk.k
     pitch = size * 1.6
-    w = max(len(ln) for ln in lines) * size * 0.6 if lines else size
+    # osifont capitals average about half the text height wide
+    w = max(len(ln) for ln in lines) * size * 0.52 if lines else size
     h = pitch * (len(lines) - 1)
     bx, by = box_centre
     x0 = bx - w / 2.0
     ytop = by + h / 2.0
+    sk.body = (x0, ytop - h - size * 0.4, x0 + w, ytop + size * 0.8)
     for i, ln in enumerate(lines):
         sk.text(x0, ytop - i * pitch, ln, anchor="start", editable="line%d" % (i + 1))
     if anchor is not None:
@@ -715,6 +745,7 @@ def render(sym):
                         values.get("size", p.get("size", "")))
             fields = ["target"] + (["size"] if values.get("size", p.get("size")) else [])
         svg, centre = sk.svg()
+        _bodies[key] = sk.body
         # the SVG lists editable texts in drawing order; remember that order
         order = []
         import re
@@ -734,7 +765,7 @@ def render(sym):
     return sym
 
 
-def _new(page, kind, label, params, anchor_kind, link, anchor, offset):
+def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=None):
     doc = page.Document
     sym = doc.addObject("TechDraw::DrawViewSymbol", {
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
@@ -764,7 +795,64 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset):
     params.setdefault("tsize", default_size())
     params.setdefault("font", default_font())
     setattr(sym, PARAMS, json.dumps(params))
-    return render(sym)
+    render(sym)
+    if avoid:
+        keep_clear(sym, page, explicit=(avoid == "explicit"),
+                   views=(avoid != "on-surface"))
+    return sym
+
+
+def make_room_under(sym, dim, page, step=3.0, reach=45.0):
+    """A frame hangs under its dimension's text, so it can't move on its
+    own: if it lands on a view or other text, move the dimension's text
+    further out from its view (the frame follows) until both are clear."""
+    from . import clearance
+    box = body_box(sym)
+    label = clearance.dimension_label_box(dim)
+    if not box or not label:
+        return None
+    # the text and its frame move together: one box round both
+    both = (min(box[0], label[0]), min(box[1], label[1]),
+            max(box[2], label[2]), max(box[3], label[3]))
+    obs = clearance.obstacles(page, exclude=[sym, dim], views=True)
+    view = dim.References2D[0][0]
+    shift = clearance.clear_spot(both, core.view_center(view), obs,
+                                 clearance.drawing_area(page), reach=reach, step=step)
+    if not shift or (abs(shift[0]) < 1e-9 and abs(shift[1]) < 1e-9):
+        return None
+    dim.X, dim.Y = float(dim.X) + shift[0], float(dim.Y) + shift[1]
+    render(sym)
+    return shift
+
+
+def body_box(sym):
+    """Page box of the symbol's main part (frame, letter box, text...)."""
+    b = _bodies.get((sym.Document.Name, sym.Name))
+    if b:
+        return b
+    from . import clearance
+    return clearance.symbol_box(sym)
+
+
+def keep_clear(sym, page, explicit=False, views=True):
+    """Move a new symbol (its offset from the anchor) off dimension texts,
+    captions, balloons, other symbols, tables and, unless ``views`` is
+    False, the views themselves. A spot the user clicked only gets a small
+    nudge off text. Returns the shift (dx, dy) or None if it stayed put."""
+    from . import clearance
+    box = body_box(sym)
+    if not box:
+        return None
+    obs = clearance.obstacles(page, exclude=[sym], views=views and not explicit)
+    (ax, ay), _ = anchor_page(sym)
+    area = clearance.drawing_area(page)
+    shift = clearance.clear_spot(box, (ax, ay), obs, area, reach=12.0 if explicit else 40.0)
+    if not shift or (abs(shift[0]) < 1e-9 and abs(shift[1]) < 1e-9):
+        return None
+    off = getattr(sym, OFFSET)
+    setattr(sym, OFFSET, App.Vector(off.x + shift[0], off.y + shift[1], 0))
+    render(sym)
+    return shift
 
 
 def attach_point(page, x, y, margin=3.0):
@@ -839,7 +927,7 @@ def add_datum(page, x, y, letter=None, box=None, dimension=None, dim_end=1):
         default = (sdir[0] * 12.0, sdir[1] * 12.0)
         off = default if box is None else (box[0] - ax, box[1] - ay)
         return _new(page, "datum", "Datum %s" % letter, params, "dim", dimension,
-                    (dim_end, 0), off)
+                    (dim_end, 0), off, avoid="default" if box is None else "explicit")
     kind, view, local, vbox = attach_point(page, x, y)
     params = {"letter": letter}
     sdir = None
@@ -863,7 +951,8 @@ def add_datum(page, x, y, letter=None, box=None, dimension=None, dim_end=1):
     reach = gdt.DATUM_TRI + gdt.DATUM_STEM + H / 2
     off = (sdir[0] * reach, sdir[1] * reach) if box is None else (box[0] - x, box[1] - y)
     return _new(page, "datum", "Datum %s" % letter, params,
-                kind, view, local if kind == "view" else (x, y), off)
+                kind, view, local if kind == "view" else (x, y), off,
+                avoid="default" if box is None else "explicit")
 
 
 def add_frame(page, box, params, anchor=None, dimension=None):
@@ -886,16 +975,23 @@ def add_frame(page, box, params, anchor=None, dimension=None):
         k = float(p.get("tsize", default_size())) / 3.5
         rows = len(frame_segments(p))
         off = (0.0, -(4.0 + rows * H / 2.0) * k) if box is None else (box[0] - lx, box[1] - ly)
-        return _new(page, "frame", label, p, "dimlabel", dimension, (0, 0), off)
+        sym = _new(page, "frame", label, p, "dimlabel", dimension, (0, 0), off)
+        if box is None:
+            make_room_under(sym, dimension, page)
+        return sym
     if anchor is None:
-        return _new(page, "frame", label, p, "free", None, box, (0, 0))
+        return _new(page, "frame", label, p, "free", None, box, (0, 0), avoid="explicit")
+    avoid = "explicit"
+    if box is None:
+        box, avoid = (anchor[0] + 25.0, anchor[1] + 15.0), "default"
     kind, view, local, _ = attach_point(page, anchor[0], anchor[1])
     if kind == "view":
         hit = nearest_edge(view, local, max_dist=4.0 / core.view_scale(view))
         if hit is not None:
             local = hit[0]   # arrow tip exactly on the edge
     return _new(page, "frame", label, p, kind, view,
-                local if kind == "view" else anchor, (box[0] - anchor[0], box[1] - anchor[1]))
+                local if kind == "view" else anchor, (box[0] - anchor[0], box[1] - anchor[1]),
+                avoid=avoid)
 
 
 def add_target(page, x, y, label, size="", box=None):
@@ -904,7 +1000,8 @@ def add_target(page, x, y, label, size="", box=None):
     sdir = {"up": (0, 1), "down": (0, -1), "left": (-1, 0), "right": (1, 0)}[side]
     off = (sdir[0] * 14 + 6, sdir[1] * 14 + 6) if box is None else (box[0] - x, box[1] - y)
     return _new(page, "target", "Datum target %s" % label, {"label": label, "size": size, "side": side},
-                kind, view, local if kind == "view" else (x, y), off)
+                kind, view, local if kind == "view" else (x, y), off,
+                avoid="default" if box is None else "explicit")
 
 
 def is_annotation(obj):
@@ -991,14 +1088,15 @@ def add_note(page, box, lines, anchor=None, size=None, font=None):
         p["font"] = font
     label = "Note " + (lines[0][:20] if lines and lines[0] else "")
     if anchor is None:
-        return _new(page, "note", label.strip(), p, "free", None, box, (0, 0))
+        return _new(page, "note", label.strip(), p, "free", None, box, (0, 0), avoid="explicit")
     kind, view, local, _ = attach_point(page, anchor[0], anchor[1])
     if kind == "view":
         hit = nearest_edge(view, local, max_dist=4.0 / core.view_scale(view))
         if hit is not None:
             local = hit[0]
     return _new(page, "note", label.strip(), p, kind, view,
-                local if kind == "view" else anchor, (box[0] - anchor[0], box[1] - anchor[1]))
+                local if kind == "view" else anchor, (box[0] - anchor[0], box[1] - anchor[1]),
+                avoid="explicit")
 
 
 def is_note(obj):
