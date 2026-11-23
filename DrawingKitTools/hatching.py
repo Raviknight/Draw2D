@@ -401,6 +401,9 @@ def plan(sec, overrides=None):
             out[part.Name] = {"skip": True, "segments": [], "dashed": [], "label": part.Label,
                               "uncut_at": (list(_to_local_cache[0](core.shape_of(part).BoundBox.Center))
                                            if _to_local_cache[0] else None)}
+            if is_aligned(sec) and part.Name in _aligned_uncut:
+                at, vdir, xdir = _aligned_uncut[part.Name]
+                out[part.Name].update({"uncut_at": at, "uncut_dir": vdir, "uncut_x": xdir})
             continue
         try:
             sig = drafting._signature(part)
@@ -545,6 +548,23 @@ def _register(corners, drawn, tol=0.02, avoid=()):
     return swap, su, sv, tx, ty
 
 
+_aligned_uncut = {}     # part name -> (local centre, view direction, x direction)
+
+
+def _uncut_frame(part, fit, a, u, d):
+    """Where and how to draw a part whole on an aligned section: the run's
+    piece is turned by ``fit`` (u along the run, v along d), so an ordinary
+    view looking square at the run's plane, turned the same way, lands on
+    TechDraw's drawing. (local centre, Direction, XDirection)."""
+    swap, su, sv, tx, ty = fit
+    ux, vy = u * su, d * sv                 # model directions of +local u / v
+    xm, ym = (vy, ux) if swap else (ux, vy)  # model directions of local x, y
+    view_dir = xm.cross(ym)
+    c = core.shape_of(part).BoundBox.Center
+    local = _orient(fit, (c - a).dot(u), (c - a).dot(d))
+    return [local[0], local[1]], [view_dir.x, view_dir.y, view_dir.z], [xm.x, xm.y, xm.z]
+
+
 def aligned_part_regions(sec):
     """[(part, [Region...])] for an aligned section: each run of the cutting
     line gives a piece of every part it cuts; TechDraw swings the pieces
@@ -580,9 +600,10 @@ def aligned_part_regions(sec):
                 c = to_uv(vx.Point)
                 if all(abs(c[0] - q[0]) > 1e-6 or abs(c[1] - q[1]) > 1e-6 for q in corners):
                     corners.append(c)
-        runs.append((pieces, to_uv, corners))
+        runs.append((pieces, to_uv, corners, a, u))
     placed = []
-    for pieces, to_uv, corners in sorted(runs, key=lambda r: -len(r[2])):
+    _aligned_uncut.clear()
+    for pieces, to_uv, corners, a, u in sorted(runs, key=lambda r: -len(r[2])):
         fit = _register(corners, drawn, avoid=placed)
         if fit is None:
             continue
@@ -594,7 +615,9 @@ def aligned_part_regions(sec):
             r = _face_2d(f, place)
             if r is not None:
                 found.setdefault(part.Name, (part, []))[1].append(r)
-    _to_local_cache[0] = None      # no single mapping: uncut overlays not placed
+            if part.Name not in _aligned_uncut:
+                _aligned_uncut[part.Name] = _uncut_frame(part, fit, a, u, d)
+    _to_local_cache[0] = None      # no single mapping: each run has its own
     return list(found.values())
 
 
@@ -647,8 +670,12 @@ def sync_uncut(page, sec, parts):
             setattr(v, UNCUT, sec)
             v.Source = [part]
             v.Label = "Uncut %s (%s)" % (part.Label, sec.Label)
-        v.Direction = sec.Direction
-        v.XDirection = sec.XDirection
+        if it.get("uncut_dir"):          # aligned section: square to its run
+            v.Direction = App.Vector(*it["uncut_dir"])
+            v.XDirection = App.Vector(*it["uncut_x"])
+        else:
+            v.Direction = sec.Direction
+            v.XDirection = sec.XDirection
         v.ScaleType = "Custom"
         v.Scale = core.view_scale(sec)
         place_uncut(sec, v, it["uncut_at"])

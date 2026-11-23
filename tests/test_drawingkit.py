@@ -2317,3 +2317,25 @@ class TestDrawingStandard(DocTest):
         self.assertGreaterEqual(n, 2)
         self.assertEqual(sec.Caption, "A-A")
         self.assertIn("stroke-dasharray", w.Symbol)
+
+
+class TestAlignedUncutFrame(DocTest):
+    def test_uncut_view_maps_like_the_piece(self):
+        import Part
+        from DrawingKitTools import hatching as h
+        bolt = self.doc.addObject("Part::Feature", "Bolt")
+        bolt.Shape = Part.makeCylinder(2, 14, App.Vector(15, 26, -2))
+        self.doc.recompute()
+        a = App.Vector(28.57, 49.49, 11.5)
+        u = (App.Vector(0, 0, 11.5) - a).normalize()
+        d = App.Vector(0, 0, 1)
+        for fit in [(True, -1, 1, -11.5, 57.1), (False, 1, -1, 3.0, -4.0), (True, 1, 1, 0.0, 0.0)]:
+            at, vdir, xdir = h._uncut_frame(bolt, fit, a, u, d)
+            V, X = App.Vector(*vdir), App.Vector(*xdir)
+            Y = V.cross(X)                          # TechDraw: local y = Direction x XDirection
+            c = bolt.Shape.BoundBox.Center
+            for p in (App.Vector(15, 26, -2), App.Vector(17, 26, 12), c):
+                via_view = (at[0] + (p - c).dot(X), at[1] + (p - c).dot(Y))
+                via_piece = h._orient(fit, (p - a).dot(u), (p - a).dot(d))
+                self.assertAlmostEqual(via_view[0], via_piece[0], places=6)
+                self.assertAlmostEqual(via_view[1], via_piece[1], places=6)
