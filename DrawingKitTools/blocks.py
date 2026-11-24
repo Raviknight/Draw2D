@@ -684,24 +684,38 @@ def preset_notes():
              align="centre"),
     ]
     d["cells"] = C
-    # drawn on a 280 mm grid, kept at a usual title block width: 200 mm
-    resize(d, 200.0, 50.0)
+    # drawn on a 280 mm grid, kept at the ISO 7200 width: 180 mm, so the
+    # same block fits every sheet down to A4 portrait
+    resize(d, WIDE, 50.0)
     for c in d["cells"]:
-        c["size"] = round(max(1.8, c["size"] * 0.8), 2)
+        c["size"] = round(max(1.8, c["size"] * 0.72), 2)
     d["name"] = "Notes + inch tolerances"
     return d
 
 
-WIDE = 200.0          # wider than this crowds an A3 / ANSI B sheet
+WIDE = 180.0          # ISO 7200: one title block that fits every sheet, A4 portrait too
+SHRINK = 0.85         # a wider block is drawn up to this much smaller to fit a sheet
+
+
+def scaled(d, k):
+    """A copy of the design k times the size, text too (not under 1.5 mm)."""
+    out = copy_of(d)
+    resize(out, d["width"] * k, d["height"] * k)
+    for c in out["cells"]:
+        c["size"] = round(max(1.5, c["size"] * k), 2)
+    return out
 
 
 def warnings(d):
     """Things worth a second look that don't stop the design working."""
     out = []
     if d["width"] > WIDE + 1e-6:
-        out.append("%.0f mm wide: most title blocks are 180-200 mm, whatever the sheet. "
-                   "On A3 or ANSI B this one takes %.0f%% of the drawing's width."
-                   % (d["width"], 100.0 * d["width"] / 390.0))
+        out.append("%.0f mm wide: title blocks are usually at most %.0f mm (ISO 7200), so one "
+                   "block fits every sheet. On A4 landscape this one takes %.0f%% of the "
+                   "drawing's width; on A4 portrait it %s."
+                   % (d["width"], WIDE, 100.0 * d["width"] / 267.0,
+                      "is drawn smaller to fit" if d["width"] * SHRINK <= 180.0 + 1e-6
+                      else "doesn't fit (the ISO block is used)"))
     return out
 
 

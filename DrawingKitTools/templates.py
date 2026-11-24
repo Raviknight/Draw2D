@@ -115,8 +115,18 @@ def fits(style, size, orientation):
         return W - 30.0 >= ANSI_MIN_FRAME_W
     d = custom_design(style)
     if d is not None:
-        return d["width"] <= W - 30.0 + 1e-6 and d["height"] <= H - 20.0 - 20.0
+        return design_scale(d, W, H) is not None
     return not str(style).startswith("custom:")
+
+
+def design_scale(d, W, H):
+    """How much a design is drawn on a W x H sheet: 1.0 when it fits the
+    frame, down to blocks.SHRINK when it's a little too big, None when it
+    doesn't fit even then."""
+    from . import blocks
+    room_w, room_h = W - 30.0, H - 40.0
+    k = min(1.0, room_w / d["width"], room_h / d["height"])
+    return k if k >= blocks.SHRINK - 1e-9 else None
 
 
 def page_size(size, orientation):
@@ -339,6 +349,11 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
     design = custom_design(style)
     if style != "iso" and not fits(style, size, orientation):
         style, design = "iso", None         # no room (or no such design): the ISO block
+    if design is not None:
+        k = design_scale(design, W, H) or 1.0
+        if k < 1.0 - 1e-9:
+            from . import blocks
+            design = blocks.scaled(design, k)      # a little too wide: drawn smaller
     rows = 5 if tol_row else 4
     tb_h = rows * ROW_H
     all_cells = cells(tol_row, tol_mode)

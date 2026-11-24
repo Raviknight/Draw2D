@@ -503,9 +503,16 @@ def set_horizontal_text(dim):
     from . import standards
     if standards.explicit():
         vo.StandardAndStyle = standards.dimension_style(referencing=True)
-        return True
-    current = str(vo.StandardAndStyle)
-    vo.StandardAndStyle = "ASME Referencing" if current.startswith("ASME") else "ISO Referencing"
+    else:
+        current = str(vo.StandardAndStyle)
+        vo.StandardAndStyle = "ASME Referencing" if current.startswith("ASME") else "ISO Referencing"
+    if dim.Type in ("Diameter", "Radius") and "RenderingExtent" in vo.PropertiesList:
+        # one arrow on the circle, its leader pointing at the centre; no line
+        # across the circle nor a second arrow on the far side
+        try:
+            vo.RenderingExtent = "Minimal"
+        except Exception:
+            pass
     return True
 
 

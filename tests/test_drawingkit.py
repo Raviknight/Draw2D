@@ -3,6 +3,7 @@
 
 import math
 import os
+import re
 import unittest
 
 import FreeCAD as App
@@ -2481,13 +2482,23 @@ class TestTitleBlockDesigns(DocTest):
         b.save(d)
         key = b.slug(d["name"])
         self.assertTrue(t.fits("custom:" + key, "ANSI B", "Landscape"))
-        self.assertAlmostEqual(d["width"], 200.0)                       # a usual width
+        self.assertAlmostEqual(d["width"], 180.0)                       # ISO 7200 width
         self.assertEqual(b.warnings(d), [])
         self.assertTrue(t.fits("custom:" + key, "A4", "Landscape"))
-        self.assertFalse(t.fits("custom:" + key, "A4", "Portrait"))     # 180 mm frame
+        self.assertTrue(t.fits("custom:" + key, "A4", "Portrait"))      # 180 mm frame
         wide = b.copy_of(d)
-        b.resize(wide, 280, 50)
+        b.resize(wide, 200, 50)
+        wide["name"] = "Wide"
         self.assertTrue(b.warnings(wide))
+        b.save(wide)
+        # a little too wide for A4 portrait: drawn at 90 %, not swapped for ISO
+        self.assertAlmostEqual(t.design_scale(wide, 210.0, 297.0), 0.9)
+        svg = t.make_svg("A4", "Portrait", True, style="custom:Wide")
+        m = re.search(r'id="title_block_frame" x="[\d.]+" y="[\d.]+" width="([\d.]+)"', svg)
+        self.assertAlmostEqual(float(m.group(1)), 180.0, places=2)
+        b.resize(wide, 280, 50)
+        wide["name"] = "Huge"
+        self.assertIsNone(t.design_scale(wide, 210.0, 297.0))
         page = core.create_page(self.doc, "ANSI B", "Landscape", style="custom:" + key)
         self.assertEqual(tb.page_style(page), "custom:" + key)
         texts = dict(page.Template.EditableTexts)
