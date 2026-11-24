@@ -610,20 +610,22 @@ def _arrangements(gw, gh, extras, s):
     yield max(gw, rw), gh + GAP + rh, "below"
 
 
-def plan_page(page, group, extras_views=(), layout=None, max_scale=None):
+def plan_page(page, group, extras_views=(), layout=None, max_scale=None, scales=None):
     """Pick the scale and positions for the group and the extra views.
 
     Returns (scale, {view_name: (x, y)}) where the group entry is the
     position of its anchor (Front view). ``max_scale`` skips larger scales.
+    ``scales`` (largest first) replaces the standard ones; if none of them
+    fits, the last is used.
     """
     layout = layout or group_layout(group)
     extras = [(v, extra_view_size(v)) for v in extras_views]
     sizes = [sz for _, sz in extras]
     regions = page_regions(page)
+    tried = list(scales) if scales else [scale_value(r) for r in STANDARD_SCALES]
 
     best = None
-    for ratio in STANDARD_SCALES:
-        s = scale_value(ratio)
+    for s in tried:
         if max_scale is not None and s > max_scale + 1e-12:
             continue
         gw, gh = group_box(layout, s)
@@ -638,7 +640,7 @@ def plan_page(page, group, extras_views=(), layout=None, max_scale=None):
         if best:
             break
     if not best:
-        s = scale_value(STANDARD_SCALES[-1])
+        s = tried[-1]
         gw, gh = group_box(layout, s)
         tw, th, mode = next(iter(_arrangements(gw, gh, sizes, s)))
         best = (s, max(regions, key=lambda r: (r[2] - r[0]) * (r[3] - r[1])), tw, th, mode)
@@ -684,29 +686,51 @@ def page_content(page):
     return group, extras
 
 
-def fit_page(page, max_scale=None):
+def fits_at(page, group, extras_views, s, layout=None):
+    """True if the group and extra views fit a drawing region at scale s."""
+    layout = layout or group_layout(group)
+    sizes = [extra_view_size(v) for v in extras_views]
+    gw, gh = group_box(layout, s)
+    for region in page_regions(page):
+        rw, rh = region[2] - region[0], region[3] - region[1]
+        for tw, th, _ in _arrangements(gw, gh, sizes, s):
+            if tw <= rw + 1e-9 and th <= rh + 1e-9:
+                return True
+    return False
+
+
+def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True):
     """Re-pick the page scale so the main group and extra views fit
-    (no larger than ``max_scale``). Returns scale."""
+    (no larger than ``max_scale``), or lay them out at the ``exact`` scale
+    given. ``title_text`` goes in the title block's scale field instead of
+    the ratio (e.g. 'NTS'). ``draw=False`` only lays out (a trial: TechDraw
+    is not asked to draw, so no drawing at a passing scale can land after
+    the final one). Returns scale."""
     group, extras = page_content(page)
     if group is None:
         raise ValueError("This page has no projection group to fit")
     regions = page_regions(page)
     for _ in range(len(STANDARD_SCALES)):
-        scale, positions = plan_page(page, group, extras, max_scale=max_scale)
+        scale, positions = plan_page(page, group, extras, max_scale=max_scale,
+                                     scales=[exact] if exact else None)
         apply_plan(page, group, extras, scale, positions)
+        if title_text:
+            set_title_block_scale(page, scale, title_text)
         for v in part_views(page):
             follow_parent(v)     # projected/aux views back on their line
         realign_sections(page, extras)   # sections first: they must stay in line
         clear_all_linked(page)   # then slide projected/aux views off the others
         # sections kept in line with their views need room in that row or
         # column; if one ends up off the drawing area, try the next scale down
-        if all(_inside_regions(view_box(v), regions) for v in part_views(page)
-               if not v.isDerivedFrom("TechDraw::DrawViewDetail")):
+        if exact or all(_inside_regions(view_box(v), regions) for v in part_views(page)
+                        if not v.isDerivedFrom("TechDraw::DrawViewDetail")):
             break
         smaller = [scale_value(r) for r in STANDARD_SCALES if scale_value(r) < scale - 1e-12]
         if not smaller:
             break
         max_scale = max(smaller)
+    if not draw:
+        return scale
     redraw([group] + list(group.Views) + list(extras))
     from . import annot
     annot.refresh_page(page)   # datums and frames follow their features
@@ -723,6 +747,269 @@ def fit_page(page, max_scale=None):
     except Exception as e:
         App.Console.PrintWarning("DrawingKit hatching: %s\n" % e)
     return scale
+
+
+# ---------------------------------------------------------------------------
+# Scale up / down one standard step
+# ---------------------------------------------------------------------------
+def next_standard_scale(value, step):
+    """The standard scale one step larger (step > 0) or smaller (step < 0)
+    than ``value``, or None past the end of the list."""
+    values = sorted(scale_value(r) for r in STANDARD_SCALES)
+    if step > 0:
+        bigger = [v for v in values if v > value * (1 + 1e-6)]
+        return bigger[0] if bigger else None
+    smaller = [v for v in values if v < value * (1 - 1e-6)]
+    return smaller[-1] if smaller else None
+
+
+def nearest_standard_scale(value):
+    import math
+    return min((scale_value(r) for r in STANDARD_SCALES),
+               key=lambda v: abs(math.log(v / value)))
+
+
+def set_detail_scale(det, scale):
+    """Set a detail view's scale; its caption follows if it still shows the
+    old scale as DrawingKit wrote it."""
+    from . import standards
+    old = view_scale(det)
+    try:
+        if det.Caption == standards.detail_caption(det.Reference, scale_text(old)):
+            det.Caption = standards.detail_caption(det.Reference, scale_text(scale))
+    except Exception:
+        pass
+    det.ScaleType = "Custom"
+    det.Scale = scale
+    det.touch()
+
+
+def step_page_scale(page, step):
+    """Put the page one standard scale up (step > 0) or down (step < 0) and
+    lay it out as Fit to page does. Detail views keep their zoom over their
+    base view. Returns the new scale; ValueError if there is no such scale
+    or the views would not fit the sheet at it."""
+    group, extras = page_content(page)
+    if group is None:
+        raise ValueError("This page has no projection group to scale")
+    old = view_scale(group)
+    target = next_standard_scale(old, step)
+    if target is None:
+        raise ValueError("The page is already at %s, the %s standard scale"
+                         % (scale_text(old), "largest" if step > 0 else "smallest"))
+    if step > 0:
+        s, _ = plan_page(page, group, extras, max_scale=target)
+        if s < target - 1e-12:
+            raise ValueError("The views do not fit the sheet at %s. Use a bigger "
+                             "sheet, or Fit to page for the largest scale that fits."
+                             % scale_text(target))
+    details = []
+    for d in page.Views:
+        if d.isDerivedFrom("TechDraw::DrawViewDetail") and getattr(d, "BaseView", None):
+            details.append((d, view_scale(d) / view_scale(d.BaseView)))
+    scale = fit_page(page, max_scale=target)
+    if step > 0 and scale <= old + 1e-12:
+        raise ValueError("The sections do not fit the sheet at %s" % scale_text(target))
+    for d, ratio in details:
+        set_detail_scale(d, nearest_standard_scale(ratio * view_scale(d.BaseView)))
+    if details:
+        place_details(page)
+        from . import annot
+        annot.refresh_page(page)
+    return scale
+
+
+def step_view_scale(view, step):
+    """One standard scale up or down for a view that has its own scale (a
+    detail view). Returns the new scale; ValueError if it can't."""
+    if not view.isDerivedFrom("TechDraw::DrawViewDetail"):
+        raise ValueError("%s follows the page scale: with no detail view "
+                         "selected, Scale up / down changes the whole page" % view.Label)
+    old = view_scale(view)
+    target = next_standard_scale(old, step)
+    if target is None:
+        raise ValueError("%s is already at %s, the %s standard scale"
+                         % (view.Label, scale_text(old), "largest" if step > 0 else "smallest"))
+    base = getattr(view, "BaseView", None)
+    if base is not None and target <= view_scale(base) + 1e-12:
+        raise ValueError("%s is at %s; a detail must be drawn larger than its "
+                         "view (%s)" % (view.Label, scale_text(old), scale_text(view_scale(base))))
+    set_detail_scale(view, target)
+    _refresh_after_detail(view)
+    return target
+
+
+def _refresh_after_detail(view):
+    page = None
+    try:
+        page = view.findParentPage()
+    except Exception:
+        pass
+    if page is not None:
+        place_details(page)
+        from . import annot
+        annot.refresh_page(page)
+
+
+DETAIL_CAPTION = 9.0   # paper mm under a detail circle for its caption
+
+
+def _detail_footprint(det, x, y):
+    r = float(getattr(det.Radius, "Value", det.Radius)) * view_scale(det)
+    return (x - r, y - r - DETAIL_CAPTION, x + r, y + r)
+
+
+def _overlaps(a, b, gap):
+    return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
+
+
+def place_details(page, gap=3.0, step=2.0):
+    """Move each detail view that runs off the drawing area or onto another
+    view to the nearest free spot. Returns False if one has nowhere to go
+    (it is left where it is)."""
+    dets = [v for v in page.Views if v.isDerivedFrom("TechDraw::DrawViewDetail")]
+    if not dets:
+        return True
+    frame, title = drawing_area(getattr(page.Template, "Template", "") or "", *page_size(page))
+    fixed = [view_box(v) for v in part_views(page)
+             if not v.isDerivedFrom("TechDraw::DrawViewDetail")]
+    fixed += table_boxes(page, pad=0.0) + ([title] if title else [])
+    placed, ok = [], True
+
+    def free(box):
+        return (box[0] >= frame[0] + gap - 1e-6 and box[1] >= frame[1] + gap - 1e-6 and
+                box[2] <= frame[2] - gap + 1e-6 and box[3] <= frame[3] - gap + 1e-6 and
+                not any(_overlaps(box, b, gap) for b in fixed + placed))
+
+    for det in dets:
+        x, y = float(det.X), float(det.Y)
+        box = _detail_footprint(det, x, y)
+        if free(box):
+            placed.append(box)
+            continue
+        best = None
+        nx = int((frame[2] - frame[0]) / step) + 1
+        ny = int((frame[3] - frame[1]) / step) + 1
+        for i in range(nx):
+            cx = frame[0] + i * step
+            for j in range(ny):
+                cy = frame[1] + j * step
+                d = (cx - x) ** 2 + (cy - y) ** 2
+                if best is not None and d >= best[0]:
+                    continue
+                if free(_detail_footprint(det, cx, cy)):
+                    best = (d, cx, cy)
+        if best is None:
+            ok = False
+            placed.append(box)
+            continue
+        det.X, det.Y = best[1], best[2]
+        placed.append(_detail_footprint(det, best[1], best[2]))
+    return ok
+
+
+def parse_scale(text):
+    """'1:3', '1/3', '3:4', '2.5:1', '0.75', '75%' -> (value, label).
+    The label is how the title block shows it ('1 : 3'). ValueError if
+    it isn't a scale."""
+    t = (text or "").strip().replace(" ", "").replace(",", ".")
+    if not t:
+        raise ValueError("Type a scale such as 1:3, 3:4, 0.8 or 150%")
+    label = None
+    try:
+        if t.endswith("%"):
+            value = float(t[:-1]) / 100.0
+        else:
+            sep = ":" if ":" in t else ("/" if "/" in t else None)
+            if sep:
+                a, b = t.split(sep, 1)
+                value = float(a) / float(b)
+                label = "%g : %g" % (float(a), float(b))
+            else:
+                value = float(t)
+    except (ValueError, ZeroDivisionError):
+        raise ValueError("'%s' is not a scale: type one such as 1:3, 3:4, 0.8 or 150%%" % text)
+    if not (1e-4 <= value <= 1e3):
+        raise ValueError("'%s' is out of range" % text)
+    return value, label or scale_text(value).replace(":", " : ")
+
+
+def set_page_scale(page, value, label=None, draw=True):
+    """Lay the page out at exactly ``value`` (any scale, not only standard
+    ones); the title block shows ``label``. Detail views keep their zoom
+    over their base view. ValueError if the views would not fit. Returns
+    the scale, or with ``draw=False`` (a trial, not drawn) whether the
+    detail views found room."""
+    group, extras = page_content(page)
+    if group is None:
+        raise ValueError("This page has no projection group to scale")
+    if not fits_at(page, group, extras, value):
+        raise ValueError("The views do not fit the sheet at %s. Use a smaller "
+                         "scale or a bigger sheet." % (label or scale_text(value)))
+    details = [(d, view_scale(d) / view_scale(d.BaseView)) for d in page.Views
+               if d.isDerivedFrom("TechDraw::DrawViewDetail") and getattr(d, "BaseView", None)]
+    scale = fit_page(page, exact=value, title_text=label, draw=draw)
+    for d, ratio in details:
+        set_detail_scale(d, ratio * scale)
+    roomy = place_details(page) if details else True
+    if not draw:
+        return roomy
+    if details:
+        from . import annot
+        annot.refresh_page(page)
+    return scale
+
+
+def fill_scale(page, digits=2):
+    """Largest scale (rounded down to ``digits`` significant figures) at
+    which the page's views fit the drawing area."""
+    import math
+    group, extras = page_content(page)
+    if group is None:
+        raise ValueError("This page has no projection group to scale")
+    layout = group_layout(group)
+    lo, hi = 1e-4, 1e3
+    if not fits_at(page, group, extras, lo, layout):
+        raise ValueError("The views do not fit this sheet at any scale")
+    for _ in range(60):
+        mid = math.sqrt(lo * hi)
+        if fits_at(page, group, extras, mid, layout):
+            lo = mid
+        else:
+            hi = mid
+    step = 10 ** (math.floor(math.log10(lo)) - (digits - 1))
+    return math.floor(lo / step + 1e-9) * step
+
+
+def fill_page(page):
+    """Zoom the views to fill the drawing area at whatever scale that takes,
+    leaving room for the detail views; the title block says NTS (not to
+    scale). Returns the scale."""
+    import math
+    s = fill_scale(page)
+    # try smaller scales until the details have room; trials are only laid
+    # out, never drawn (a drawing at a trial scale could land last)
+    for _ in range(25):
+        if set_page_scale(page, s, "NTS", draw=False):
+            break
+        s *= 0.92
+        step = 10 ** (math.floor(math.log10(s)) - 1)
+        s = math.floor(s / step + 1e-9) * step
+    return set_page_scale(page, s, "NTS")
+
+
+def set_view_scale(view, value):
+    """Any scale for a detail view (it must stay larger than its view)."""
+    if not view.isDerivedFrom("TechDraw::DrawViewDetail"):
+        raise ValueError("%s follows the page scale: select a detail view, or "
+                         "nothing to scale the page" % view.Label)
+    base = getattr(view, "BaseView", None)
+    if base is not None and value <= view_scale(base) + 1e-12:
+        raise ValueError("A detail must be drawn larger than its view (%s)"
+                         % scale_text(view_scale(base)))
+    set_detail_scale(view, value)
+    _refresh_after_detail(view)
+    return value
 
 
 def _inside_regions(box, regions, tol=0.01):
@@ -833,13 +1120,14 @@ def redraw(views):
         v.recompute()
 
 
-def stale_views(views, tolerance=0.25):
+def stale_views(views, tolerance=0.05):
     """Views whose drawing is not at their current scale (or not drawn yet).
 
     TechDraw draws in background threads and has no 'busy' flag in Python;
     if a redraw is requested while an older one is still running, the older
-    result can land last. Standard scales are at least 2x apart, so a drawing
-    more than 25 % off its expected size is stale.
+    result can land last. The expected size is the shape's exact outline, so
+    a drawing more than 5 % off it is stale (non-standard scales, e.g. from
+    Fill sheet, can be close together).
     """
     import Part
     stale = []
@@ -893,8 +1181,9 @@ def apply_plan(page, group, extras, scale, positions):
         view.touch()
 
 
-def set_title_block_scale(page, scale):
-    """Write the scale into the title block's 'scale' field, if it has one."""
+def set_title_block_scale(page, scale, text=None):
+    """Write the scale (or ``text``, e.g. 'NTS') into the title block's
+    'scale' field, if it has one."""
     tpl = page.Template
     if tpl is None or "EditableTexts" not in tpl.PropertiesList:
         return False
@@ -902,7 +1191,7 @@ def set_title_block_scale(page, scale):
     keys = [k for k in texts if k.lower() == "scale"]
     if not keys:
         return False
-    text = scale_text(scale).replace(":", " : ")
+    text = text or scale_text(scale).replace(":", " : ")
     for k in keys:
         texts[k] = text
     tpl.EditableTexts = texts

@@ -337,6 +337,110 @@ class TestSectionsAndFit(DocTest):
         with self.assertRaises(ValueError):
             core.fit_page(empty)
 
+    def _title_scale(self):
+        texts = dict(self.page.Template.EditableTexts)
+        keys = [k for k in texts if k.lower() == "scale"]
+        return texts[keys[0]] if keys else None
+
+    def test_scale_down_then_up_steps_one_standard_scale(self):
+        fitted = core.fit_page(self.page)
+        down = core.step_page_scale(self.page, -1)
+        self.assertAlmostEqual(down, core.next_standard_scale(fitted, -1))
+        self.assertAlmostEqual(core.view_scale(self.group), down)
+        up = core.step_page_scale(self.page, +1)
+        self.assertAlmostEqual(up, fitted)
+
+    def test_scale_up_past_fit_refuses(self):
+        core.fit_page(self.page)
+        with self.assertRaises(ValueError):
+            core.step_page_scale(self.page, +1)
+
+    def test_detail_keeps_its_zoom_over_the_page(self):
+        core.fit_page(self.page)
+        s = core.view_scale(self.front)
+        cx, cy = core.view_center(self.front)
+        det = core.add_detail(self.page, self.front, (cx, cy), 10.0, (60, 60))
+        ratio = core.view_scale(det) / s
+        core.step_page_scale(self.page, -1)
+        # same zoom over its view, on the nearest standard scale
+        want = core.nearest_standard_scale(ratio * core.view_scale(self.front))
+        self.assertAlmostEqual(core.view_scale(det), want)
+        self.assertGreater(core.view_scale(det), core.view_scale(self.front))
+        from DrawingKitTools import standards
+        self.assertEqual(det.Caption, standards.detail_caption(
+            det.Reference, core.scale_text(core.view_scale(det))))
+
+    def test_detail_step_stays_larger_than_its_view(self):
+        core.fit_page(self.page)
+        s = core.view_scale(self.front)
+        cx, cy = core.view_center(self.front)
+        det = core.add_detail(self.page, self.front, (cx, cy), 10.0, (60, 60), scale=2 * s)
+        with self.assertRaises(ValueError):
+            core.step_view_scale(det, -1)
+        up = core.step_view_scale(det, +1)
+        self.assertGreater(up, 2 * s)
+        with self.assertRaises(ValueError):
+            core.step_view_scale(self.front, +1)
+
+    def test_any_scale_goes_in_title_block_as_typed(self):
+        value, label = core.parse_scale("1:7")
+        scale = core.set_page_scale(self.page, value, label)
+        self.assertAlmostEqual(scale, 1 / 7.0)
+        self.assertAlmostEqual(core.view_scale(self.front), 1 / 7.0)
+        if self._title_scale() is not None:
+            self.assertEqual(self._title_scale(), "1 : 7")
+        with self.assertRaises(ValueError):
+            core.set_page_scale(self.page, 50.0, "50 : 1")
+
+    def test_fill_sheet_is_non_standard_and_nts(self):
+        fitted = core.fit_page(self.page)
+        scale = core.fill_page(self.page)
+        self.assertGreaterEqual(scale, fitted - 1e-12)
+        group, extras = core.page_content(self.page)
+        self.assertTrue(core.fits_at(self.page, group, extras, scale))
+        self.assertFalse(core.fits_at(self.page, group, extras, scale * 1.1))
+        if self._title_scale() is not None:
+            self.assertEqual(self._title_scale(), "NTS")
+
+    def test_details_moved_clear_after_fill(self):
+        core.fit_page(self.page)
+        s = core.view_scale(self.front)
+        cx, cy = core.view_center(self.front)
+        det = core.add_detail(self.page, self.front, (cx, cy), 10.0, (60, 60))
+        core.fill_page(self.page)
+        box = core._detail_footprint(det, float(det.X), float(det.Y))
+        frame, title = core.drawing_area(self.page.Template.Template, *core.page_size(self.page))
+        self.assertTrue(frame[0] <= box[0] and box[2] <= frame[2] and
+                        frame[1] <= box[1] and box[3] <= frame[3])
+        for v in core.part_views(self.page):
+            if v.isDerivedFrom("TechDraw::DrawViewDetail"):
+                continue
+            self.assertFalse(core._overlaps(box, core.view_box(v), 0.0), v.Label)
+        if title:
+            self.assertFalse(core._overlaps(box, title, 0.0))
+        self.assertGreater(core.view_scale(det), core.view_scale(self.front))
+
+
+class TestParseScale(unittest.TestCase):
+    def test_forms(self):
+        self.assertEqual(core.parse_scale("1:3"), (1 / 3.0, "1 : 3"))
+        self.assertEqual(core.parse_scale(" 3 : 4 "), (0.75, "3 : 4"))
+        self.assertEqual(core.parse_scale("1/2.5")[0], 0.4)
+        self.assertEqual(core.parse_scale("0,8")[0], 0.8)
+        self.assertEqual(core.parse_scale("150%")[0], 1.5)
+
+    def test_bad(self):
+        for t in ("", "abc", "1:0", "-2", "1:1e9"):
+            with self.assertRaises(ValueError, msg=t):
+                core.parse_scale(t)
+
+    def test_steps(self):
+        self.assertEqual(core.next_standard_scale(1.0, +1), 2.0)
+        self.assertEqual(core.next_standard_scale(1 / 3.0, +1), 0.5)
+        self.assertEqual(core.next_standard_scale(1 / 3.0, -1), 0.2)
+        self.assertIsNone(core.next_standard_scale(50.0, +1))
+        self.assertIsNone(core.next_standard_scale(0.001, -1))
+
 
 def block_with_hole(doc):
     """100 x 60 x 40 block, off-centre vertical hole r=8 at (30, 20)."""

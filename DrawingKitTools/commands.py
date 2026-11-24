@@ -358,6 +358,118 @@ class FitToPage:
         say("Page scale is now %s" % core.scale_text(scale))
 
 
+def selected_detail():
+    for obj in Gui.Selection.getSelection():
+        if obj.isDerivedFrom("TechDraw::DrawViewDetail"):
+            return obj
+    return None
+
+
+def _rescale(name, page_work, detail_work):
+    """Run a scale change on the selected detail view, else on the page."""
+    doc = App.ActiveDocument
+    det = selected_detail()
+    page = parent_page(det) if det is not None else target_page()
+    if page is None:
+        warn("Select the page (or a view on it) first.")
+        return
+    try:
+        if det is not None:
+            scale = run_in_transaction(doc, name, lambda: detail_work(det))
+        else:
+            scale = run_in_transaction(doc, name, lambda: page_work(page))
+    except ValueError as e:
+        warn(str(e))
+        return
+    doc.recompute()
+    watch_redraw(page)
+    return det, page, scale
+
+
+class ScaleStep:
+    def __init__(self, step):
+        self.step = step
+
+    def GetResources(self):
+        up = self.step > 0
+        return {"Pixmap": icon("DrawingKit_ScaleUp.svg" if up else "DrawingKit_ScaleDown.svg"),
+                "MenuText": "Scale up" if up else "Scale down",
+                "ToolTip": ("One standard scale %s (e.g. %s) for the whole page, laid "
+                            "out again like Fit to page; detail views keep their zoom. "
+                            "With a detail view selected, only that detail changes."
+                            % (("bigger", "1:2 -> 1:1 -> 2:1") if up else
+                               ("smaller", "2:1 -> 1:1 -> 1:2")))}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        done = _rescale("DrawingKit scale %s" % ("up" if self.step > 0 else "down"),
+                        lambda p: core.step_page_scale(p, self.step),
+                        lambda d: core.step_view_scale(d, self.step))
+        if done:
+            det, page, scale = done
+            say("%s is now at %s" % (det.Label if det else "The page", core.scale_text(scale)))
+
+
+class SetScaleDialog(ui.Popover):
+    def __init__(self, current, detail=False, parent=None):
+        super().__init__("Scale of the detail" if detail else "Page scale", parent)
+        self.value = ui.field(current, 70, "1:3", "Any scale: 1:3, 3:4, 2.5:1, 0.8 or 150%")
+        self.add_row("Scale", self.value, stretch=True)
+        self.fill = None
+        if not detail:
+            self.fill = ui.toggle("Fill sheet (NTS)", False,
+                                  "Zoom the views to fill the drawing area at whatever "
+                                  "scale that takes; the title block says NTS")
+            self.fill.toggled.connect(lambda on: self.value.setEnabled(not on))
+            self.add_row(self.fill, stretch=True)
+
+
+class SetScale:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_SetScale.svg"),
+                "MenuText": "Set scale...",
+                "ToolTip": "Type any scale, standard or not (1:3, 3:4, 0.8, 150%), "
+                           "or fill the sheet (title block says NTS). Applies to the "
+                           "page, or to the selected detail view."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        det = selected_detail()
+        page = parent_page(det) if det is not None else target_page()
+        if page is None:
+            warn("Select the page (or a view on it) first.")
+            return
+        if det is not None:
+            current = core.scale_text(core.view_scale(det))
+        else:
+            group, _ = core.page_content(page)
+            current = core.scale_text(core.view_scale(group) if group else float(page.Scale))
+        dlg = SetScaleDialog(current, det is not None, Gui.getMainWindow())
+        if not dlg.run():
+            return
+        fill = dlg.fill is not None and dlg.fill.isChecked()
+        try:
+            value, label = (None, "NTS") if fill else core.parse_scale(dlg.value.text())
+        except ValueError as e:
+            warn(str(e))
+            return
+        if fill:
+            done = _rescale("DrawingKit fill sheet", core.fill_page, None)
+        else:
+            done = _rescale("DrawingKit set scale",
+                            lambda p: core.set_page_scale(p, value, label),
+                            lambda d: core.set_view_scale(d, value))
+        if done:
+            det, page, scale = done
+            say("%s is now at %s%s" % (det.Label if det else "The page",
+                                       label if not fill else core.scale_text(scale),
+                                       " (NTS)" if fill else ""))
+
+
 class Section:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_Section.svg"),
@@ -2319,6 +2431,9 @@ COMMANDS = [
     ("DrawingKit_FillTitleBlock", FillTitleBlock()),
     ("DrawingKit_Revision", AddRevision()),
     ("DrawingKit_FitToPage", FitToPage()),
+    ("DrawingKit_ScaleUp", ScaleStep(+1)),
+    ("DrawingKit_ScaleDown", ScaleStep(-1)),
+    ("DrawingKit_SetScale", SetScale()),
     ("DrawingKit_SpeedToggle", SpeedToggle()),
     ("DrawingKit_HiddenLines", HiddenLines()),
     ("DrawingKit_HatchByPart", HatchByPart()),
@@ -2334,7 +2449,8 @@ COMMAND_GROUPS = [
                           "DrawingKit_ProjectedView", "DrawingKit_Section",
                           "DrawingKit_AlignedSection", "DrawingKit_HatchByPart", "DrawingKit_EditHatch",
                           "DrawingKit_DetailView",
-                          "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_HiddenLines",
+                          "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_ScaleUp",
+                          "DrawingKit_ScaleDown", "DrawingKit_SetScale", "DrawingKit_HiddenLines",
                           "DrawingKit_SpeedToggle"]),
     ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
                                "DrawingKit_CenterMarks", "DrawingKit_Centerline",
