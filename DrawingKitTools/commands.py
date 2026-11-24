@@ -2032,6 +2032,110 @@ class EditDimension:
         say("%d dimension(s) updated" % len(dims))
 
 
+FLAG_PREF = "FlagText"
+
+
+def _dimension_at(page, pt, reach=2.5):
+    """The dimension whose text is under (or within ``reach`` mm of) a page
+    point, or None."""
+    from . import annot
+    best = None
+    for d in page.Views:
+        if not d.isDerivedFrom("TechDraw::DrawViewDimension"):
+            continue
+        try:
+            b = annot.dim_text_box(d)
+        except Exception:
+            b = None
+        if b is None:
+            continue
+        dx = max(b[0] - pt[0], 0.0, pt[0] - b[2])
+        dy = max(b[1] - pt[1], 0.0, pt[1] - b[3])
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist <= reach and (best is None or dist < best[0]):
+            best = (dist, d)
+    return best[1] if best else None
+
+
+class SpecialCharacteristic:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Flag.svg"),
+                "MenuText": "Special characteristic flag",
+                "ToolTip": "A hexagon flag (SC, CC, KC... you choose the text) after a "
+                           "dimension's value, to mark a special or critical characteristic. "
+                           "Select dimensions first, or click a dimension's value; click "
+                           "anywhere else for a flag on its own (e.g. in the notes). Esc to "
+                           "finish."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import annot, interact
+        last = App.ParamGet(annot.PREFS).GetString(FLAG_PREF, "SC") or "SC"
+        text = ui.ask_text("Special characteristic", "Flag text", last, 60)
+        if text is None or not text.strip():
+            return
+        text = text.strip()
+        App.ParamGet(annot.PREFS).SetString(FLAG_PREF, text)
+        doc = App.ActiveDocument
+        dims = [o for o in Gui.Selection.getSelection()
+                if o.isDerivedFrom("TechDraw::DrawViewDimension")]
+        if dims:
+            page = parent_page(dims[0])
+
+            def work():
+                made = 0
+                for d in dims:
+                    if any(_flag_text(f) == text for f in annot.flags_on(d)):
+                        continue
+                    annot.add_flag(parent_page(d), text, dimension=d)
+                    made += 1
+                return made
+            made = run_in_transaction(doc, "DrawingKit flag", work)
+            doc.recompute()
+            say("%d %s flag(s) added" % (made, text))
+            return
+        page = target_page()
+        if page is None:
+            warn("Open the page (or select dimensions) first.")
+            return
+        show_page(page)
+        Gui.Selection.clearSelection()
+        w, h = annot.flag_size(text, annot.default_size() / 3.5)
+
+        def on_move(pt, _pts):
+            d = _dimension_at(page, pt)
+            if d is not None:
+                spot = annot.flag_beside(d, text, annot.default_size() / 3.5)
+                if spot is not None:
+                    return [("rect", spot[0], spot[1], w, h)]
+            return [("rect", pt[0], pt[1], w, h)]
+
+        def on_click(pt, points):
+            points.clear()
+            d = _dimension_at(page, pt)
+            if d is not None and any(_flag_text(f) == text for f in annot.flags_on(d)):
+                say("%s already has a %s flag" % (d.Label, text))
+                return False
+            run_in_transaction(doc, "DrawingKit flag",
+                               lambda: annot.add_flag(page, text, dimension=d) if d is not None
+                               else annot.add_flag(page, text, at=pt))
+            doc.recompute()
+            say("%s flag added%s - click the next, Esc to finish"
+                % (text, (" to " + d.Label) if d is not None else ""))
+            return False
+
+        interact.PagePicker(page, "DrawingKit: click a dimension's value for a %s flag, or "
+                                  "anywhere for a flag on its own. Esc to finish." % text,
+                            on_move=on_move, on_click=on_click, finish_on_right_click=True)
+
+
+def _flag_text(sym):
+    from . import annot
+    return annot._values(sym).get("flag", annot._params(sym).get("text", ""))
+
+
 class SmartDimension:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_Dimension.svg"),
@@ -2796,6 +2900,7 @@ COMMANDS = [
     ("DrawingKit_DatumTarget", DatumTarget()),
     ("DrawingKit_ToleranceFrame", ToleranceFrame()),
     ("DrawingKit_Note", Note()),
+    ("DrawingKit_Flag", SpecialCharacteristic()),
     ("DrawingKit_TextStyle", TextStyle()),
     ("DrawingKit_Ordinate", OrdinateDims()),
     ("DrawingKit_Centerline", Centerline()),
@@ -2836,7 +2941,7 @@ COMMAND_GROUPS = [
                                "DrawingKit_HoleCallout", "DrawingKit_Chamfer"]),
     ("DrawingKit annotation", ["DrawingKit_SurfaceFinish", "DrawingKit_Weld",
                                "DrawingKit_Datum", "DrawingKit_DatumTarget",
-                               "DrawingKit_ToleranceFrame", "DrawingKit_Note",
+                               "DrawingKit_ToleranceFrame", "DrawingKit_Flag", "DrawingKit_Note",
                                "DrawingKit_TextStyle"]),
     ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
                            "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",

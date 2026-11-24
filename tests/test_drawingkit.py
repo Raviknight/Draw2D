@@ -1327,6 +1327,34 @@ class TestEditDimension(DocTest):
         self.assertFalse(self.dims.is_limits(d))
         self.assertFalse(d.Arbitrary)
 
+    def test_special_characteristic_flag(self):
+        from DrawingKitTools import annot, clearance
+        d = self.dim
+        page = d.InList[0] if not hasattr(d, "findParentPage") else d.findParentPage()
+        f = annot.add_flag(page, "SC", dimension=d)
+        self.assertEqual(f.DrawingKitAnnot, "flag")
+        self.assertIn(">SC<", f.Symbol)
+        self.assertEqual(annot.flags_on(d), [f])
+        text = clearance.dimension_label_box(d)
+        body = annot.body_box(f)
+        self.assertGreater(body[0], text[2])                 # just after the value
+        self.assertLess(body[0] - text[2], 5.0)
+        # the dimension moves: the flag follows
+        x = float(f.X)
+        d.X = float(d.X) + 10.0
+        annot.refresh(annot.attached_to(d))
+        self.assertAlmostEqual(float(f.X) - x, 10.0, places=3)
+        # a tolerance makes the text longer: the flag moves out past it
+        x = float(f.X)
+        self.dims.set_dimension(d, decimals=2, tol="symmetric", upper=0.02)
+        annot.refresh(annot.attached_to(d))
+        self.assertGreater(float(f.X), x + 1.0)
+        # a flag on its own, e.g. in the notes
+        g = annot.add_flag(page, "CC", at=(100.0, 50.0))
+        self.assertIn(">CC<", g.Symbol)
+        b = annot.body_box(g)
+        self.assertAlmostEqual((b[0] + b[2]) / 2.0, 100.0, places=3)
+
     def test_limits_on_a_diameter_keep_the_symbol(self):
         d = self.dim
         d.Type = "Diameter"

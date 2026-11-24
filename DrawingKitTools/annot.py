@@ -663,6 +663,84 @@ def draw_target(sk, anchor, box_centre, label, size_text):
     sk.line(start, anchor)
 
 
+def draw_flag(sk, box_centre, text):
+    """Special characteristic flag: the text in an elongated hexagon
+    (pointed ends), as used for SC / CC / KC marks next to a dimension."""
+    size = gdt.FONT * sk.k
+    h = size * 1.9
+    w = max(len(text), 1) * size * 0.62 + h          # room for the pointed ends
+    bx, by = box_centre
+    x0, x1 = bx - w / 2.0, bx + w / 2.0
+    pts = [(x0, by), (x0 + h / 2.0, by + h / 2.0), (x1 - h / 2.0, by + h / 2.0),
+           (x1, by), (x1 - h / 2.0, by - h / 2.0), (x0 + h / 2.0, by - h / 2.0)]
+    sk.poly(pts)
+    sk.text(bx, by, text, editable="flag")
+    sk.body = (x0, by - h / 2.0, x1, by + h / 2.0)
+    return w, h
+
+
+def flag_size(text, k=1.0):
+    size = gdt.FONT * k
+    h = size * 1.9
+    return max(len(text), 1) * size * 0.62 + h, h
+
+
+def _text_upright(dim):
+    """True if the dimension's text reads upwards (vertical ISO dimension)."""
+    if dim.Type != "DistanceY":
+        return False
+    vo = getattr(dim, "ViewObject", None)
+    return not (vo is not None and "Referencing" in str(getattr(vo, "StandardAndStyle", "")))
+
+
+def dim_text_box(dim):
+    """Page box of a dimension's whole text: value plus any tolerance or
+    stacked limits written after it."""
+    from . import clearance
+    b = clearance.dimension_label_box(dim)
+    if b is None:
+        return None
+    x0, y0, x1, y1 = b
+    try:
+        over, under = dim.FormatSpecOverTolerance or "", dim.FormatSpecUnderTolerance or ""
+        has_tol = abs(float(getattr(dim.OverTolerance, "Value", dim.OverTolerance))) > 1e-12 or \
+            abs(float(getattr(dim.UnderTolerance, "Value", dim.UnderTolerance))) > 1e-12
+    except Exception:
+        has_tol, over, under = False, "", ""
+    if has_tol and not dim.TheoreticalExact:
+        fs = clearance._dim_font(dim)
+        tw = max(len(over), len(under), 4) * fs * 0.58 * 0.75 + 1.0
+        if _text_upright(dim):               # value reads upwards: tolerance above it
+            y1 += tw
+        else:
+            x1 += tw
+    return x0, y0, x1, y1
+
+
+def flag_beside(dim, text, k=1.0, gap=1.5):
+    """Centre for a flag just after a dimension's text (above it when the
+    text reads upwards)."""
+    b = dim_text_box(dim)
+    if b is None:
+        return None
+    w, h = flag_size(text, k)
+    x0, y0, x1, y1 = b
+    if _text_upright(dim):
+        # above the value, kept on the value's side of the dimension line
+        try:
+            p0, _p1, _u = dimension_ends(dim)
+            line_x = p0[0]
+        except Exception:
+            line_x = (x0 + x1) / 2.0
+        cx = (x0 + x1) / 2.0
+        if line_x >= cx:
+            cx = min(cx, line_x - gap - w / 2.0)
+        else:
+            cx = max(cx, line_x + gap + w / 2.0)
+        return (cx, y1 + gap + h / 2.0)
+    return (x1 + gap + w / 2.0, (y0 + y1) / 2.0)
+
+
 def note_lines(p, values):
     lines = list(p.get("lines") or [""])
     return [values.get("line%d" % (i + 1), ln) for i, ln in enumerate(lines)]
@@ -732,6 +810,16 @@ def render(sym):
             anchor = None if akind in ("free", "dimlabel") else (ax, ay)
             align = dim_text_side(getattr(sym, LINK), ax) if akind == "dimlabel" else None
             draw_frame(sk, anchor, box, p, values, align)
+        elif kind == "flag":
+            text = values.get("flag", p.get("text", "SC"))
+            link = getattr(sym, LINK, None)
+            if getattr(sym, ANCHOR_KIND, "free") == "dimlabel" and link is not None \
+                    and p.get("beside", True):
+                spot = flag_beside(link, text, sk.k)
+                if spot is not None:
+                    box = spot
+            draw_flag(sk, box, text)
+            fields = ["flag"]
         elif kind == "tag":
             sk.text(box[0], box[1], p.get("label", ""), size=2.5)
             if math.hypot(off.x, off.y) > 8.0 * sk.k:
@@ -779,7 +867,8 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=Non
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
         "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note",
         "ordinate": "Ordinate", "surface": "SurfaceFinish", "weld": "Weld",
-        "bom": "PartsList", "hatch": "PartHatch", "toltable": "GeneralTolerances"}[kind])
+        "bom": "PartsList", "hatch": "PartHatch", "toltable": "GeneralTolerances",
+        "flag": "SpecialCharacteristic"}[kind])
     page.addView(sym)
     sym.ScaleType = "Custom"
     sym.Scale = 1.0
@@ -1002,6 +1091,29 @@ def add_frame(page, box, params, anchor=None, dimension=None):
                 avoid=avoid)
 
 
+def add_flag(page, text="SC", dimension=None, at=None):
+    """Special characteristic flag (text in a hexagon). With ``dimension``
+    it sits just after that dimension's text and follows it; otherwise at
+    page point ``at`` (e.g. in the notes)."""
+    text = (text or "SC").strip()
+    p = {"text": text}
+    if dimension is not None:
+        if dimension.Type in ("Diameter", "Radius"):
+            # value on a level shoulder, so the flag lines up after it
+            from . import holes
+            holes.set_horizontal_text(dimension)
+        return _new(page, "flag", "Flag %s on %s" % (text, dimension.Label), p,
+                    "dimlabel", dimension, (0, 0), (0, 0))
+    if at is None:
+        raise ValueError("Give a dimension or a spot for the flag")
+    return _new(page, "flag", "Flag %s" % text, p, "free", None, at, (0, 0), avoid="explicit")
+
+
+def flags_on(dim):
+    return [o for o in dim.InList if getattr(o, KIND, "") == "flag"
+            and core.same(getattr(o, LINK, None), dim)]
+
+
 def add_target(page, x, y, label, size="", box=None):
     kind, view, local, vbox = attach_point(page, x, y)
     side = gdt.datum_side(vbox, x, y) if vbox else "up"
@@ -1049,6 +1161,16 @@ def dragged(sym):
     dx, dy = float(sym.X) - c.x, float(sym.Y) - c.y
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return False
+    p = _params(sym)
+    if getattr(sym, KIND, "") == "flag" and p.get("beside", True) and \
+            getattr(sym, ANCHOR_KIND, "free") == "dimlabel":
+        # dragged off its place after the value: it stays where it was put
+        (ax, ay), _ = anchor_page(sym)
+        p["beside"] = False
+        setattr(sym, PARAMS, json.dumps(p))
+        setattr(sym, OFFSET, App.Vector(float(sym.X) - ax, float(sym.Y) - ay, 0))
+        render(sym)
+        return True
     off = getattr(sym, OFFSET)
     setattr(sym, OFFSET, App.Vector(off.x + dx, off.y + dy, 0))
     render(sym)
