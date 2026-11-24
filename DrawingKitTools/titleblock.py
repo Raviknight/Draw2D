@@ -265,17 +265,43 @@ def set_fields(page, values):
     return changed
 
 
-def has_tolerance_row(page):
+def _texts(page):
     tpl = page.Template
-    return tpl is not None and "EditableTexts" in tpl.PropertiesList and \
-        "tol_1" in dict(tpl.EditableTexts)
+    if tpl is None or "EditableTexts" not in tpl.PropertiesList:
+        return {}
+    return dict(tpl.EditableTexts)
+
+
+def has_tolerance_row(page):
+    """ISO title block with the row on top (units, tolerances, finish)."""
+    t = _texts(page)
+    return "units" in t and not is_ansi(t)
+
+
+def tolerance_mode(page):
+    """'table' when the title block points to a size table instead of
+    having X.X / X.XX / X.XXX values, else 'places'."""
+    t = _texts(page)
+    return "table" if "units" in t and "tol_1" not in t else "places"
 
 
 def page_style(page):
     return "ansi" if is_ansi(page) else "iso"
 
 
-def set_template_variant(page, tol_row=None, style_=None):
+def match_tolerance_mode(page):
+    """One way of giving general tolerances per sheet: with a size table
+    on the sheet the title block drops its X.X / X.XX / X.XXX values (and
+    gets them back when the table goes). Returns True if it switched."""
+    from . import tables
+    want = "table" if tables.tolerance_table(page) is not None else "places"
+    t = _texts(page)
+    if "units" not in t or tolerance_mode(page) == want:
+        return False
+    return set_template_variant(page, tol_mode=want)
+
+
+def set_template_variant(page, tol_row=None, style_=None, tol_mode=None):
     """Swap a DrawingKit template for another variant (ISO block with or
     without the tolerance row, or the ANSI block), keeping what was typed
     in and filling new fields from the defaults. False if the page's
@@ -292,8 +318,12 @@ def set_template_variant(page, tol_row=None, style_=None):
         return False
     if tol_row is None:
         tol_row = has_tolerance_row(page)
+    if tol_mode is None:
+        from . import tables
+        tol_mode = "table" if tables.tolerance_table(page) is not None else "places"
     keep = dict(tpl.EditableTexts)
-    tpl.Template = templates.template_path(size, orient, first, tol_row=tol_row, style=style_)
+    tpl.Template = templates.template_path(size, orient, first, tol_row=tol_row, style=style_,
+                                           tol_mode=tol_mode)
     texts = dict(tpl.EditableTexts)
     for k, v in keep.items():
         if k in texts and k != "sheet_number":

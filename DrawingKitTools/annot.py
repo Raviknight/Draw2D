@@ -1067,6 +1067,11 @@ def refresh(objs):
 
 
 def refresh_page(page):
+    try:
+        from . import dims
+        dims.refresh_limits(page)     # limit dimensions follow the model
+    except Exception:
+        pass
     return refresh(annotations_on(page))
 
 

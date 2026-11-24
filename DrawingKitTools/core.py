@@ -1466,6 +1466,7 @@ def fill_title_block(page, part=None):
     try:
         from . import titleblock
         changed.update(titleblock.apply_defaults(page))   # saved defaults in empty fields
+        titleblock.match_tolerance_mode(page)   # size table or X.X values, not both
     except Exception as e:
         App.Console.PrintWarning("DrawingKit title block defaults: %s\n" % e)
     renumber_sheets(doc)

@@ -1827,6 +1827,8 @@ class EditTitleBlock:
                                          "ANSI block needs a sheet at least 210 mm wide inside "
                                          "the frame).")
                     tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
+                if tb.match_tolerance_mode(page):    # size table or X.X values, not both
+                    tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
                 return changed
             try:
                 total += len(run_in_transaction(doc, "DrawingKit title block", work))
@@ -1937,7 +1939,9 @@ class DimensionDialog(ui.Popover):
         self.value.setAlignment(QtCore.Qt.AlignCenter)
         self.add_row(self.before, self.value, self.after)
         self.tol = ui.combo([("none", "No tol."), ("symmetric", "±"),
-                             ("deviation", "+ / −")], settings["tol"], 80)
+                             ("deviation", "+ / −"), ("limits", "Limits")], settings["tol"], 80)
+        self.tol.setToolTip("Limits: the largest and smallest size, stacked (e.g. 0.053 over "
+                            "0.051), worked out from the measured size and the + / − values")
         def fmt(v):
             return ("%g" % abs(v)) if abs(v) > 1e-12 else ""
         self.upper = ui.field(fmt(settings["upper"]), 56, "0.05", "Upper (or ±) tolerance")
@@ -1967,9 +1971,19 @@ class DimensionDialog(ui.Popover):
             t = self.tol.currentData()
             self.tol.setEnabled(not basic)
             self.upper.setVisible(not basic and t != "none")
-            self.lower.setVisible(not basic and t == "deviation")
+            self.lower.setVisible(not basic and t in ("deviation", "limits"))
+            self.after.setEnabled(t != "limits")
+            self.reference.setEnabled(t != "limits")
             if value is not None:
-                self.value.setText("%.*f" % (self.decimals.currentData(), value))
+                dp = self.decimals.currentData()
+                if t == "limits" and not basic:
+                    hi = value + _num(self.upper.text())
+                    lo = value - _num(self.lower.text())
+                    self.value.setText("%.*f / %.*f" % (dp, hi, dp, lo))
+                else:
+                    self.value.setText("%.*f" % (dp, value))
+        self.upper.textChanged.connect(sync)
+        self.lower.textChanged.connect(sync)
         self.basic.toggled.connect(sync)
         self.tol.currentIndexChanged.connect(sync)
         self.decimals.currentIndexChanged.connect(sync)
@@ -1990,7 +2004,7 @@ class EditDimension:
         return {"Pixmap": icon("DrawingKit_EditDimension.svg"),
                 "MenuText": "Edit dimension",
                 "ToolTip": "Select one or more dimensions: set text before/after (3X), "
-                           "decimals, tolerance (± or +/−), basic (boxed) or "
+                           "decimals, tolerance (±, +/− or limits), basic (boxed) or "
                            "reference (in parentheses)."}
 
     def IsActive(self):

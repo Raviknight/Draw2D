@@ -58,17 +58,25 @@ TOL_CELLS = [
 ]
 
 
-def cells(tol_row=False):
+# the row when general tolerances are given by a size table on the sheet
+TOL_CELLS_TABLE = [
+    (0, 0, 30, "Dimensions in", "units", "", None, VALUE_FONT, "start"),
+    (0, 30, 180, "Finish", "finish", "", None, VALUE_FONT, "start"),
+]
+
+
+def cells(tol_row=False, tol_mode="places"):
     """Title block cells, rows from the top (the tolerance row first)."""
     if not tol_row:
         return list(CELLS)
-    return list(TOL_CELLS) + [(c[0] + 1,) + tuple(c[1:]) for c in CELLS]
+    row = TOL_CELLS_TABLE if tol_mode == "table" else TOL_CELLS
+    return list(row) + [(c[0] + 1,) + tuple(c[1:]) for c in CELLS]
 
 
 def parse_name(path):
     """(size, orientation, first_angle) of a DrawingKit template file, or None."""
     import re
-    m = re.match(r"DrawingKit_(.+)_(Landscape|Portrait)_(1st|3rd)(_tol|_ansi)?\.svg$",
+    m = re.match(r"DrawingKit_(.+)_(Landscape|Portrait)_(1st|3rd)(_tol|_ansi|_toltab|_ansitab)?\.svg$",
                  os.path.basename(path or ""))
     if not m:
         return None
@@ -189,6 +197,15 @@ ANSI_TOL_LINES = [
     [(0, "", "surface_note", "")],
     [(0, "", "edge_note", "")],
 ]
+# ... and when general tolerances are given by a size table on the sheet
+ANSI_TOL_LINES_TABLE = [
+    [(0, "UNLESS OTHERWISE SPECIFIED:", None, "")],
+    [(0, "DIMENSIONS ARE IN", "units", "INCHES")],
+    [(0, "TOLERANCES: SEE TABLE", None, "")],
+    [(0, "INTERPRET PER", "general_tolerances", "ASME Y14.5-2018")],
+    [(0, "", "surface_note", "")],
+    [(0, "", "edge_note", "")],
+]
 ANSI_FIELDS = (["legal_owner_1", "company_address", "title", "title_2", "sheet_size"]
                + [c[4] for c in ANSI_CELLS]
                + [f for line in ANSI_TOL_LINES for _, _, f, _ in line if f])
@@ -199,7 +216,7 @@ def sheet_letter(size):
     return size.replace("ANSI ", "")
 
 
-def _ansi_block(a, fx1, fy1, size, first_angle):
+def _ansi_block(a, fx1, fy1, size, first_angle, tol_mode="places"):
     """Write the ANSI title block, its bottom-right corner on (fx1, fy1)."""
     x0, y0 = fx1 - ANSI_W, fy1 - ANSI_H
     mx = x0 + ANSI_TOL_W                     # main block's left edge
@@ -252,7 +269,7 @@ def _ansi_block(a, fx1, fy1, size, first_angle):
     edit(mx - 9.0, fy1 - 3.0, "sheet_size", sheet_letter(size), 6.0, "middle", bold=True)
     # tolerance lines
     ty = y0 + 3.8
-    for line in ANSI_TOL_LINES:
+    for line in (ANSI_TOL_LINES_TABLE if tol_mode == "table" else ANSI_TOL_LINES):
         for dx, static, field, default in line:
             tx = x0 + 1.5 + dx
             if static:
@@ -268,16 +285,18 @@ def _ansi_block(a, fx1, fy1, size, first_angle):
     a(projection_symbol(x0 + (ANSI_TOL_W - 18.0) / 2.0, yb + 5.6, first_angle, h=6.0))
 
 
-def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso"):
+def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", tol_mode="places"):
     """SVG text of a DrawingKit template (``tol_row``: with the row of
     units, tolerances and finish on top of the title block; ``style``
-    'ansi': ASME Y14.1 style title block with a tolerance block)."""
+    'ansi': ASME Y14.1 style title block with a tolerance block;
+    ``tol_mode`` 'table': general tolerances are in a size table on the
+    sheet, so no X.X / X.XX / X.XXX cells)."""
     W, H = page_size(size, orientation)
     if style == "ansi" and W - 30.0 < ANSI_MIN_FRAME_W:
         style = "iso"                       # no room: keep the ISO block
     rows = 5 if tol_row else 4
     tb_h = rows * ROW_H
-    all_cells = cells(tol_row)
+    all_cells = cells(tol_row, tol_mode)
     proj = (PROJECTION_CELL[0] + (1 if tol_row else 0),) + PROJECTION_CELL[1:]
     left, other = 20.0, 10.0
     fx0, fy0, fx1, fy1 = left, other, W - other, H - other       # drawing frame
@@ -326,7 +345,7 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso"):
     a('</g>')
 
     if style == "ansi":
-        _ansi_block(a, fx1, fy1, size, first_angle)
+        _ansi_block(a, fx1, fy1, size, first_angle, tol_mode)
         a('</svg>')
         return "\n".join(out) + "\n"
 
@@ -373,17 +392,20 @@ def fits_ansi(size, orientation):
     return page_size(size, orientation)[0] - 30.0 >= ANSI_MIN_FRAME_W
 
 
-def template_path(size, orientation, first_angle=True, out_dir=None, tol_row=False, style="iso"):
+def template_path(size, orientation, first_angle=True, out_dir=None, tol_row=False, style="iso",
+                  tol_mode="places"):
     """Write (if changed) and return the path of a DrawingKit template."""
     out_dir = out_dir or template_dir()
     os.makedirs(out_dir, exist_ok=True)
     if style == "ansi" and not fits_ansi(size, orientation):
         style = "iso"
     suffix = "_ansi" if style == "ansi" else ("_tol" if tol_row else "")
+    if suffix and tol_mode == "table":
+        suffix += "tab"
     name = "DrawingKit_%s_%s_%s%s.svg" % (size.replace(" ", ""), orientation,
                                       "1st" if first_angle else "3rd", suffix)
     path = os.path.join(out_dir, name)
-    text = make_svg(size, orientation, first_angle, tol_row and style != "ansi", style)
+    text = make_svg(size, orientation, first_angle, tol_row and style != "ansi", style, tol_mode)
     try:
         with open(path, encoding="utf-8") as f:
             if f.read() == text:

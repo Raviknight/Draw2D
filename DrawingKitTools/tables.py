@@ -351,16 +351,20 @@ def set_tolerance_table(page, data, units="mm"):
     table = tolerance_table(page)
     has_rows = data and (any(r[2] for r in data.get("linear", [])) or
                          any(r[2] for r in data.get("angular", [])))
+    from . import titleblock
     if not has_rows:
         if table is not None:
             page.removeView(table)
             page.Document.removeObject(table.Name)
+            titleblock.match_tolerance_mode(page)   # X.X / X.XX / X.XXX back
         return None
     p = tolerance_params(data, units)
     W, Ht = table_size(p)
     if table is None:
         place = free_table_spot(page, W, Ht)
-        return annot._new(page, "toltable", "General tolerances", p, "free", None, place, (0, 0))
+        table = annot._new(page, "toltable", "General tolerances", p, "free", None, place, (0, 0))
+        titleblock.match_tolerance_mode(page)   # title block points to the table
+        return table
     # keep its spot, grown or shrunk from the top-right corner
     old_w, old_h = table_size(annot._params(table))
     x1 = float(table.X) + old_w / 2.0

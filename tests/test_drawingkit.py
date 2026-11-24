@@ -8,6 +8,16 @@ import unittest
 import FreeCAD as App
 
 from DrawingKitTools import core
+from DrawingKitTools import titleblock as _titleblock
+
+# Keep the tests off the user's own title block defaults, company file and
+# title block preferences (they would change every sheet the tests make).
+import tempfile as _tempfile
+_NO_DEFAULTS = os.path.join(_tempfile.mkdtemp(), "no_defaults.json")
+_titleblock.user_file = lambda: _NO_DEFAULTS
+_titleblock.company_file = lambda: ""
+_titleblock.style = lambda: "iso"
+_titleblock.wants_tolerance_row = lambda: False
 
 # the model's own front view (most tests are written against it)
 FRONT = core.STANDARD_DIRECTIONS["Front"]
@@ -1296,6 +1306,37 @@ class TestEditDimension(DocTest):
         self.assertEqual(s["tol"], "symmetric")
         self.assertEqual(d.FormatSpec, "(%.1f)")
 
+    def test_limits(self):
+        d = self.dim
+        nominal = float(d.getRawValue())
+        self.dims.set_dimension(d, decimals=3, tol="limits", upper=0.002, lower=0.001)
+        self.assertTrue(self.dims.is_limits(d))
+        self.assertEqual(d.FormatSpecOverTolerance, "%.3f" % (nominal + 0.002))
+        self.assertEqual(d.FormatSpecUnderTolerance, "%.3f" % (nominal - 0.001))
+        s = self.dims.read_dimension(d)
+        self.assertEqual((s["tol"], s["decimals"]), ("limits", 3))
+        self.assertAlmostEqual(s["upper"], 0.002)
+        self.assertAlmostEqual(s["lower"], 0.001)
+        # the model changes size: the limits follow
+        d.FormatSpecOverTolerance = "0.000"
+        page = d.findParentPage() if hasattr(d, "findParentPage") else d.InList[0]
+        self.assertEqual(self.dims.refresh_limits(page), 1)
+        self.assertEqual(d.FormatSpecOverTolerance, "%.3f" % (nominal + 0.002))
+        # back to a plain dimension
+        self.dims.set_dimension(d, decimals=2)
+        self.assertFalse(self.dims.is_limits(d))
+        self.assertFalse(d.Arbitrary)
+
+    def test_limits_on_a_diameter_keep_the_symbol(self):
+        d = self.dim
+        d.Type = "Diameter"
+        self.dims.set_dimension(d, decimals=2, tol="limits", upper=0.1, lower=0.1, nominal=10.0)
+        self.assertEqual(d.FormatSpec, "⌀ ")
+        self.assertEqual((d.FormatSpecOverTolerance, d.FormatSpecUnderTolerance), ("10.10", "9.90"))
+        self.dims.set_dimension(d, before="⌀", decimals=2, tol="limits", upper=0.1, lower=0.1,
+                                nominal=10.0)
+        self.assertEqual(d.FormatSpec, "⌀ ")
+
 
 def plate_two_holes(doc):
     """80 x 50 x 10 plate, holes r5 at (20, 25) and (60, 25)."""
@@ -2005,6 +2046,29 @@ class TestTitleBlockDefaults(DocTest):
         self.assertEqual(len(core.table_boxes(page)), 1)
         self.assertIsNone(tables.set_tolerance_table(page, None))
         self.assertIsNone(tables.tolerance_table(page))
+
+    def test_one_tolerance_method_per_sheet(self):
+        from DrawingKitTools import tables
+        page = core.create_page(self.doc, "A3", "Landscape")
+        self.tb.set_tolerance_row(page, True)
+        self.tb.set_fields(page, {"finish": "Ra 1.6", "title": "Body"})
+        self.assertEqual(self.tb.tolerance_mode(page), "places")
+        tables.set_tolerance_table(page, tables.iso2768("f"))
+        texts = dict(page.Template.EditableTexts)
+        self.assertNotIn("tol_1", texts)                 # no X.X cells next to the table
+        self.assertEqual((texts["finish"], texts["title"]), ("Ra 1.6", "Body"))
+        self.assertTrue(page.Template.Template.endswith("_toltab.svg"))
+        tables.set_tolerance_table(page, None)
+        self.assertIn("tol_1", dict(page.Template.EditableTexts))
+        # ANSI: "TOLERANCES: SEE TABLE" instead of the .X lines
+        page2 = core.create_page(self.doc, "ANSI C", "Landscape")
+        self.tb.set_template_variant(page2, style_="ansi")
+        tables.set_tolerance_table(page2, tables.iso2768("m"))
+        self.assertTrue(page2.Template.Template.endswith("_ansitab.svg"))
+        self.assertNotIn("tol_3", dict(page2.Template.EditableTexts))
+        self.assertTrue(self.tb.is_ansi(page2))
+        with open(page2.Template.Template, encoding="utf-8") as f:
+            self.assertIn("TOLERANCES: SEE TABLE", f.read())
 
     def test_saved_tolerance_table_goes_on_new_sheets(self):
         from DrawingKitTools import tables
