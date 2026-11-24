@@ -1496,6 +1496,22 @@ class FillTitleBlock:
         say("Title blocks: %d field(s) filled, %d sheet(s) numbered" % (n, len(changed)))
 
 
+def redraw_template(page):
+    """Make the open sheet show its template (and the texts in it) now."""
+    try:
+        tpl = page.Template
+        tpl.touch()
+        tpl.recompute()
+        page.touch()
+        page.recompute()
+        vo = getattr(tpl, "ViewObject", None)
+        if vo is not None and hasattr(vo, "update"):
+            vo.update()
+        Gui.updateGui()
+    except Exception:
+        pass
+
+
 class TitleBlockDialog(QtWidgets.QDialog):
     """Every field of a page's title block in one form, with saving the
     fields that are the same on every drawing as your defaults or to a
@@ -1532,8 +1548,15 @@ class TitleBlockDialog(QtWidgets.QDialog):
             self.layout_combo.addItem(text, val)
         cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
         self.layout_combo.setCurrentIndex(self.layout_combo.findData(cur))
-        self.layout_combo.setToolTip("Swaps DrawingKit's title block, keeping what you typed. "
-                                     "Applied when you press OK.")
+        self.layout_combo.setToolTip("Swaps DrawingKit's title block at once, keeping what "
+                                     "you typed")
+        self.switch_to = None
+
+        def switch(_i):
+            # apply now: the form closes and opens again on the new layout
+            self.switch_to = self.layout_combo.currentData()
+            self.done(2)
+        self.layout_combo.currentIndexChanged.connect(switch)
         row.addWidget(self.layout_combo)
         row.addSpacing(16)
         row.addWidget(QtWidgets.QLabel("New sheets:"))
@@ -1636,31 +1659,37 @@ class EditTitleBlock:
         if not tb.fields(page):
             warn("This page's template has no fields to edit.")
             return
-        dlg = TitleBlockDialog(page)
-        if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
-            return
-        vals = dlg.values()
-        want = dlg.layout_combo.currentData()
-        tb.set_style_pref(dlg.new_combo.currentData())
-        cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+        total = 0
+        for _ in range(10):          # the form reopens after each layout switch
+            dlg = TitleBlockDialog(page)
+            res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+            if not res:
+                break
+            vals = dlg.values()
+            want = dlg.layout_combo.currentData()
+            tb.set_style_pref(dlg.new_combo.currentData())
+            cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
 
-        def work():
-            changed = tb.set_fields(page, vals)
-            if want != cur:
-                ok_ = tb.set_template_variant(page, tol_row=(want == "iso_tol"),
-                                              style_="ansi" if want == "ansi" else "iso")
-                if not ok_:
-                    raise ValueError("That layout needs DrawingKit's own template (and the ANSI "
-                                     "block needs a sheet at least 210 mm wide inside the frame).")
-                tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
-            return changed
-        try:
-            changed = run_in_transaction(doc, "DrawingKit title block", work)
-        except ValueError as e:
-            warn(str(e))
-            return
-        doc.recompute()
-        say("Title block: %d field(s) changed" % len(changed))
+            def work():
+                changed = tb.set_fields(page, vals)
+                if want != cur:
+                    ok_ = tb.set_template_variant(page, tol_row=(want == "iso_tol"),
+                                                  style_="ansi" if want == "ansi" else "iso")
+                    if not ok_:
+                        raise ValueError("That layout needs DrawingKit's own template (and the "
+                                         "ANSI block needs a sheet at least 210 mm wide inside "
+                                         "the frame).")
+                    tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
+                return changed
+            try:
+                total += len(run_in_transaction(doc, "DrawingKit title block", work))
+            except ValueError as e:
+                warn(str(e))
+            doc.recompute()
+            redraw_template(page)
+            if res != 2:             # OK pressed: done
+                break
+        say("Title block: %d field(s) changed" % total)
 
 
 class HoleTable:
@@ -1722,15 +1751,18 @@ class AddRevision:
             warn("Open the page (or select a view on it) first.")
             return
         pop = ui.Popover("New revision")
+        eco_f = ui.field("", 60, "ECO", "Change order number (optional)")
         desc_f = ui.field("Initial release", 200, tip="What changed")
         who_f = ui.field("", 50, "by", "Approved by")
-        pop.add_row(desc_f, who_f)
+        pop.add_row(eco_f, desc_f, who_f)
+        pop.focus_on = desc_f
         if not pop.run():
             return
-        desc, who = desc_f.text(), who_f.text()
+        desc, who, eco = desc_f.text(), who_f.text(), eco_f.text()
         doc = page.Document
         run_in_transaction(doc, "DrawingKit revision",
-                           lambda: tables.add_revision(page, desc.strip(), who.strip()))
+                           lambda: tables.add_revision(page, desc.strip(), who.strip(),
+                                                       eco=eco.strip()))
         doc.recompute()
         say("Revision added")
 

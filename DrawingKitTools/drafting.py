@@ -496,20 +496,72 @@ def _consumed(o):
 
 
 def _base_name(label):
-    return re.sub(r"[\s_-]*\d+$", "", label) or label
+    """A part's name without the number copies get: 'Pin001' (FreeCAD's
+    own), 'Bolt_2', 'Bolt 2'. Names that end in a number of their own
+    ('PRT-1001', 'SHCS 10-32 X 3-8', 'M6') are left alone."""
+    return re.sub(r"(?<=[A-Za-z])(\d{3}|[ _]\d{1,3})$", "", label) or label
 
 
 def _signature(o):
+    """What makes two parts the same item: the linked source, else a part
+    number property, else the name (any trailing number dropped: FreeCAD
+    renames a copy 'Pin001', or 'X 3-8' to 'X 3-001') and the shape."""
     s = core.shape_of(o)
     bb = s.BoundBox
     dims = sorted([round(bb.XLength, 3), round(bb.YLength, 3), round(bb.ZLength, 3)])
     src = o.getLinkedObject(True) if hasattr(o, "getLinkedObject") else o
-    return (src.Name if src is not o else _base_name(o.Label), round(s.Volume, 3), tuple(dims))
+    if src is not o:
+        key = src.Name
+    else:
+        pn = _part_number_prop(o)
+        key = ("#" + pn) if pn else (re.sub(r"[\s_-]*\d+$", "", o.Label) or o.Label)
+    return (key, round(s.Volume, 3), tuple(dims))
+
+
+PART_NO_PROPS = ("PartNumber", "Part_Number", "PartNo", "Part_No", "Number")
+DESCRIPTION_PROPS = ("Description", "PartDescription", "Part_Description")
+
+
+def _part_number_prop(obj):
+    for p in PART_NO_PROPS:
+        v = getattr(obj, p, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def part_number(obj, name=None):
+    """A part number property if the part has one, else its name."""
+    return _part_number_prop(obj) or name or _base_name(obj.Label)
+
+
+def part_description(obj):
+    """A description property, else FreeCAD's description (Label2), else ''."""
+    for p in DESCRIPTION_PROPS:
+        v = getattr(obj, p, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    v = getattr(obj, "Label2", "") or ""
+    return v.strip()
+
+
+def bom_columns(asme=None):
+    """(headers, widths, keys) of the parts list: ASME Y14.34 order
+    ITEM | PART NO. | DESCRIPTION | MATERIAL | QTY, ISO 7573 order with the
+    quantity second."""
+    from . import standards
+    asme = standards.is_asme() if asme is None else asme
+    if asme:
+        return (["ITEM", "PART NO.", "DESCRIPTION", "MATERIAL", "QTY"],
+                [12.0, 32.0, 58.0, 38.0, 12.0], ["item", "part_no", "description", "material", "qty"])
+    return (["ITEM", "QTY", "PART NO.", "DESCRIPTION", "MATERIAL"],
+            [12.0, 12.0, 32.0, 58.0, 38.0], ["item", "qty", "part_no", "description", "material"])
 
 
 def bom_items(objs):
-    """[{'item', 'name', 'qty', 'material', 'objects'}] - identical parts
-    (same source or same name and shape) counted together."""
+    """[{'item', 'name', 'part_no', 'description', 'qty', 'material',
+    'objects'}] - identical parts (same source or same name and shape)
+    counted together."""
     groups = {}
     order = []
     for o in _leaf_parts(objs):
@@ -523,20 +575,22 @@ def bom_items(objs):
         objs_ = groups[key]
         first = objs_[0]
         src = first.getLinkedObject(True) if hasattr(first, "getLinkedObject") else first
-        out.append({"item": n + 1, "name": _base_name(src.Label), "qty": len(objs_),
+        name = _base_name(src.Label)
+        out.append({"item": n + 1, "name": name, "part_no": part_number(src, name),
+                    "description": part_description(src), "qty": len(objs_),
                     "material": core.part_material(src) or "", "objects": objs_})
     return out
 
 
-def add_parts_list(page, view, place=None):
+def add_parts_list(page, view, place=None, asme=None):
     """Parts list table above the title block (or above a hole table there)."""
     from . import tables
     items = bom_items(view.Source)
     if not items:
         raise ValueError("No solid parts found in this view")
-    p = {"title": "PARTS LIST", "headers": ["ITEM", "QTY", "PART", "MATERIAL"],
-         "widths": [12.0, 12.0, 50.0, 36.0],
-         "rows": [[str(i["item"]), str(i["qty"]), i["name"], i["material"]] for i in items],
+    headers, widths, keys = bom_columns(asme)
+    p = {"title": "PARTS LIST", "headers": headers, "widths": widths,
+         "rows": [[str(i[k]) for k in keys] for i in items],
          "editable": True, "view": view.Name, "tsize": 3.5}
     W, Ht = tables.table_size(p)
     if place is None:

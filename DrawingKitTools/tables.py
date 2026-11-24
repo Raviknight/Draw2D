@@ -199,8 +199,19 @@ def add_hole_table(page, view, place=None):
 # ---------------------------------------------------------------------------
 # Revision table
 # ---------------------------------------------------------------------------
-REV_HEADERS = ["REV", "DESCRIPTION", "DATE", "APPROVED"]
-REV_WIDTHS = [12.0, 70.0, 24.0, 24.0]
+REV_HEADERS = ["REV", "ECO", "DESCRIPTION", "DATE", "APPROVED"]
+REV_WIDTHS = [12.0, 20.0, 70.0, 24.0, 24.0]
+
+
+def _add_eco_column(p):
+    """Tables made before the ECO column: put it in after REV."""
+    if "ECO" in p["headers"]:
+        return p
+    p["headers"].insert(1, "ECO")
+    p["widths"].insert(1, 20.0)
+    for row in p["rows"]:
+        row.insert(1, "")
+    return p
 
 
 def revision_table(page):
@@ -215,10 +226,10 @@ def next_revision(rows):
     return core.next_free_letter(used)
 
 
-def add_revision(page, description, approved="", date=None):
+def add_revision(page, description, approved="", date=None, eco=""):
     """Add a row (next letter) to the page's revision table, making the
-    table if needed, and put the letter in the title block. Returns the
-    table."""
+    table if needed, and put the letter in the title block. ``eco``: the
+    change order number. Returns the table."""
     date = date or datetime.date.today().isoformat()
     table = revision_table(page)
     if table is None:
@@ -231,8 +242,9 @@ def add_revision(page, description, approved="", date=None):
         for i, row in enumerate(p["rows"]):
             for j in range(len(row)):
                 row[j] = vals.get("r%dc%d" % (i, j), row[j])
+        _add_eco_column(p)
     rev = next_revision(p["rows"])
-    p["rows"].append([rev, description, date, approved])
+    p["rows"].append([rev, eco, description, date, approved])
     W, Ht = table_size(p)
     frame, _ = core.drawing_area(page.Template.Template, *core.page_size(page))
     place = (frame[2] - W / 2.0, frame[3] - Ht / 2.0)   # hangs from the top-right corner

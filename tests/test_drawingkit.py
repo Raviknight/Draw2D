@@ -1234,6 +1234,28 @@ class TestTitleAndTables(DocTest):
         self.assertEqual(dict(page.Template.EditableTexts)["revision_index"], "B")
         self.assertEqual(len([v for v in page.Views if getattr(v, "DrawingKitAnnot", "") == "revtable"]), 1)
 
+    def test_revision_eco_column_and_old_tables(self):
+        import json
+        from DrawingKitTools import tables, annot
+        page = core.create_page(self.doc, "A3", "Landscape")
+        t = tables.add_revision(page, "Initial release", "TH", "2026-03-02", eco="26-0110")
+        p = json.loads(t.DrawingKitParams)
+        self.assertEqual(p["headers"], ["REV", "ECO", "DESCRIPTION", "DATE", "APPROVED"])
+        self.assertEqual(p["rows"][0], ["A", "26-0110", "Initial release", "2026-03-02", "TH"])
+        self.assertIn(">26-0110<", t.Symbol)
+        # a table made before the ECO column gets one
+        p = {"title": "", "headers": ["REV", "DESCRIPTION", "DATE", "APPROVED"],
+             "rows": [["A", "First", "2026-01-01", "RS"]], "widths": [12.0, 70.0, 24.0, 24.0],
+             "editable": True, "tsize": 3.5}
+        setattr(t, annot.PARAMS, json.dumps(p))
+        t.EditableTexts = []
+        annot.render(t)
+        t = tables.add_revision(page, "Second", "RS", "2026-02-01", eco="E-2")
+        p = json.loads(t.DrawingKitParams)
+        self.assertEqual(p["headers"][1], "ECO")
+        self.assertEqual(p["rows"], [["A", "", "First", "2026-01-01", "RS"],
+                                     ["B", "E-2", "Second", "2026-02-01", "RS"]])
+
 
 class TestEditDimension(DocTest):
     def setUp(self):
@@ -1556,6 +1578,28 @@ class TestPartsList(DocTest):
         self.assertIn("PARTS LIST", table.Symbol)
         self.assertIn(">Pin<", table.Symbol)
         self.assertEqual(table.DrawingKitAnnot, "bom")
+
+    def test_copy_numbers_dropped_but_part_numbers_kept(self):
+        b = self.dr._base_name
+        self.assertEqual([b("Pin001"), b("Bolt_2"), b("Bolt 12")], ["Pin", "Bolt", "Bolt"])
+        self.assertEqual([b("PRT-1001"), b("SHCS 10-32 X 3-8"), b("M6"), b("Rail")],
+                         ["PRT-1001", "SHCS 10-32 X 3-8", "M6", "Rail"])
+
+    def test_parts_list_part_number_and_description(self):
+        import json
+        base = [o for o in self.dr._leaf_parts([self.asm]) if o.Label.startswith("Base")][0]
+        base.addProperty("App::PropertyString", "PartNumber", "Part")
+        base.PartNumber = "PRT-1001"
+        base.Label2 = "GUIDE BODY"
+        table, items = self.dr.add_parts_list(self.page, self.view, asme=True)
+        p = json.loads(table.DrawingKitParams)
+        self.assertEqual(p["headers"], ["ITEM", "PART NO.", "DESCRIPTION", "MATERIAL", "QTY"])
+        row = [r for r in p["rows"] if r[1] == "PRT-1001"][0]
+        self.assertEqual((row[2], row[4]), ("GUIDE BODY", "1"))
+        pin = [r for r in p["rows"] if r[1] == "Pin"][0]
+        self.assertEqual(pin[4], "2")
+        table2, _ = self.dr.add_parts_list(self.page, self.view, asme=False)
+        self.assertEqual(json.loads(table2.DrawingKitParams)["headers"][:2], ["ITEM", "QTY"])
 
     def test_part_under_a_point_and_balloons(self):
         from DrawingKitTools import core as c
