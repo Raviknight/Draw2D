@@ -132,13 +132,25 @@ def _annotated_boxes(page):
     return [tuple(b) for b in boxes.values()]
 
 
-def free_table_spot(page, W, Ht, gap=3.0):
+def free_table_spot(page, W, Ht, gap=3.0, exclude=None, strict=False):
     """Centre for a W x Ht table: above the title block if that is free,
     otherwise the first free corner of the drawing area (views, their
-    dimensions and callouts, and other tables are kept clear)."""
+    dimensions and callouts, and other tables are kept clear). ``exclude``:
+    a table being moved (not an obstacle to itself). With ``strict``, None
+    when no spot is free (else the first candidate)."""
     from . import clearance
     frame, title = core.drawing_area(page.Template.Template, *core.page_size(page))
-    obs = _annotated_boxes(page) + clearance.obstacles(page, views=False) + core.table_boxes(page)
+    ex = [exclude] if exclude is not None else []
+    mine = core.table_boxes(page)
+    if exclude is not None:
+        try:
+            w, h = table_size(annot._params(exclude))
+            x, y = float(exclude.X), float(exclude.Y)
+            own = (x - w / 2 - 3.0, y - h / 2 - 3.0, x + w / 2 + 3.0, y + h / 2 + 3.0)
+            mine = [b for b in mine if any(abs(p - q) > 1e-6 for p, q in zip(b, own))]
+        except Exception:
+            pass
+    obs = _annotated_boxes(page) + clearance.obstacles(page, exclude=ex, views=False) + mine
     x0, y0, x1, y1 = frame
     cands = []
     if title:
@@ -153,7 +165,7 @@ def free_table_spot(page, W, Ht, gap=3.0):
             continue
         if not clearance._hits(box, obs, gap=1.0):
             return (cx, cy)
-    return cands[0]
+    return None if strict else cands[0]
 
 
 def add_hole_table(page, view, place=None):

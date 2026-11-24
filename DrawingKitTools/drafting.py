@@ -65,6 +65,54 @@ def _band_free(band, obs, gap=1.0):
                    band[1] < o[3] + gap and o[1] - gap < band[3] for o in obs)
 
 
+def view_callouts(page, view):
+    """The leader (diameter / radius) dimensions on a view: hole callouts."""
+    out = []
+    for d in page.Views:
+        try:
+            if d.isDerivedFrom("TechDraw::DrawViewDimension") and d.References2D and \
+                    core.same(d.References2D[0][0], view) and d.Type in ("Diameter", "Radius"):
+                out.append(d)
+        except Exception:
+            continue
+    return out
+
+
+def push_callouts_out(page, view, axis, lo, hi, outer, gap=2.0):
+    """Dimensions go next to the view, callouts outside them: move each
+    callout text of ``view`` that sits between the view and ``outer`` (the
+    far side of a row of dimensions: above the view for axis 'x', right of
+    it for 'y'), within ``lo``-``hi`` along the edge, out past ``outer``
+    and clear of other texts. Returns the callouts moved."""
+    from . import clearance
+    x0, y0, x1, y1 = core.view_box(view)
+    edge = y1 if axis == "x" else x1
+    moved = []
+    calls = view_callouts(page, view)
+    for d in sorted(calls, key=lambda d: float(d.X) if axis == "x" else float(d.Y)):
+        b = clearance.dimension_label_box(d)
+        if b is None:
+            continue
+        a0, a1 = (b[0], b[2]) if axis == "x" else (b[1], b[3])
+        c0, c1 = (b[1], b[3]) if axis == "x" else (b[0], b[2])
+        if a1 < lo or a0 > hi or c1 < edge or c0 > outer + gap:
+            continue
+        shift = outer + gap - c0
+        obs = [o for o in clearance.obstacles(page, exclude=[d], views=True)]
+        for _ in range(12):
+            nb = (b[0], b[1] + shift, b[2], b[3] + shift) if axis == "x" else \
+                (b[0] + shift, b[1], b[2] + shift, b[3])
+            if not clearance._hits(nb, obs, gap=1.0):
+                break
+            shift += STEP
+        if axis == "x":
+            d.Y = float(d.Y) + shift
+        else:
+            d.X = float(d.X) + shift
+        moved.append(d)
+    return moved
+
+
 def free_row(page, view, axis, lo, hi, depth, start=0, exclude=(), most=12):
     """First row number (from ``start``) whose strip beside the view is
     clear: rows run above the view for axis 'x', right of it for 'y'.
@@ -103,7 +151,11 @@ def add_baseline(page, view, origin, features, axis="x", chain=False):
     dims = []
     # rows start where they miss callouts, ordinates and other views
     span = sorted(c[i] * s + (cx if axis == "x" else cy) for c in coords)
-    k0 = free_row(page, view, axis, span[0] - 3.0, span[-1] + 3.0, 5.0)
+    callouts = view_callouts(page, view)   # these move out of the way instead
+    k0 = free_row(page, view, axis, span[0] - 3.0, span[-1] + 3.0, 5.0, exclude=callouts)
+    last = k0 + (0 if chain else len(coords) - 2)
+    outer = (y1 if axis == "x" else x1) + ROW + last * STEP + 5.0
+    push_callouts_out(page, view, axis, span[0] - 3.0, span[-1] + 3.0, outer)
     for n in range(1, len(coords)):
         a = 0 if not chain else n - 1
         dim = doc.addObject("TechDraw::DrawViewDimension", "Dimension")
@@ -141,8 +193,11 @@ def add_ordinate(page, view, origin, features, axis="x"):
     # row position, kept as the annotation's offset (drag it to move the row)
     s = core.view_scale(view)
     alongs = [annot.view_point(view, q)[0 if axis == "x" else 1] for q in pts + [list(o)]]
-    k = free_row(page, view, axis, min(alongs) - 3.0, max(alongs) + 3.0, 12.0)
+    callouts = view_callouts(page, view)   # these move out of the way instead
+    k = free_row(page, view, axis, min(alongs) - 3.0, max(alongs) + 3.0, 12.0, exclude=callouts)
     off = (0.0, (y1 - oy) + ROW + k * STEP) if axis == "x" else ((x1 - ox) + ROW + k * STEP, 0.0)
+    outer = (y1 if axis == "x" else x1) + ROW + k * STEP + 12.0
+    push_callouts_out(page, view, axis, min(alongs) - 3.0, max(alongs) + 3.0, outer)
     p = {"axis": axis, "pts": pts, "radii": radii, "tsize": annot.default_size()}
     return annot._new(page, "ordinate", "Ordinate %s" % axis.upper(), p, "view", view, o, off)
 

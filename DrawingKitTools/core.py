@@ -281,43 +281,94 @@ def page_regions(page):
     return empty_rects(frame, ([title] if title else []) + blockers)
 
 
+def annotation_margins(page, extra=2.0):
+    """(left, bottom, right, top) paper mm by which the views' dimensions,
+    callouts and symbols stick out past the views themselves."""
+    from . import tables
+    try:
+        views = [view_box(v) for v in part_views(page)]
+        ann = tables._annotated_boxes(page)
+    except Exception:
+        return None
+    if not views or not ann:
+        return None
+    vx0, vy0 = min(b[0] for b in views), min(b[1] for b in views)
+    vx1, vy1 = max(b[2] for b in views), max(b[3] for b in views)
+    ax0, ay0 = min(b[0] for b in ann), min(b[1] for b in ann)
+    ax1, ay1 = max(b[2] for b in ann), max(b[3] for b in ann)
+    m = (vx0 - ax0, vy0 - ay0, ax1 - vx1, ay1 - vy1)
+    return tuple(max(0.0, x) + (extra if x > 1e-6 else 0.0) for x in m)
+
+
+def annotation_clashes(page, tol=0.5):
+    """True if a view, or the dimensions and callouts round it, sits on a
+    DrawingKit table or runs off the drawing area."""
+    from . import tables
+    boxes = table_boxes(page, pad=0.0)
+    frame, _t = drawing_area(page.Template.Template, *page_size(page))
+    for vb in tables._annotated_boxes(page):
+        if any(vb[0] < b[2] and b[0] < vb[2] and vb[1] < b[3] and b[1] < vb[3] for b in boxes):
+            return True
+        if (vb[0] < frame[0] - tol or vb[1] < frame[1] - tol or
+                vb[2] > frame[2] + tol or vb[3] > frame[3] + tol):
+            return True
+    return False
+
+
+def move_tables_clear(page):
+    """Move each DrawingKit table that sits on a view's dimensions or
+    callouts to the first free spot. Returns True if one moved."""
+    from . import annot, tables
+    moved = False
+    ann = tables._annotated_boxes(page)
+    for v in page.Views:
+        if getattr(v, "DrawingKitAnnot", "") not in ("bom", "holetable", "revtable"):
+            continue
+        try:
+            w, h = tables.table_size(annot._params(v))
+        except Exception:
+            continue
+        x, y = float(v.X), float(v.Y)
+        box = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+        if not any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in ann):
+            continue
+        spot = tables.free_table_spot(page, w, h, exclude=v, strict=True)
+        if spot is None:
+            continue
+        setattr(v, annot.ANCHOR, App.Vector(spot[0], spot[1], 0))
+        v.X, v.Y = spot
+        annot.render(v)
+        moved = True
+    return moved
+
+
 def make_room_for_tables(page):
     """If a view, or the dimensions and callouts around it, sits on a
-    DrawingKit table or runs off the drawing area, fit the page again (the
-    fit keeps views off tables), going down a scale while the annotations
-    still don't fit. Returns True if it re-fitted."""
-    boxes = table_boxes(page, pad=0.0)
+    DrawingKit table or runs off the drawing area: move the table to a free
+    spot, and fit the page again keeping room round the views for their
+    dimensions and callouts (going down a standard scale only when that
+    room can't be found at this one). Returns True if anything changed."""
     group, _ = page_content(page)
     if group is None:
         return False
     try:
-        from . import tables
-        frame, _t = drawing_area(page.Template.Template, *page_size(page))
+        if not annotation_clashes(page):
+            return False
     except Exception:
         return False
-
-    def clashes(annotated):
-        for vb in (tables._annotated_boxes(page) if annotated else
-                   [view_box(v) for v in part_views(page)]):
-            if any(vb[0] < b[2] and b[0] < vb[2] and vb[1] < b[3] and b[1] < vb[3] for b in boxes):
+    scale0 = view_scale(group)
+    smaller = [scale_value(r) for r in STANDARD_SCALES if scale_value(r) < scale0 - 1e-12]
+    for max_s in [scale0] + smaller[:2]:
+        for _ in range(3):
+            move_tables_clear(page)
+            if not annotation_clashes(page):
                 return True
-            if annotated and (vb[0] < frame[0] - 0.5 or vb[1] < frame[1] - 0.5 or
-                              vb[2] > frame[2] + 0.5 or vb[3] > frame[3] + 0.5):
+            fit_page(page, max_scale=max_s, pad=annotation_margins(page))
+            if not annotation_clashes(page):
                 return True
-        return False
-
-    if not clashes(False) and not clashes(True):
-        return False
-    scale = fit_page(page)
-    if clashes(True):
-        # one scale down, kept only if that clears the dimensions and
-        # callouts (they sit at fixed distances on paper, so going further
-        # down rarely helps)
-        smaller = [scale_value(r) for r in STANDARD_SCALES if scale_value(r) < scale - 1e-12]
-        if smaller:
-            fit_page(page, max_scale=max(smaller))
-            if clashes(True):
-                fit_page(page, max_scale=scale)
+    # nothing clears it: best effort at the start scale
+    fit_page(page, max_scale=scale0, pad=annotation_margins(page))
+    move_tables_clear(page)
     return True
 
 
@@ -610,18 +661,28 @@ def _arrangements(gw, gh, extras, s):
     yield max(gw, rw), gh + GAP + rh, "below"
 
 
-def plan_page(page, group, extras_views=(), layout=None, max_scale=None, scales=None):
+def _shrink(regions, pad):
+    """Regions less a (left, bottom, right, top) margin in paper mm."""
+    if not pad:
+        return regions
+    l, b, r, t = pad
+    out = [(x0 + l, y0 + b, x1 - r, y1 - t) for x0, y0, x1, y1 in regions]
+    return [g for g in out if g[2] > g[0] and g[3] > g[1]] or regions
+
+
+def plan_page(page, group, extras_views=(), layout=None, max_scale=None, scales=None, pad=None):
     """Pick the scale and positions for the group and the extra views.
 
     Returns (scale, {view_name: (x, y)}) where the group entry is the
     position of its anchor (Front view). ``max_scale`` skips larger scales.
     ``scales`` (largest first) replaces the standard ones; if none of them
-    fits, the last is used.
+    fits, the last is used. ``pad`` (left, bottom, right, top, paper mm) is
+    room kept round the views for their dimensions and callouts.
     """
     layout = layout or group_layout(group)
     extras = [(v, extra_view_size(v)) for v in extras_views]
     sizes = [sz for _, sz in extras]
-    regions = page_regions(page)
+    regions = _shrink(page_regions(page), pad)
     tried = list(scales) if scales else [scale_value(r) for r in STANDARD_SCALES]
 
     best = None
@@ -699,20 +760,20 @@ def fits_at(page, group, extras_views, s, layout=None):
     return False
 
 
-def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True):
+def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True, pad=None):
     """Re-pick the page scale so the main group and extra views fit
     (no larger than ``max_scale``), or lay them out at the ``exact`` scale
     given. ``title_text`` goes in the title block's scale field instead of
     the ratio (e.g. 'NTS'). ``draw=False`` only lays out (a trial: TechDraw
     is not asked to draw, so no drawing at a passing scale can land after
-    the final one). Returns scale."""
+    the final one). ``pad``: see plan_page. Returns scale."""
     group, extras = page_content(page)
     if group is None:
         raise ValueError("This page has no projection group to fit")
     regions = page_regions(page)
     for _ in range(len(STANDARD_SCALES)):
         scale, positions = plan_page(page, group, extras, max_scale=max_scale,
-                                     scales=[exact] if exact else None)
+                                     scales=[exact] if exact else None, pad=pad)
         apply_plan(page, group, extras, scale, positions)
         if title_text:
             set_title_block_scale(page, scale, title_text)
@@ -779,9 +840,17 @@ def set_detail_scale(det, scale):
             det.Caption = standards.detail_caption(det.Reference, scale_text(scale))
     except Exception:
         pass
+    page = None
+    try:
+        page = det.findParentPage()
+    except Exception:
+        pass
+    anchors = dimension_anchors(page, [det]) if page is not None else {}
     det.ScaleType = "Custom"
     det.Scale = scale
     det.touch()
+    if page is not None:
+        follow_scale(page, anchors)
 
 
 def step_page_scale(page, step):
@@ -1157,12 +1226,67 @@ def stale_views(views, tolerance=0.05):
     return stale
 
 
+def dimension_anchors(page, views=None):
+    """{view name: (scale, left, right, below, above)}: each view's scale and
+    paper distances from its centre to its edges, taken before a scale
+    change so its dimensions can follow (see follow_scale)."""
+    info = {}
+    for v in (views if views is not None else part_views(page)):
+        try:
+            cx, cy = view_center(v)
+            b = view_box(v)
+            info[v.Name] = (view_scale(v), max(cx - b[0], 1e-3), max(b[2] - cx, 1e-3),
+                            max(cy - b[1], 1e-3), max(b[3] - cy, 1e-3))
+        except Exception:
+            pass
+    return info
+
+
+def _remap(p, lo, hi, k):
+    """Offset p from a view's centre after the view is scaled by k: past an
+    edge it keeps its paper distance from that edge, over the view it
+    scales with it."""
+    if p > hi:
+        return hi * k + (p - hi)
+    if p < -lo:
+        return -lo * k + (p + lo)
+    return p * k
+
+
+def follow_scale(page, info):
+    """Move the TechDraw dimensions of views whose scale changed (their
+    text positions are paper mm from the view's centre, so they would stay
+    put while the view shrinks or grows)."""
+    for d in page.Views:
+        try:
+            if not d.isDerivedFrom("TechDraw::DrawViewDimension") or not d.References2D:
+                continue
+            v = d.References2D[0][0]
+            if v is None or v.Name not in info:
+                continue
+            s0, l, r, b, t = info[v.Name]
+            k = view_scale(v) / s0
+            if abs(k - 1.0) < 1e-9:
+                continue
+            d.X = _remap(float(d.X), l, r, k)
+            d.Y = _remap(float(d.Y), b, t, k)
+        except Exception:
+            continue
+
+
 def apply_plan(page, group, extras, scale, positions):
     """Set the scale and positions, then make every view redraw.
 
     In the GUI TechDraw draws each view as soon as it exists, so views made
     before the scale was known keep their old drawing unless touched.
     """
+    anchors = dimension_anchors(page, [v for v in part_views(page)
+                                       if not v.isDerivedFrom("TechDraw::DrawViewDetail")])
+    _apply_plan(page, group, extras, scale, positions)
+    follow_scale(page, anchors)
+
+
+def _apply_plan(page, group, extras, scale, positions):
     page.Scale = scale
     set_title_block_scale(page, scale)
     for view in [group] + list(extras):

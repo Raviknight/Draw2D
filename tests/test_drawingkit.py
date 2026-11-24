@@ -1433,6 +1433,43 @@ class TestDrafting(DocTest):
         self.annot.refresh(self.annot.attached_to(self.g))
         self.assertAlmostEqual(float(o.X) - x, 10.0, places=6)
 
+    def test_dimension_keeps_its_gap_when_the_scale_changes(self):
+        left = self.find("line", (-40, 0))
+        hole = self.find("circle", (-15, 0))
+        dim = self.dr.add_baseline(self.page, self.v, left, [hole], "x")[0]
+        top = core.view_box(self.v)[3]
+        cy = core.view_center(self.v)[1]
+        gap = cy + float(dim.Y) - top          # text above the view's top edge
+        mid = float(dim.X)                     # over the view: scales with it
+        s0 = core.view_scale(self.v)
+        core.step_page_scale(self.page, -1)
+        k = core.view_scale(self.v) / s0
+        top = core.view_box(self.v)[3]
+        cy = core.view_center(self.v)[1]
+        self.assertAlmostEqual(cy + float(dim.Y) - top, gap, places=6)
+        self.assertAlmostEqual(float(dim.X), mid * k, places=6)
+
+    def test_remap(self):
+        self.assertAlmostEqual(core._remap(30.0, 20.0, 20.0, 0.5), 20.0)   # 10 past the edge
+        self.assertAlmostEqual(core._remap(-30.0, 20.0, 20.0, 0.5), -20.0)
+        self.assertAlmostEqual(core._remap(8.0, 20.0, 20.0, 0.5), 4.0)
+
+    def test_callouts_move_outside_the_dimension_rows(self):
+        from DrawingKitTools import clearance
+        circ = self.find("circle", (-15, 0))
+        dim = self.doc.addObject("TechDraw::DrawViewDimension", "Dimension")
+        dim.Type = "Diameter"
+        dim.References2D = [(self.v, ["Edge%d" % circ.index])]
+        self.page.addView(dim)
+        top = core.view_box(self.v)[3]
+        cy = core.view_center(self.v)[1]
+        dim.X, dim.Y = -15.0 * core.view_scale(self.v), top - cy + 9.0   # where a row goes
+        left = self.find("line", (-40, 0))
+        holes = [circ, self.find("circle", (25, 0)), self.find("line", (40, 0))]
+        o = self.dr.add_ordinate(self.page, self.v, left, holes, "x")
+        row = clearance.symbol_box(o)[3]
+        self.assertGreater(clearance.dimension_label_box(dim)[1], row - 1e-6)
+
     def test_ordinate_spreads_close_values(self):
         left = self.find("line", (-40, 0))
         o = self.dr.add_ordinate(self.page, self.v, left, [self.find("line", (-40, 0))], "y")
@@ -1761,6 +1798,27 @@ class TestThreads(DocTest):
         self.doc.recompute()
         thru = [d for d in made if "THRU" in d.FormatSpec][0]
         self.assertTrue(thru.Arbitrary)
+
+    def test_make_room_keeps_annotations_on_the_sheet_and_off_tables(self):
+        from DrawingKitTools import holes, tables
+        body = threaded_plate(self.doc)
+        page = core.create_page(self.doc, "A4", "Landscape")
+        core.add_standard_views(page, [body])
+        self.doc.recompute()
+        view = [v for v in core.part_views(page) if holes.holes_seen_end_on(v)][0]
+        made = holes.add_callouts(page, view)
+        cy = core.view_center(view)[1]
+        top = core.view_box(view)[3]
+        for d in made:                       # push the callouts off the top of the sheet
+            d.Y = top - cy + 200.0
+        tables.add_hole_table(page, view)
+        self.doc.recompute()
+        self.assertTrue(core.annotation_clashes(page))
+        core.make_room_for_tables(page)
+        for d in made:
+            d.Y = min(float(d.Y), top - cy + 20.0)   # back near the view, as placed
+        core.make_room_for_tables(page)
+        self.assertFalse(core.annotation_clashes(page))
 
     def test_designations(self):
         from DrawingKitTools import holes

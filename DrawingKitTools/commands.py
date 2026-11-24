@@ -348,8 +348,11 @@ class FitToPage:
             warn("Select the page (or a view on it) first.")
             return
         try:
-            scale = run_in_transaction(doc, "DrawingKit fit to page",
-                                       lambda: core.fit_page(page))
+            def work():
+                core.fit_page(page)
+                core.make_room_for_tables(page)   # room for dimensions and callouts
+                return core.view_scale(core.page_content(page)[0])
+            scale = run_in_transaction(doc, "DrawingKit fit to page", work)
         except ValueError as e:
             warn(str(e))
             return
