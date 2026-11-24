@@ -47,6 +47,36 @@ CELLS = [
     (3, 140, 180, "Sheet", "sheet_number", "1 / 1", None, VALUE_FONT, "middle"),
 ]
 PROJECTION_CELL = (0, 140, 180)
+# optional top row: units, general tolerances by decimal places, angles, finish
+TOL_CELLS = [
+    (0, 0, 30, "Dimensions in", "units", "", None, VALUE_FONT, "start"),
+    (0, 30, 55, "Tol. X.X", "tol_1", "", None, VALUE_FONT, "start"),
+    (0, 55, 80, "Tol. X.XX", "tol_2", "", None, VALUE_FONT, "start"),
+    (0, 80, 110, "Tol. X.XXX", "tol_3", "", None, VALUE_FONT, "start"),
+    (0, 110, 135, "Angles", "tol_angle", "", None, VALUE_FONT, "start"),
+    (0, 135, 180, "Finish", "finish", "", None, VALUE_FONT, "start"),
+]
+
+
+def cells(tol_row=False):
+    """Title block cells, rows from the top (the tolerance row first)."""
+    if not tol_row:
+        return list(CELLS)
+    return list(TOL_CELLS) + [(c[0] + 1,) + tuple(c[1:]) for c in CELLS]
+
+
+def parse_name(path):
+    """(size, orientation, first_angle) of a DrawingKit template file, or None."""
+    import re
+    m = re.match(r"DrawingKit_(.+)_(Landscape|Portrait)_(1st|3rd)(_tol|_ansi)?\.svg$",
+                 os.path.basename(path or ""))
+    if not m:
+        return None
+    size = m.group(1)
+    for s in SIZES:
+        if s.replace(" ", "") == size:
+            size = s
+    return size, m.group(2), m.group(3) == "1st"
 
 
 def page_size(size, orientation):
@@ -121,9 +151,134 @@ def projection_symbol(cx, cy, first_angle, h=7.0):
         % "".join(parts)
 
 
-def make_svg(size, orientation, first_angle=True):
-    """SVG text of a DrawingKit template."""
+# ---------------------------------------------------------------------------
+# ANSI (ASME Y14.1 style) title block: a tolerance block on the left, the
+# company / title / numbers block on the right
+# ---------------------------------------------------------------------------
+ANSI_TOL_W = 66.0
+ANSI_MAIN_W = 134.0
+ANSI_W = ANSI_TOL_W + ANSI_MAIN_W
+ANSI_ROWS = [12.0, 12.0, 9.0, 9.0, 9.0]          # company, title, numbers, material, people
+ANSI_H = sum(ANSI_ROWS)
+ANSI_MIN_FRAME_W = ANSI_W + 10.0                 # narrower sheets keep the ISO block
+
+# main block cells: (row, x0, x1, label, field, default, autofill, font, align)
+ANSI_CELLS = [
+    (2, 0, 70, "DRAWING NO.", "drawing_number", "", None, 4.0, "start"),
+    (2, 70, 90, "REV", "revision_index", "A", None, 4.0, "middle"),
+    (2, 90, 134, "SHEET", "sheet_number", "1 OF 1", None, 3.5, "middle"),
+    (3, 0, 70, "MATERIAL", "part_material", "", None, 3.0, "start"),
+    (3, 70, 134, "FINISH", "finish", "", None, 3.0, "start"),
+    (4, 0, 27, "DRAWN", "creator", "", "author", 2.5, "start"),
+    (4, 27, 54, "CHECKED", "checked_by", "", None, 2.5, "start"),
+    (4, 54, 81, "APPROVED", "approval_person", "", None, 2.5, "start"),
+    (4, 81, 108, "DATE", "date_of_issue", "", "date", 2.5, "start"),
+    (4, 108, 134, "SCALE", "scale", "1 : 1", "scale", 2.5, "middle"),
+]
+# tolerance block lines: (static text, field or None, default); fields are
+# shared with the ISO tolerance row so one set of defaults serves both
+# each line: [(x offset, static text, field or None, default), ...]
+ANSI_TOL_LINES = [
+    [(0, "UNLESS OTHERWISE SPECIFIED:", None, "")],
+    [(0, "DIMENSIONS ARE IN", "units", "INCHES")],
+    [(0, "TOLERANCES:", None, "")],
+    [(2, ".X", "tol_1", ""), (32, ".XX", "tol_2", "")],
+    [(2, ".XXX", "tol_3", ""), (32, ".XXXX", "tol_4", "")],
+    [(2, "ANGLES", "tol_angle", "")],
+    [(0, "INTERPRET PER", "general_tolerances", "ASME Y14.5-2018")],
+    [(0, "", "surface_note", "")],
+    [(0, "", "edge_note", "")],
+]
+ANSI_FIELDS = (["legal_owner_1", "company_address", "title", "title_2", "sheet_size"]
+               + [c[4] for c in ANSI_CELLS]
+               + [f for line in ANSI_TOL_LINES for _, _, f, _ in line if f])
+
+
+def sheet_letter(size):
+    """'C' for ANSI C, 'A3' for A3."""
+    return size.replace("ANSI ", "")
+
+
+def _ansi_block(a, fx1, fy1, size, first_angle):
+    """Write the ANSI title block, its bottom-right corner on (fx1, fy1)."""
+    x0, y0 = fx1 - ANSI_W, fy1 - ANSI_H
+    mx = x0 + ANSI_TOL_W                     # main block's left edge
+    ys = [y0]
+    for h in ANSI_ROWS:
+        ys.append(ys[-1] + h)
+    ed = '<text x="%g" y="%g" freecad:editable="%s"%s style="font-size:%gpx;text-anchor:%s%s">' \
+         '<tspan>%s</tspan></text>'
+
+    def edit(x, y, name, default, font, anchor="start", auto=None, bold=False):
+        a(ed % (x, y, name, ' freecad:autofill="%s"' % auto if auto else "", font, anchor,
+                ";font-weight:bold" if bold else "", _esc(default)))
+
+    a('<g id="title_block" style="fill:none;stroke:#000000;stroke-linecap:round;'
+      'stroke-linejoin:round;stroke-width:0.35">')
+    a('<rect id="title_block_frame" x="%g" y="%g" width="%g" height="%g" '
+      'style="stroke-width:0.7"/>' % (x0, y0, ANSI_W, ANSI_H))
+    lines = ["M %g,%g V %g" % (mx, y0, fy1)]
+    for y in ys[1:-1]:
+        lines.append("M %g,%g H %g" % (mx, y, fx1))
+    for row, c0, *_ in ANSI_CELLS:
+        if c0 > 0:
+            lines.append("M %g,%g V %g" % (mx + c0, ys[row], ys[row + 1]))
+    lines.append("M %g,%g V %g" % (mx + 70, ys[3], ys[4]))
+    # tolerance block: notes above, projection symbol and sheet size below
+    yb = fy1 - 14.0
+    lines.append("M %g,%g H %g" % (x0, yb, mx))
+    lines.append("M %g,%g V %g" % (mx - 18.0, yb, fy1))
+    a('<path d="%s"/>' % " ".join(lines))
+    a('</g>')
+    a('<g id="title_block_labels" style="font-size:1.8px;font-family:osifont;'
+      'fill:#000000;stroke:none">')
+    a('<text x="%g" y="%g">TITLE</text>' % (mx + 1.0, ys[1] + 2.4))
+    for row, c0, c1, label, *_ in ANSI_CELLS:
+        a('<text x="%g" y="%g">%s</text>' % (mx + c0 + 1.0, ys[row] + 2.4, _esc(label)))
+    a('<text x="%g" y="%g">SIZE</text>' % (mx - 17.0, yb + 2.4))
+    a('<text x="%g" y="%g" style="text-anchor:middle">%s ANGLE PROJECTION</text>'
+      % (x0 + (ANSI_TOL_W - 18.0) / 2.0, fy1 - 1.2, "FIRST" if first_angle else "THIRD"))
+    a('</g>')
+    a('<g id="title_block_data_fields" style="font-family:osifont;fill:#000000;stroke:none">')
+    cx = mx + ANSI_MAIN_W / 2.0
+    edit(cx, ys[0] + 6.2, "legal_owner_1", "", 4.5, "middle", "organization", bold=True)
+    edit(cx, ys[0] + 10.3, "company_address", "", 2.2, "middle")
+    edit(cx, ys[1] + 6.4, "title", "", 4.5, "middle", "title", bold=True)
+    edit(cx, ys[1] + 10.6, "title_2", "", 3.2, "middle")
+    for row, c0, c1, label, name, default, auto, font, align in ANSI_CELLS:
+        x = mx + (c0 + 1.5 if align == "start" else (c0 + c1) / 2.0)
+        edit(x, ys[row] + 7.4, name, default, font, align, auto,
+             bold=name in ("drawing_number", "revision_index"))
+    edit(mx - 9.0, fy1 - 3.0, "sheet_size", sheet_letter(size), 6.0, "middle", bold=True)
+    # tolerance lines
+    ty = y0 + 3.8
+    for line in ANSI_TOL_LINES:
+        for dx, static, field, default in line:
+            tx = x0 + 1.5 + dx
+            if static:
+                weight = ";font-weight:bold" if field is None else ""
+                a('<text x="%g" y="%g" style="font-size:2.3px%s">%s</text>'
+                  % (tx, ty, weight, _esc(static)))
+            if field:
+                off = {"": 0.0, ".X": 8.0, ".XX": 8.0, ".XXX": 8.0, ".XXXX": 8.0,
+                       "ANGLES": 10.0}.get(static, len(static) * 1.1 + 1.0)
+                edit(tx + off, ty, field, default, 2.3)
+        ty += 3.6
+    a('</g>')
+    a(projection_symbol(x0 + (ANSI_TOL_W - 18.0) / 2.0, yb + 5.6, first_angle, h=6.0))
+
+
+def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso"):
+    """SVG text of a DrawingKit template (``tol_row``: with the row of
+    units, tolerances and finish on top of the title block; ``style``
+    'ansi': ASME Y14.1 style title block with a tolerance block)."""
     W, H = page_size(size, orientation)
+    if style == "ansi" and W - 30.0 < ANSI_MIN_FRAME_W:
+        style = "iso"                       # no room: keep the ISO block
+    rows = 5 if tol_row else 4
+    tb_h = rows * ROW_H
+    all_cells = cells(tol_row)
+    proj = (PROJECTION_CELL[0] + (1 if tol_row else 0),) + PROJECTION_CELL[1:]
     left, other = 20.0, 10.0
     fx0, fy0, fx1, fy1 = left, other, W - other, H - other       # drawing frame
     gx0, gy0, gx1, gy1 = left - 5, other - 5, W - other + 5, H - other + 5  # grid border
@@ -170,16 +325,21 @@ def make_svg(size, orientation, first_angle=True):
           % ((gx0 + fx0) / 2.0, ym, lab, (fx1 + gx1) / 2.0, ym, lab))
     a('</g>')
 
+    if style == "ansi":
+        _ansi_block(a, fx1, fy1, size, first_angle)
+        a('</svg>')
+        return "\n".join(out) + "\n"
+
     # title block
-    tx0, ty0 = fx1 - TB_W, fy1 - TB_H
+    tx0, ty0 = fx1 - TB_W, fy1 - tb_h
     a('<g id="title_block" style="fill:none;stroke:#000000;stroke-linecap:round;'
       'stroke-linejoin:round;stroke-width:0.35">')
     a('<rect id="title_block_frame" x="%g" y="%g" width="%g" height="%g" '
-      'style="stroke-width:0.7"/>' % (tx0, ty0, TB_W, TB_H))
+      'style="stroke-width:0.7"/>' % (tx0, ty0, TB_W, tb_h))
     lines = []
-    for r in range(1, 4):
+    for r in range(1, rows):
         lines.append("M %g,%g H %g" % (tx0, ty0 + r * ROW_H, fx1))
-    for row, x0, x1, *_ in CELLS + [PROJECTION_CELL + (None,) * 6]:
+    for row, x0, x1, *_ in all_cells + [proj + (None,) * 6]:
         if x0 > 0:
             y = ty0 + row * ROW_H
             lines.append("M %g,%g V %g" % (tx0 + x0, y, y + ROW_H))
@@ -187,18 +347,18 @@ def make_svg(size, orientation, first_angle=True):
     a('</g>')
     a('<g id="title_block_labels" style="font-size:%gpx;font-family:osifont;'
       'fill:#000000;stroke:none">' % LABEL_FONT)
-    for row, x0, x1, label, *_ in CELLS:
+    for row, x0, x1, label, *_ in all_cells:
         a('<text x="%g" y="%g">%s</text>' % (tx0 + x0 + 1.0, ty0 + row * ROW_H + 2.8, _esc(label)))
     a('</g>')
     a('<g id="title_block_data_fields" style="font-family:osifont;fill:#000000;stroke:none">')
-    for row, x0, x1, label, name, default, autofill, font, align in CELLS:
+    for row, x0, x1, label, name, default, autofill, font, align in all_cells:
         y = ty0 + row * ROW_H + (7.6 if font < TITLE_FONT else 8.0)
         x = tx0 + (x0 + 1.5 if align == "start" else (x0 + x1) / 2.0)
         auto = ' freecad:autofill="%s"' % autofill if autofill else ""
         a('<text x="%g" y="%g" freecad:editable="%s"%s style="font-size:%gpx;text-anchor:%s">'
           '<tspan>%s</tspan></text>' % (x, y, name, auto, font, align, _esc(default)))
     a('</g>')
-    prow, px0, px1 = PROJECTION_CELL
+    prow, px0, px1 = proj
     a(projection_symbol(tx0 + (px0 + px1) / 2.0, ty0 + prow * ROW_H + ROW_H / 2.0,
                         first_angle, h=ROW_H - 2.6))
     a('</svg>')
@@ -209,14 +369,21 @@ def template_dir():
     return os.path.join(App.getUserAppDataDir(), "DrawingKit", "Templates")
 
 
-def template_path(size, orientation, first_angle=True, out_dir=None):
+def fits_ansi(size, orientation):
+    return page_size(size, orientation)[0] - 30.0 >= ANSI_MIN_FRAME_W
+
+
+def template_path(size, orientation, first_angle=True, out_dir=None, tol_row=False, style="iso"):
     """Write (if changed) and return the path of a DrawingKit template."""
     out_dir = out_dir or template_dir()
     os.makedirs(out_dir, exist_ok=True)
-    name = "DrawingKit_%s_%s_%s.svg" % (size.replace(" ", ""), orientation,
-                                    "1st" if first_angle else "3rd")
+    if style == "ansi" and not fits_ansi(size, orientation):
+        style = "iso"
+    suffix = "_ansi" if style == "ansi" else ("_tol" if tol_row else "")
+    name = "DrawingKit_%s_%s_%s%s.svg" % (size.replace(" ", ""), orientation,
+                                      "1st" if first_angle else "3rd", suffix)
     path = os.path.join(out_dir, name)
-    text = make_svg(size, orientation, first_angle)
+    text = make_svg(size, orientation, first_angle, tol_row and style != "ansi", style)
     try:
         with open(path, encoding="utf-8") as f:
             if f.read() == text:

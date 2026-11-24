@@ -242,7 +242,10 @@ def create_page(doc, size, orientation, templates=None, drawingkit_template=True
     if drawingkit_template:
         try:
             from . import templates as d2t
-            path = d2t.template_path(size, orientation, page_first_angle(page))
+            from . import titleblock
+            path = d2t.template_path(size, orientation, page_first_angle(page),
+                                     tol_row=titleblock.wants_tolerance_row(),
+                                     style=titleblock.style())
         except Exception as e:
             App.Console.PrintWarning("DrawingKit template failed, using FreeCAD's: %s\n" % e)
     if path is None:
@@ -257,6 +260,11 @@ def create_page(doc, size, orientation, templates=None, drawingkit_template=True
     n = len([o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")])
     page.Label = "Sheet %d (%s)" % (n, size)
     page.Scale = 1.0
+    try:
+        from . import titleblock
+        titleblock.apply_defaults(page)   # company name, tolerances, finish...
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit title block defaults: %s\n" % e)
     try:
         renumber_sheets(doc)
     except Exception:
@@ -760,6 +768,69 @@ def fits_at(page, group, extras_views, s, layout=None):
     return False
 
 
+def _layout(page, group, extras, scale, positions, title_text=None):
+    apply_plan(page, group, extras, scale, positions)
+    if title_text:
+        set_title_block_scale(page, scale, title_text)
+    for v in part_views(page):
+        follow_parent(v)     # projected/aux views back on their line
+    realign_sections(page, extras)   # sections first: they must stay in line
+    clear_all_linked(page)   # then slide projected/aux views off the others
+
+
+def content_box(page, margins=None):
+    """Page box round the laid-out views (not detail views, which find
+    their own spot), grown by ``margins`` (left, bottom, right, top) for
+    their dimensions and callouts."""
+    boxes = []
+    for v in part_views(page):
+        if v.isDerivedFrom("TechDraw::DrawViewDetail") or "DrawingKitUncutOf" in v.PropertiesList:
+            continue
+        try:
+            boxes.append(view_box(v))
+        except Exception:
+            pass
+    if not boxes:
+        return None
+    l, b, r, t = margins or (0.0, 0.0, 0.0, 0.0)
+    return (min(x[0] for x in boxes) - l, min(x[1] for x in boxes) - b,
+            max(x[2] for x in boxes) + r, max(x[3] for x in boxes) + t)
+
+
+def _best_region(box, regions, pad=5.0):
+    """The region (as page_regions gives them, already inset ``pad``) that
+    a box of this size fits, with the most room to spare; None if none."""
+    if box is None:
+        return None
+    w, h = box[2] - box[0], box[3] - box[1]
+    best = None
+    for r in regions:
+        # the views may use the regions' padding, as _inside_regions allows
+        rw, rh = r[2] - r[0] + 2 * pad, r[3] - r[1] + 2 * pad
+        room = min(rw - w, rh - h)
+        if room >= -1e-6 and (best is None or room > best[0]):
+            best = (room, r)
+    return best[1] if best else None
+
+
+def centre_content(page, group, extras, regions, margins=None):
+    """Move the group and the extra views together so what was laid out
+    (with its dimensions and callouts) sits in the middle of the region it
+    fits best. Returns (dx, dy)."""
+    box = content_box(page, margins)
+    reg = _best_region(box, regions)
+    if reg is None:
+        return (0.0, 0.0)
+    dx = (reg[0] + reg[2]) / 2.0 - (box[0] + box[2]) / 2.0
+    dy = (reg[1] + reg[3]) / 2.0 - (box[1] + box[3]) / 2.0
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        return (0.0, 0.0)
+    for v in [group] + list(extras):
+        v.X = float(v.X) + dx
+        v.Y = float(v.Y) + dy
+    return (dx, dy)
+
+
 def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True, pad=None):
     """Re-pick the page scale so the main group and extra views fit
     (no larger than ``max_scale``), or lay them out at the ``exact`` scale
@@ -771,16 +842,12 @@ def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True, pad=N
     if group is None:
         raise ValueError("This page has no projection group to fit")
     regions = page_regions(page)
+    limit = max_scale
+    margins = pad or annotation_margins(page)   # measured before anything moves
     for _ in range(len(STANDARD_SCALES)):
         scale, positions = plan_page(page, group, extras, max_scale=max_scale,
                                      scales=[exact] if exact else None, pad=pad)
-        apply_plan(page, group, extras, scale, positions)
-        if title_text:
-            set_title_block_scale(page, scale, title_text)
-        for v in part_views(page):
-            follow_parent(v)     # projected/aux views back on their line
-        realign_sections(page, extras)   # sections first: they must stay in line
-        clear_all_linked(page)   # then slide projected/aux views off the others
+        _layout(page, group, extras, scale, positions, title_text)
         # sections kept in line with their views need room in that row or
         # column; if one ends up off the drawing area, try the next scale down
         if exact or all(_inside_regions(view_box(v), regions) for v in part_views(page)
@@ -790,6 +857,23 @@ def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True, pad=N
         if not smaller:
             break
         max_scale = max(smaller)
+    if not exact:
+        # the plan sets extra views beside the group, but sections and
+        # auxiliary views end up in line with their views: measure what was
+        # really laid out, try bigger scales while it fits, and centre it
+        for _ in range(3):
+            up = next_standard_scale(scale, +1)
+            if up is None or (limit is not None and up > limit + 1e-12):
+                break
+            _, pos = plan_page(page, group, extras, scales=[up], pad=pad)
+            _layout(page, group, extras, up, pos, title_text)
+            if _best_region(content_box(page, margins), regions) is not None:
+                scale = up
+                continue
+            _, pos = plan_page(page, group, extras, scales=[scale], pad=pad)
+            _layout(page, group, extras, scale, pos, title_text)
+            break
+        centre_content(page, group, extras, regions, margins)
     if not draw:
         return scale
     redraw([group] + list(group.Views) + list(extras))
@@ -1378,12 +1462,19 @@ def fill_title_block(page, part=None):
     put("creator", author_name(), ("A. Nemesis",))
     if changed:
         tpl.EditableTexts = texts
+    try:
+        from . import titleblock
+        changed.update(titleblock.apply_defaults(page))   # saved defaults in empty fields
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit title block defaults: %s\n" % e)
     renumber_sheets(doc)
     return changed
 
 
-def renumber_sheets(doc):
-    """'1 / N', '2 / N'... in the order the pages were made."""
+def renumber_sheets(doc, force=False):
+    """'1 / N', '2 / N'... ('1 OF N' in an ANSI title block) in the order
+    the pages were made."""
+    from . import titleblock
     pages_ = [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")]
     n = len(pages_)
     for i, p in enumerate(pages_):
@@ -1392,7 +1483,7 @@ def renumber_sheets(doc):
             continue
         texts = dict(tpl.EditableTexts)
         if "sheet_number" in texts:
-            want = "%d / %d" % (i + 1, n)
+            want = titleblock.sheet_text(i + 1, n, titleblock.is_ansi(texts))
             if texts["sheet_number"] != want:
                 texts["sheet_number"] = want
                 tpl.EditableTexts = texts

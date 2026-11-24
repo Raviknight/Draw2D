@@ -1832,6 +1832,165 @@ class TestThreads(DocTest):
         self.assertEqual(holes.thread_designation(f), "1/4 UNC - 2B")
 
 
+class TestTitleBlockDefaults(DocTest):
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        from DrawingKitTools import titleblock
+        self.tb = titleblock
+        self.tmp = tempfile.mkdtemp()
+        self.user = os.path.join(self.tmp, "mine.json")
+        self.company = os.path.join(self.tmp, "company.json")
+        self._saved = (titleblock.user_file, titleblock.company_file, titleblock.wants_tolerance_row)
+        titleblock.user_file = lambda: self.user
+        titleblock.company_file = lambda: self.company
+
+    def tearDown(self):
+        self.tb.user_file, self.tb.company_file, self.tb.wants_tolerance_row = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        super().tearDown()
+
+    def test_template_with_tolerance_row(self):
+        from DrawingKitTools import templates
+        path = templates.template_path("A3", "Landscape", True, self.tmp, tol_row=True)
+        self.assertEqual(templates.parse_name(path), ("A3", "Landscape", True))
+        self.assertEqual(templates.parse_name(templates.template_path("ANSI B", "Portrait", False, self.tmp)),
+                         ("ANSI B", "Portrait", False))
+        _, title = core.drawing_area(path, 420, 297)
+        self.assertAlmostEqual(title[3] - title[1], 45.0, places=3)   # five rows
+        page = core.create_page(self.doc, "A3", "Landscape")
+        page.Template.Template = path
+        texts = dict(page.Template.EditableTexts)
+        for k in ("units", "tol_1", "tol_2", "tol_3", "tol_angle", "finish", "title"):
+            self.assertIn(k, texts)
+
+    def test_company_then_mine_on_top(self):
+        self.tb.write_file(self.company, {"legal_owner_1": "ACME", "finish": "Ra 1.6",
+                                          "title": "not shared"})
+        self.tb.save_user_defaults({"finish": "Ra 0.8"})
+        vals = self.tb.load_defaults(asme=True)
+        self.assertEqual(vals["legal_owner_1"], "ACME")
+        self.assertEqual(vals["finish"], "Ra 0.8")
+        self.assertEqual(vals["tol_3"], "±0.005")
+        self.assertNotIn("title", vals)
+
+    def test_new_sheet_gets_defaults_and_keeps_typed_fields(self):
+        self.tb.wants_tolerance_row = lambda: True
+        self.tb.write_file(self.company, {"legal_owner_1": "ACME", "tol_1": "±.03"})
+        page = core.create_page(self.doc, "A3", "Landscape")
+        texts = dict(page.Template.EditableTexts)
+        self.assertEqual(texts["legal_owner_1"], "ACME")
+        self.assertEqual(texts["tol_1"], "±.03")
+        texts["legal_owner_1"] = "Typed Ltd"
+        page.Template.EditableTexts = texts
+        self.tb.apply_defaults(page)
+        self.assertEqual(dict(page.Template.EditableTexts)["legal_owner_1"], "Typed Ltd")
+
+    def test_tolerance_row_on_and_off_keeps_values(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        self.tb.set_fields(page, {"title": "Bracket", "legal_owner_1": "ACME"})
+        self.assertTrue(self.tb.set_tolerance_row(page, True))
+        self.assertTrue(self.tb.has_tolerance_row(page))
+        texts = dict(page.Template.EditableTexts)
+        self.assertEqual((texts["title"], texts["legal_owner_1"]), ("Bracket", "ACME"))
+        self.tb.set_fields(page, {"tol_1": "±.02"})
+        self.assertTrue(self.tb.set_tolerance_row(page, False))
+        self.assertFalse(self.tb.has_tolerance_row(page))
+        self.assertEqual(dict(page.Template.EditableTexts)["title"], "Bracket")
+
+    def test_ansi_title_block(self):
+        from DrawingKitTools import templates
+        path = templates.template_path("ANSI C", "Landscape", False, self.tmp, style="ansi")
+        self.assertTrue(path.endswith("_ansi.svg"))
+        self.assertEqual(templates.parse_name(path), ("ANSI C", "Landscape", False))
+        _, title = core.drawing_area(path, *templates.page_size("ANSI C", "Landscape"))
+        self.assertAlmostEqual(title[2] - title[0], templates.ANSI_W, places=3)
+        self.assertAlmostEqual(title[3] - title[1], templates.ANSI_H, places=3)
+        # too narrow for it: the ISO block
+        self.assertFalse(templates.template_path("ANSI A", "Portrait", False, self.tmp,
+                                                 style="ansi").endswith("_ansi.svg"))
+        page = core.create_page(self.doc, "ANSI C", "Landscape")
+        self.tb.set_fields(page, {"title": "Saw guide", "legal_owner_1": "ACME"})
+        self.assertTrue(self.tb.set_template_variant(page, style_="ansi"))
+        texts = dict(page.Template.EditableTexts)
+        for k in ("checked_by", "company_address", "title_2", "tol_4", "surface_note",
+                  "edge_note", "sheet_size", "finish"):
+            self.assertIn(k, texts)
+        self.assertEqual(texts["title"], "Saw guide")
+        self.assertEqual(texts["legal_owner_1"], "ACME")
+        self.assertEqual(texts["sheet_size"], "C")
+        self.assertEqual(texts["sheet_number"], "1 OF 1")
+        self.assertTrue(self.tb.is_ansi(page))
+        core.create_page(self.doc, "ANSI C", "Landscape")
+        core.renumber_sheets(self.doc)
+        self.assertEqual(dict(page.Template.EditableTexts)["sheet_number"], "1 OF 2")
+
+    def test_ansi_gets_inch_defaults(self):
+        page = core.create_page(self.doc, "ANSI B", "Landscape")
+        self.tb.set_template_variant(page, style_="ansi")
+        self.tb.apply_defaults(page, self.tb.load_defaults(asme=True))
+        texts = dict(page.Template.EditableTexts)
+        self.assertEqual(texts["tol_4"], "±0.0005")
+        self.assertEqual(texts["general_tolerances"], "ASME Y14.5-2018")
+        self.assertIn("Y14.36", texts["surface_note"])
+
+    def test_fields_in_order(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        keys = [k for k, _, _ in self.tb.fields(page)]
+        self.assertEqual(keys[0], "title")
+        self.assertIn("general_tolerances", keys)
+
+
+class TestDimensionPreview(unittest.TestCase):
+    def setUp(self):
+        from DrawingKitTools import smartdim
+        self.sd = smartdim
+        self.E = smartdim.Ent
+
+    def lines(self, shapes):
+        return [pts for kind, pts in shapes if kind == "line"]
+
+    def tips(self, shapes):
+        return [pts[0] for kind, pts in shapes if kind == "fill"]
+
+    def test_horizontal_length_follows_the_mouse(self):
+        line = self.E("line", 1, [(0.0, 0.0), (10.0, 0.0)])
+        sh = self.sd.preview_shapes([line], (4.0, 6.0), 1.0)
+        tips = sorted(self.tips(sh))
+        self.assertEqual(len(tips), 2)
+        for (x, y), want in zip(tips, [(0.0, 6.0), (10.0, 6.0)]):
+            self.assertAlmostEqual(x, want[0])
+            self.assertAlmostEqual(y, want[1])
+        # two extension lines, from just off the part past the dimension line
+        ext = [l for l in self.lines(sh) if abs(l[0][0] - l[1][0]) < 1e-9]
+        self.assertEqual(len(ext), 2)
+        self.assertAlmostEqual(min(p[1] for p in ext[0]), 1.5)
+        self.assertAlmostEqual(max(p[1] for p in ext[0]), 8.0)
+
+    def test_mouse_past_the_end_stretches_the_line(self):
+        a = self.E("vertex", 1, [(0.0, 0.0)])
+        b = self.E("vertex", 2, [(10.0, 10.0)])
+        sh = self.sd.preview_shapes([a, b], (25.0, 5.0), 1.0)   # right: vertical
+        dim = [l for l in self.lines(sh) if abs(l[0][0] - 25.0) < 1e-9 and abs(l[1][0] - 25.0) < 1e-9]
+        self.assertEqual(len(dim), 1)
+        ys = sorted(p[1] for p in dim[0])
+        self.assertAlmostEqual(ys[0], 0.0)
+        self.assertAlmostEqual(ys[1], 10.0)
+
+    def test_diameter_and_angle(self):
+        c = self.E("circle", 1, [(0.0, 0.0)], radius=5.0)
+        sh = self.sd.preview_shapes([c], (20.0, 0.0), 2.0)
+        self.assertEqual(len(self.tips(sh)), 2)
+        self.assertTrue(any(abs(l[-1][0] - 20.0) < 1e-9 for l in self.lines(sh)))   # leader
+        l1 = self.E("line", 1, [(0.0, 0.0), (10.0, 0.0)])
+        l2 = self.E("line", 2, [(0.0, 0.0), (0.0, 10.0)])
+        sh = self.sd.preview_shapes([l1, l2], (5.0, 5.0), 1.0)
+        arc = max(self.lines(sh), key=len)
+        for p in arc:
+            self.assertAlmostEqual(math.hypot(*p), math.hypot(5.0, 5.0), places=6)
+
+
 class TestBalloonLeaders(unittest.TestCase):
     def test_crossing_leaders_are_swapped(self):
         from DrawingKitTools import drafting

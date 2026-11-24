@@ -1496,6 +1496,173 @@ class FillTitleBlock:
         say("Title blocks: %d field(s) filled, %d sheet(s) numbered" % (n, len(changed)))
 
 
+class TitleBlockDialog(QtWidgets.QDialog):
+    """Every field of a page's title block in one form, with saving the
+    fields that are the same on every drawing as your defaults or to a
+    company file."""
+
+    def __init__(self, page, parent=None):
+        from . import titleblock as tb
+        super().__init__(parent or Gui.getMainWindow())
+        self.tb, self.page = tb, page
+        self.setWindowTitle("Title block - %s" % page.Label)
+        lay = QtWidgets.QVBoxLayout(self)
+        grid = QtWidgets.QGridLayout()
+        self.edits = {}
+        rows = tb.fields(page)
+        half = (len(rows) + 1) // 2
+        for i, (key, label, value) in enumerate(rows):
+            col, row = (0, i) if i < half else (2, i - half)
+            lab = QtWidgets.QLabel(label + (" *" if key in tb.SHARED else ""))
+            if key in tb.SHARED:
+                lab.setToolTip("Same on every drawing: saved with your defaults")
+            e = QtWidgets.QLineEdit(value)
+            e.setMinimumWidth(240)
+            if key in ("scale", "sheet_number"):
+                e.setToolTip("Set by DrawingKit (scale, sheet numbers)")
+            grid.addWidget(lab, row, col)
+            grid.addWidget(e, row, col + 1)
+            self.edits[key] = e
+        lay.addLayout(grid)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Layout of this sheet:"))
+        self.layout_combo = QtWidgets.QComboBox()
+        for val, text in (("iso", "ISO"), ("iso_tol", "ISO + tolerance row"),
+                          ("ansi", "ANSI (tolerance block, checked by, size)")):
+            self.layout_combo.addItem(text, val)
+        cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+        self.layout_combo.setCurrentIndex(self.layout_combo.findData(cur))
+        self.layout_combo.setToolTip("Swaps DrawingKit's title block, keeping what you typed. "
+                                     "Applied when you press OK.")
+        row.addWidget(self.layout_combo)
+        row.addSpacing(16)
+        row.addWidget(QtWidgets.QLabel("New sheets:"))
+        self.new_combo = QtWidgets.QComboBox()
+        for val, text in (("auto", "Auto (ANSI for ASME)"), ("ISO", "ISO"), ("ANSI", "ANSI")):
+            self.new_combo.addItem(text, val)
+        try:
+            pref = App.ParamGet(tb.PREFS).GetString(tb.STYLE_PREF, "auto") or "auto"
+        except Exception:
+            pref = "auto"
+        self.new_combo.setCurrentIndex(max(0, self.new_combo.findData(pref)))
+        row.addWidget(self.new_combo)
+        row.addStretch(1)
+        lay.addLayout(row)
+        note = QtWidgets.QLabel("* fields are the same on every drawing. New sheets start from "
+                                "the company file, then your own defaults on top.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        comp = QtWidgets.QHBoxLayout()
+        self.comp_label = QtWidgets.QLabel()
+        self._show_company()
+        choose = QtWidgets.QPushButton("Use company file...")
+        choose.setToolTip("Point DrawingKit at a defaults file, e.g. on a shared drive")
+        choose.clicked.connect(self.use_company)
+        comp.addWidget(self.comp_label, 1)
+        comp.addWidget(choose)
+        lay.addLayout(comp)
+        btns = QtWidgets.QHBoxLayout()
+        mine = QtWidgets.QPushButton("Save * as my defaults")
+        mine.clicked.connect(self.save_mine)
+        company = QtWidgets.QPushButton("Save * to company file...")
+        company.clicked.connect(self.save_company)
+        load = QtWidgets.QPushButton("Fill * from defaults")
+        load.setToolTip("Replace the * fields with the saved defaults")
+        load.clicked.connect(self.fill_defaults)
+        btns.addWidget(mine)
+        btns.addWidget(company)
+        btns.addWidget(load)
+        btns.addStretch(1)
+        ok = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        ok.accepted.connect(self.accept)
+        ok.rejected.connect(self.reject)
+        btns.addWidget(ok)
+        lay.addLayout(btns)
+
+    def _show_company(self):
+        path = self.tb.company_file()
+        self.comp_label.setText("Company file: %s" % (path or "none"))
+        self.comp_label.setToolTip(path or "")
+
+    def values(self):
+        return {k: e.text() for k, e in self.edits.items()}
+
+    def save_mine(self):
+        path = self.tb.save_user_defaults(self.values())
+        say("Title block defaults saved to %s" % path)
+
+    def save_company(self):
+        start = self.tb.company_file() or os.path.join(os.path.expanduser("~"), "drawingkit_company.json")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Company title block file", start,
+                                                        "DrawingKit defaults (*.json)")
+        if path:
+            self.tb.save_company_defaults(self.values(), path)
+            self._show_company()
+            say("Company title block defaults saved to %s" % path)
+
+    def use_company(self):
+        start = self.tb.company_file() or os.path.expanduser("~")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Company title block file", start,
+                                                        "DrawingKit defaults (*.json)")
+        if path:
+            self.tb.set_company_file(path)
+            self._show_company()
+
+    def fill_defaults(self):
+        vals = self.tb.load_defaults()
+        for k in self.tb.SHARED:
+            if k in self.edits and k in vals:
+                self.edits[k].setText(vals[k])
+
+
+class EditTitleBlock:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_EditTitleBlock.svg"),
+                "MenuText": "Title block...",
+                "ToolTip": "Edit every title block field in one form. Save company name, "
+                           "tolerances (X.X / X.XX / X.XXX, angles), finish and the like as "
+                           "your defaults or to a company file the whole team uses."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import titleblock as tb
+        doc = App.ActiveDocument
+        page = target_page()
+        if page is None:
+            warn("Select the page (or a view on it) first.")
+            return
+        if not tb.fields(page):
+            warn("This page's template has no fields to edit.")
+            return
+        dlg = TitleBlockDialog(page)
+        if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
+            return
+        vals = dlg.values()
+        want = dlg.layout_combo.currentData()
+        tb.set_style_pref(dlg.new_combo.currentData())
+        cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+
+        def work():
+            changed = tb.set_fields(page, vals)
+            if want != cur:
+                ok_ = tb.set_template_variant(page, tol_row=(want == "iso_tol"),
+                                              style_="ansi" if want == "ansi" else "iso")
+                if not ok_:
+                    raise ValueError("That layout needs DrawingKit's own template (and the ANSI "
+                                     "block needs a sheet at least 210 mm wide inside the frame).")
+                tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
+            return changed
+        try:
+            changed = run_in_transaction(doc, "DrawingKit title block", work)
+        except ValueError as e:
+            warn(str(e))
+            return
+        doc.recompute()
+        say("Title block: %d field(s) changed" % len(changed))
+
+
 class HoleTable:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_HoleTable.svg"),
@@ -1731,8 +1898,23 @@ class SmartDimension:
             if hov is not None and not any(same(hov, p) for p in st["picks"]):
                 shapes.append(highlight(view, hov, "#ff7f0e"))
             if st["picks"]:
-                txt = smartdim.preview_value(st["picks"], local)
-                if txt:
+                pv = st["view"]
+                plocal = annot.page_to_local(pv, *pt)
+                ready = hov is None or any(same(hov, p) for p in st["picks"]) or \
+                    len(st["picks"]) >= 2
+                txt = smartdim.preview_value(st["picks"], plocal)
+                if ready:
+                    # the dimension as it will be placed, following the mouse
+                    try:
+                        for kind, pts in smartdim.preview_shapes(st["picks"], plocal,
+                                                                 core.view_scale(pv)):
+                            shapes.append(("ghost_fill" if kind == "fill" else "ghost",
+                                           [annot.view_point(pv, q) for q in pts]))
+                    except Exception:
+                        pass
+                    if txt:
+                        shapes.append(("ctext", pt[0], pt[1] + 1.8, txt))
+                elif txt:
                     shapes.append(("text", pt[0] + 2.0, pt[1] + 2.0, txt))
             return shapes
 
@@ -2432,6 +2614,7 @@ COMMANDS = [
     ("DrawingKit_Export", ExportSheets()),
     ("DrawingKit_HoleTable", HoleTable()),
     ("DrawingKit_FillTitleBlock", FillTitleBlock()),
+    ("DrawingKit_EditTitleBlock", EditTitleBlock()),
     ("DrawingKit_Revision", AddRevision()),
     ("DrawingKit_FitToPage", FitToPage()),
     ("DrawingKit_ScaleUp", ScaleStep(+1)),
@@ -2464,6 +2647,7 @@ COMMAND_GROUPS = [
                                "DrawingKit_TextStyle"]),
     ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
                            "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
+                           "DrawingKit_EditTitleBlock",
                            "DrawingKit_Revision", "DrawingKit_Export"]),
 ]
 

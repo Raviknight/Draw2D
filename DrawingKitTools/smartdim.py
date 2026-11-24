@@ -250,6 +250,139 @@ def preview_value(picks, mouse):
 
 
 # ---------------------------------------------------------------------------
+# Live preview: the dimension drawn as it would be placed
+# ---------------------------------------------------------------------------
+ARROW = 3.0        # arrowhead length on paper (mm)
+EXT_GAP = 1.5      # gap between the feature and an extension line
+EXT_OVER = 2.0     # extension line past the dimension line
+
+
+def _unit(v):
+    L = math.hypot(v[0], v[1])
+    return (v[0] / L, v[1] / L) if L > 1e-12 else (1.0, 0.0)
+
+
+def _add(p, v, k=1.0):
+    return (p[0] + v[0] * k, p[1] + v[1] * k)
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1]
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1])
+
+
+def _arrow(tip, toward, size):
+    """Filled arrowhead with its tip at ``tip`` pointing along ``toward``."""
+    u = _unit(toward)
+    n = (-u[1], u[0])
+    base = _add(tip, u, -size)
+    return ("fill", [tip, _add(base, n, size * 0.18), _add(base, n, -size * 0.18), tip])
+
+
+def _foot(p, line):
+    (ax, ay), (bx, by) = line.pts
+    u = _unit((bx - ax, by - ay))
+    t = _dot(_sub(p, (ax, ay)), u)
+    return (ax + u[0] * t, ay + u[1] * t)
+
+
+def _linear(p, q, d, mouse, k):
+    """Extension lines, dimension line (stretched to the mouse) and arrows
+    for a distance from p to q measured along unit vector d."""
+    n = (-d[1], d[0])
+    a = _add(p, n, _dot(_sub(mouse, p), n))      # ends of the dimension line,
+    b = _add(q, n, _dot(_sub(mouse, q), n))      # on the line through the mouse
+    out = []
+    for f, e in ((p, a), (q, b)):
+        v = _sub(e, f)
+        L = math.hypot(*v)
+        if L > EXT_GAP * k:
+            u = _unit(v)
+            out.append(("line", [_add(f, u, EXT_GAP * k), _add(e, u, EXT_OVER * k)]))
+    ta, tb = _dot(_sub(a, mouse), d), _dot(_sub(b, mouse), d)
+    lo = min(0.0, ta, tb)
+    hi = max(0.0, ta, tb)
+    out.append(("line", [_add(mouse, d, lo), _add(mouse, d, hi)]))
+    if math.hypot(*_sub(b, a)) > 1e-9:
+        out.append(_arrow(a, _sub(a, b), ARROW * k))
+        out.append(_arrow(b, _sub(b, a), ARROW * k))
+    return out
+
+
+def preview_shapes(picks, mouse, scale=1.0):
+    """The dimension the picks and mouse describe, as ('line', [pts]) and
+    ('fill', [pts]) in view-local coordinates (model mm), so it can be
+    drawn under the mouse while placing. [] if there is nothing to show."""
+    t, ents, _ = plan(picks, mouse)
+    if t is None:
+        return []
+    k = 1.0 / (scale or 1.0)          # paper mm -> local units
+    if t in ("Diameter", "Radius"):
+        e = ents[0]
+        c, r = e.point, e.radius
+        u = _unit(_sub(mouse, c))
+        far = _add(c, u, r)
+        out = []
+        if t == "Diameter":
+            near = _add(c, u, -r)
+            out.append(("line", [near, far]))
+            out.append(_arrow(near, _sub(near, far), ARROW * k))
+        else:
+            out.append(("line", [c, far]))
+        out.append(_arrow(far, u, ARROW * k))
+        if math.hypot(*_sub(mouse, c)) > r:
+            out.append(("line", [far, mouse]))           # leader out to the text
+        return out
+    if t == "Angle":
+        a, b = ents
+        (p1, p2), (p3, p4) = a.pts, b.pts
+        d1, d2 = _sub(p2, p1), _sub(p4, p3)
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-12:
+            return []
+        s_ = ((p3[0] - p1[0]) * d2[1] - (p3[1] - p1[1]) * d2[0]) / den
+        v = _add(p1, d1, s_)                             # where the lines meet
+        R = max(math.hypot(*_sub(mouse, v)), 4.0 * k)
+        # each line's direction away from the meeting point, on the mouse's side
+        dirs = []
+        for d in (d1, d2):
+            u = _unit(d)
+            dirs.append(u if _dot(_sub(mouse, v), u) >= 0 else (-u[0], -u[1]))
+        a0 = math.atan2(dirs[0][1], dirs[0][0])
+        a1 = math.atan2(dirs[1][1], dirs[1][0])
+        sweep = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+        pts = [_add(v, (math.cos(a0 + sweep * i / 24.0), math.sin(a0 + sweep * i / 24.0)), R)
+               for i in range(25)]
+        out = [("line", pts)]
+        for end, nxt in ((pts[0], pts[1]), (pts[-1], pts[-2])):
+            out.append(_arrow(end, _sub(end, nxt), ARROW * k))
+        for d in dirs:                                   # extend the lines to the arc
+            out.append(("line", [_add(v, d, R * 0.3), _add(v, d, R + EXT_OVER * k)]))
+        return out
+    # straight distances
+    if len(ents) == 1:
+        p, q = ents[0].pts
+    elif ents[0].kind == "line" and ents[1].kind == "line":
+        p = ents[0].pts[0]
+        q = _foot(p, ents[1])
+    elif ents[1].kind == "line":
+        p = ents[0].point
+        q = _foot(p, ents[1])
+    else:
+        p, q = ents[0].point, ents[1].point
+    if t == "DistanceX":
+        d = (1.0, 0.0)
+    elif t == "DistanceY":
+        d = (0.0, 1.0)
+    else:
+        d = _unit(_sub(q, p))
+    return _linear(p, q, d, mouse, k)
+
+
+# ---------------------------------------------------------------------------
 # Making the TechDraw dimension
 # ---------------------------------------------------------------------------
 def vertex_at(view, point, tol=1e-4):

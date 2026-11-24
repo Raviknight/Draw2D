@@ -149,14 +149,31 @@ class PagePicker(QtCore.QObject):
                     if shape[0] == "hl_point":
                         item.setBrush(QtGui.QBrush(QtGui.QColor(color)))
                 item.setPen(_pen(color, dashed=False, width=0.7))
-            elif shape[0] == "text":
+            elif shape[0] in ("ghost", "ghost_fill"):
+                # the dimension being placed, drawn as it will look
+                pts = shape[1]
+                if len(pts) < 2:
+                    continue
+                path = QtGui.QPainterPath(to_scene(*pts[0]))
+                for p in pts[1:]:
+                    path.lineTo(to_scene(*p))
+                item = QtWidgets.QGraphicsPathItem(path)
+                item.setPen(_pen("#1f77b4", dashed=False, width=0.35))
+                if shape[0] == "ghost_fill":
+                    item.setBrush(QtGui.QBrush(QtGui.QColor("#1f77b4")))
+            elif shape[0] in ("text", "ctext"):
                 _, x, y, txt = shape
                 item = QtWidgets.QGraphicsSimpleTextItem(txt)
                 f = item.font()
                 f.setPointSizeF(3.5 * rez())
                 item.setFont(f)
                 item.setBrush(QtGui.QBrush(QtGui.QColor("#1f77b4")))
-                item.setPos(to_scene(x, y))
+                pos = to_scene(x, y)
+                if shape[0] == "ctext":
+                    # centred on the point, just above it (horizontal, as placed)
+                    br = item.boundingRect()
+                    pos = QtCore.QPointF(pos.x() - br.width() / 2.0, pos.y() - br.height())
+                item.setPos(pos)
             else:
                 pts = shape[1]
                 if len(pts) < 2:
