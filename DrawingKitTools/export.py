@@ -2,8 +2,9 @@
 """Export sheets to PDF, SVG or DXF in one go (like Onshape's Export).
 
 PDF and SVG need the GUI (TechDraw draws them from the page on screen);
-DXF works headless. Several sheets give one file per sheet:
-'Bracket - Sheet 1.pdf', 'Bracket - Sheet 2.pdf', ...
+DXF works headless. Several sheets as PDF give one file with a page per
+sheet; DXF and SVG give one file per sheet: 'Bracket - Sheet 1.dxf',
+'Bracket - Sheet 2.dxf', ...
 """
 
 import os
@@ -58,29 +59,151 @@ def wants_characteristics():
         return True
 
 
-def finish_pdf(page, out, characteristics=None):
-    """After TechDraw has written a sheet's PDF: add the real-text layer and
-    (unless turned off) the characteristics file. Returns the extra files."""
-    from . import textlayer
-    extra = []
+def wants_one_pdf():
+    """Several sheets as PDF: one file with a page per sheet ('OnePdf'
+    preference, on unless turned off) rather than a file per sheet."""
     try:
-        n = textlayer.add_text_layer(page, out)
-        if not n:
-            App.Console.PrintWarning("DrawingKit: no text layer added to %s\n" % out)
+        return App.ParamGet(PREFS).GetBool("OnePdf", True)
+    except Exception:
+        return True
+
+
+def wants_real_text():
+    """Draw the title block, notes and tables' words as real PDF text
+    ('RealText' preference, on unless turned off)."""
+    try:
+        return App.ParamGet(PREFS).GetBool("RealText", True)
+    except Exception:
+        return True
+
+
+def _warn(msg):
+    App.Console.PrintWarning("DrawingKit: %s\n" % msg)
+
+
+def add_text_layer(page, out):
+    from . import textlayer
+    try:
+        # with real text there's usually nothing left for the hidden layer
+        textlayer.add_text_layer(page, out)
     except Exception as e:
-        App.Console.PrintWarning("DrawingKit: text layer for %s failed: %s\n" % (out, e))
-    if wants_characteristics() if characteristics is None else characteristics:
+        _warn("text layer for %s failed: %s" % (out, e))
+
+
+def properties(pages):
+    """The PDF's document properties from the (first) sheet's title block:
+    (standard info, DrawingKit's own keys)."""
+    from . import __version__, textlayer
+    t = textlayer._texts(pages[0])
+    number = (t.get("drawing_number") or "").strip()
+    rev = (t.get("revision_index") or "").strip()
+    title = " ".join((t.get(k) or "").strip() for k in ("title", "title_2")).strip()
+    subject = "Drawing %s" % number if number else ""
+    if subject and rev:
+        subject += ", revision %s" % rev
+    info = {"Title": title or number or pages[0].Document.Label,
+            "Author": (t.get("creator") or "").strip(),
+            "Subject": subject,
+            "Keywords": ", ".join(x for x in (number, rev and "Rev " + rev,
+                                               (t.get("part_material") or "").strip()) if x),
+            "Creator": "FreeCAD TechDraw with DrawingKit %s" % __version__}
+    custom = {"DrawingNumber": number, "Revision": rev, "Sheets": str(len(pages))}
+    return info, custom
+
+
+def finish_pdf(pages, parts, out, characteristics=None):
+    """Put the sheets' PDFs (each already with its text layer) together
+    into ``out``: one page per sheet, the document properties filled in and
+    (unless turned off) the characteristics list both inside the PDF and
+    beside it. Returns the extra files written."""
+    from . import pdfdoc, textlayer
+    want = wants_characteristics() if characteristics is None else characteristics
+    data = None
+    if want:
         try:
-            extra.append(textlayer.write_characteristics(page, out))
+            data = textlayer.combine_characteristics(
+                [textlayer.characteristics_data(p, out) for p in pages])
         except Exception as e:
-            App.Console.PrintWarning("DrawingKit: characteristics for %s failed: %s\n" % (out, e))
+            _warn("characteristics for %s failed: %s" % (out, e))
+    info, custom = properties(pages)
+    att = []
+    if data is not None:
+        inner = dict(data, pdf_sha256=None, embedded=True)
+        att.append((os.path.basename(textlayer.characteristics_path(out)),
+                    textlayer.json_text(inner).encode("utf-8"), "application/json",
+                    "DrawingKit characteristics list"))
+    pdfdoc.write(out, parts, info=info, custom=custom, attachments=att)
+    extra = []
+    if data is not None:
+        data["pdf_sha256"] = textlayer.pdf_sha256(out)
+        extra.append(textlayer.save_json(data, textlayer.characteristics_path(out)))
     return extra
 
 
+def _export_pdfs(pages, path, characteristics):
+    """PDF: each sheet drawn by TechDraw, then put together by DrawingKit."""
+    import tempfile
+    import FreeCADGui as Gui
+    import TechDrawGui
+    one = len(pages) > 1 and wants_one_pdf()
+    targets = [path] if one else sheet_paths(path, pages)
+    groups = [(pages, path)] if one else [([p], t) for p, t in zip(pages, targets)]
+    done = []
+    tmpdir = tempfile.mkdtemp(prefix="drawingkit-")
+    try:
+        for group, out in groups:
+            parts = []
+            for i, page in enumerate(group):
+                page.ViewObject.show()        # the page must be open to be drawn
+                Gui.updateGui()
+                part = os.path.join(tmpdir, "sheet%d.pdf" % (len(parts) + 1))
+                restore = None
+                if wants_real_text():
+                    try:
+                        from . import realtext
+                        restore, _n = realtext.prepare(page)
+                    except Exception as e:
+                        _warn("real text for %s failed: %s" % (page.Label, e))
+                try:
+                    TechDrawGui.exportPageAsPdf(page, part)
+                finally:
+                    if restore is not None:
+                        restore()
+                if not os.path.exists(part):
+                    _warn("%s was not drawn" % page.Label)
+                    continue
+                add_text_layer(page, part)
+                parts.append(part)
+            if not parts:
+                continue
+            try:
+                extra = finish_pdf(group, parts, out, characteristics)
+            except Exception as e:
+                # an unexpected PDF: hand out TechDraw's own sheet files
+                _warn("couldn't put %s together (%s); writing each sheet as it is" % (out, e))
+                extra = []
+                import shutil
+                outs = [out] if len(parts) == 1 else sheet_paths(out, group)
+                for part, o in zip(parts, outs):
+                    shutil.copyfile(part, o)
+                    done.append(o)
+                continue
+            done.append(out)
+            done += extra
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return done
+
+
 def export_pages(pages, path, fmt, characteristics=None):
-    """Write each page; returns the files written (PDFs come with a real
-    text layer and, unless turned off, a characteristics file beside them)."""
+    """Write the pages; returns the files written. PDF: one file for all
+    the sheets (unless the 'OnePdf' preference is off), with a real text
+    layer, the document properties and, unless turned off, the
+    characteristics list inside it and beside it."""
     fmt = fmt.lower()
+    if fmt == "pdf":
+        return _export_pdfs(pages, path, characteristics)
     paths = sheet_paths(path, pages)
     done = []
     for page, out in zip(pages, paths):
@@ -92,11 +215,7 @@ def export_pages(pages, path, fmt, characteristics=None):
             import TechDrawGui
             page.ViewObject.show()        # the page must be open to be drawn
             Gui.updateGui()
-            if fmt == "pdf":
-                TechDrawGui.exportPageAsPdf(page, out)
-                if os.path.exists(out):
-                    done += finish_pdf(page, out, characteristics)
-            elif fmt == "svg":
+            if fmt == "svg":
                 TechDrawGui.exportPageAsSvg(page, out)
             else:
                 raise ValueError("Unknown format %s" % fmt)

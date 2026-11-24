@@ -1915,6 +1915,198 @@ class TestExport(DocTest):
         with open(done[0], encoding="utf-8", errors="ignore") as f:
             self.assertIn("ENTITIES", f.read())
 
+    def test_one_pdf_for_all_sheets(self):
+        import json
+        import tempfile
+        from DrawingKitTools import export, pdfdoc, textlayer
+        p1 = core.create_page(self.doc, "A3", "Landscape")
+        p2 = core.create_page(self.doc, "A3", "Landscape")
+        core.add_standard_views(p1, [self.box], front=FRONT)
+        self.doc.recompute()
+        texts = dict(p1.Template.EditableTexts)
+        if "drawing_number" in texts:
+            texts["drawing_number"] = "B-100"
+            texts["revision_index"] = "C"
+            p1.Template.EditableTexts = texts
+        d = tempfile.mkdtemp(prefix="dk_pdf_")
+        parts = []
+        for i in range(2):
+            path = os.path.join(d, "s%d.pdf" % i)
+            with open(path, "wb") as f:
+                f.write(qt_like_pdf("sheet %d" % (i + 1), update=(i == 1)))
+            parts.append(path)
+        out = os.path.join(d, "Box.pdf")
+        extra = export.finish_pdf([p1, p2], parts, out, characteristics=True)
+        s = pdfdoc.summary(out)
+        self.assertEqual(s["pages"], 2)
+        self.assertIn("DrawingKit", s["info"]["Creator"])
+        if "drawing_number" in texts:
+            self.assertEqual(s["info"]["DrawingNumber"], "B-100")
+            self.assertIn("revision C", s["info"]["Subject"])
+        inner = json.loads(s["attachments"]["Box.characteristics.json"].decode("utf-8"))
+        self.assertTrue(inner["embedded"])
+        self.assertEqual(len(inner["sheets"]), 2)
+        nos = [it["no"] for it in inner["characteristics"]]
+        self.assertEqual(nos, list(range(1, len(nos) + 1)))
+        # the file beside it: the same list, tied to this PDF
+        self.assertEqual(extra, [textlayer.characteristics_path(out)])
+        with open(extra[0], encoding="utf-8") as f:
+            side = json.load(f)
+        self.assertEqual(side["pdf_sha256"], textlayer.pdf_sha256(out))
+        self.assertEqual(len(side["characteristics"]), len(nos))
+
+
+def qt_like_pdf(label, update=False):
+    """A one-page PDF shaped like Qt's (MediaBox and Resources on the page,
+    an Info dictionary), optionally with an incremental update on top that
+    replaces the content, as DrawingKit's text layer does."""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 1190.55 841.89] >>",
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources 5 0 R >>",
+            None,
+            b"<< /ProcSet [/PDF /Text] /Font << >> >>",
+            b"<< /Producer (Qt 6) /Title (%s) >>" % label.encode()]
+    body = b"0 0 1 rg 10 10 100 100 re f"
+    objs[3] = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(body), body)
+    out = bytearray(b"%PDF-1.4\n")
+    offs = []
+    for i, o in enumerate(objs):
+        offs.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i + 1, o)
+    x = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+    out += b"trailer\n<< /Size %d /Root 1 0 R /Info 6 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objs) + 1, x)
+    if update:
+        more = b"q 1 0 0 rg (paren 1 0 R) Tj Q"
+        o7 = len(out)
+        out += b"7 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n" % (len(more), more)
+        o3 = len(out)
+        out += b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 7 0 R] " \
+               b"/Resources 5 0 R >>\nendobj\n"
+        x2 = len(out)
+        out += b"xref\n3 1\n%010d 00000 n \n7 1\n%010d 00000 n \n" % (o3, o7)
+        out += b"trailer\n<< /Size 8 /Root 1 0 R /Info 6 0 R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (
+            x, x2)
+    return bytes(out)
+
+
+class TestRealText(unittest.TestCase):
+    NOTE = ('<svg xmlns="http://www.w3.org/2000/svg" '
+            'xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace" '
+            'width="40mm" height="20mm" viewBox="0 0 40 20">'
+            '<g style="fill:none;stroke:#000"><path d="M 1,1 L 5,5"/></g>'
+            '<text freecad:editable="line1" style="font-size:5px;text-anchor:start" x="1" y="6.3">\n'
+            '  <tspan xml:space="preserve">NOTES:</tspan>\n </text>'
+            '<text freecad:editable="line2" style="font-size:5px" x="1" y="14.3">'
+            '<tspan>1. DEBURR.</tspan></text>'
+            '<g transform="translate(10,0)"><text x="2" y="3" style="text-anchor:middle">MID</text></g>'
+            '<text x="1" y="18" dx="2">SHIFTED</text>'
+            '<defs><text id="t" x="0" y="0">HIDDEN</text></defs>'
+            '</svg>')
+
+    def test_split_keeps_drawing_and_unhandled_text(self):
+        from DrawingKitTools import realtext
+        stripped, runs = realtext.split_svg(self.NOTE)
+        self.assertEqual([r.text for r in runs], ["NOTES:", "1. DEBURR.", "MID"])
+        # each line starts at its own text element's position
+        self.assertEqual([(r.x, r.y) for r in runs[:2]], [(1.0, 6.3), (1.0, 14.3)])
+        self.assertNotEqual(runs[0].element, runs[1].element)
+        # the group's translate is carried
+        self.assertEqual(runs[2].matrix[4], 10.0)
+        self.assertEqual(runs[2].st.get("text-anchor"), "middle")
+        self.assertIn("<path", stripped)
+        self.assertNotIn("NOTES:", stripped)
+        self.assertNotIn("MID", stripped)
+        # what DrawingKit can't place exactly stays drawn by Qt's SVG renderer
+        self.assertIn("SHIFTED", stripped)
+        self.assertIn("HIDDEN", stripped)
+
+    def test_template_field_values(self):
+        from DrawingKitTools import realtext
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" '
+               'xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace" '
+               'width="10mm" height="10mm" viewBox="0 0 10 10">'
+               '<text x="5" y="5" freecad:editable="title" style="text-anchor:middle">'
+               '<tspan>DEFAULT</tspan></text>'
+               '<text x="5" y="8" freecad:editable="part_material"><tspan>X</tspan></text></svg>')
+        stripped, runs = realtext.split_svg(svg, {"title": "BRACKET", "part_material": " "})
+        self.assertEqual([r.text for r in runs], ["BRACKET"])
+        self.assertNotIn("<text", stripped)
+
+    def test_transforms(self):
+        from DrawingKitTools import realtext
+        m = realtext.parse_transform("translate(10,5) rotate(90)")
+        # (1, 0) turned a quarter, then moved
+        x = m[0] * 1 + m[2] * 0 + m[4]
+        y = m[1] * 1 + m[3] * 0 + m[5]
+        self.assertAlmostEqual(x, 10.0)
+        self.assertAlmostEqual(y, 6.0)
+        m = realtext.parse_transform("rotate(-90 3 4)")
+        self.assertAlmostEqual(m[0] * 3 + m[2] * 4 + m[4], 3.0)
+        self.assertAlmostEqual(m[1] * 3 + m[3] * 4 + m[5], 4.0)
+
+    def test_page_template_splits(self):
+        from DrawingKitTools import realtext, templates
+        for style in ("iso", "ansi"):
+            svg = templates.make_svg("A3", "Landscape", style=style)
+            stripped, runs = realtext.split_svg(svg, {"title": "BRACKET"})
+            self.assertGreater(len(runs), 10, style)
+            self.assertNotIn("<text", stripped, style)
+            self.assertIn("BRACKET", [r.text for r in runs])
+
+
+class TestPdfDoc(unittest.TestCase):
+    def test_merge_keeps_pages_and_streams(self):
+        from DrawingKitTools import pdfdoc
+        a, b = qt_like_pdf("one"), qt_like_pdf("two", update=True)
+        data = pdfdoc.assemble([a, b], info={"Title": "Ø 12 Bracket"},
+                               custom={"DrawingNumber": "B-1", "bad key": "x"},
+                               attachments=[("data.json", b'{"a": 1}', "application/json", "d")])
+        pdf = pdfdoc.Pdf(data)
+        pages = pdf.pages()
+        self.assertEqual(len(pages), 2)
+        # the inherited MediaBox moved onto each page, the parent rebuilt
+        for num, _inh in pages:
+            head = pdf.head(num)
+            self.assertIn(b"1190.55", pdfdoc.get(head, "MediaBox"))
+        # the updated sheet keeps both content streams, unchanged
+        second = pdf.head(pages[1][0])
+        streams = [int(n) for n in re.findall(rb"(\d+) 0 R", pdfdoc.get(second, "Contents"))]
+        self.assertEqual(len(streams), 2)
+        self.assertEqual(pdf.objects[streams[1]][1], b"q 1 0 0 rg (paren 1 0 R) Tj Q")
+        s = pdfdoc.summary(data)
+        self.assertEqual(s["info"]["Title"], "Ø 12 Bracket")
+        self.assertEqual(s["info"]["DrawingNumber"], "B-1")
+        self.assertNotIn("bad key", s["info"])
+        self.assertEqual(s["info"]["Producer"], "Qt 6")
+        self.assertEqual(s["attachments"], {"data.json": b'{"a": 1}'})
+
+    def test_bare_colour_operator_dropped(self):
+        import zlib
+        from DrawingKitTools import pdfdoc
+        body = b"/CSp CS\n0 0 0 SCN\n/CSp CS\nSCN\n1 w\n/CSp cs\nscn\n0 0 m 1 1 l S"
+        data = zlib.compress(body)
+        head, out = pdfdoc.clean_stream(
+            b"<< /Filter /FlateDecode /Length %d >>" % len(data), data)
+        self.assertEqual(zlib.decompress(out),
+                         b"/CSp CS\n0 0 0 SCN\n/CSp CS\n1 w\n/CSp cs\n0 0 m 1 1 l S")
+        self.assertEqual(pdfdoc.get(head, "Length"), b"%d" % len(out))
+        # fonts and images are left alone
+        font = b"<< /Length1 10 /Filter /FlateDecode /Length %d >>" % len(data)
+        self.assertEqual(pdfdoc.clean_stream(font, data), (font, data))
+
+    def test_dictionary_editing(self):
+        from DrawingKitTools import pdfdoc
+        d = b"<< /A [1 (x \\) y) <</B 2>>] /C <</D (q>>)>> /E 3 0 R >>"
+        self.assertEqual([k for k, _v in pdfdoc.dict_items(d)], ["A", "C", "E"])
+        self.assertEqual(pdfdoc.ref(pdfdoc.get(d, "E")), 3)
+        d2 = pdfdoc.set_key(d, "C", None)
+        self.assertIsNone(pdfdoc.get(d2, "C"))
+        self.assertEqual(pdfdoc._renumber(b"<< /E 3 0 R /S (3 0 R) >>", {3: 9}),
+                         b"<< /E 9 0 R /S (3 0 R) >>")
+
 
 def threaded_plate(doc):
     """PartDesign body: 60 x 40 x 20 plate, two M6 holes through and one
@@ -2633,6 +2825,21 @@ class TestTextLayer(DocTest):
         r = textlayer.dimension_record(d)
         self.assertEqual(r["type"], "limit")
         self.assertEqual(len(r["limits"]), 2)
+        # FreeCAD showing inches: the value through the format spec, in
+        # inches (getText() would give '0.63 in')
+        dims.set_dimension(d, decimals=3, tol="symmetric", upper=0.001, lower=0.001)
+        self.doc.recompute()
+        keep = textlayer.values_unit
+        textlayer.values_unit = lambda: "in"
+        try:
+            r = textlayer.dimension_record(d)
+        finally:
+            textlayer.values_unit = keep
+        inch = float(d.getRawValue()) / 25.4
+        self.assertEqual(r["value_text"], "%.3f" % inch)
+        self.assertAlmostEqual(r["value"], inch, places=6)
+        self.assertEqual((r["upper"], r["lower"]), ("0.001", "-0.001"))
+        self.assertNotIn("in", r["text"])
 
     def test_general_tolerances_resolved(self):
         from DrawingKitTools import textlayer, titleblock as tb

@@ -3055,8 +3055,9 @@ class ExportSheets:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_Export.svg"),
                 "MenuText": "Export PDF / DXF",
-                "ToolTip": "Save the current sheet, or all sheets, as PDF, DXF or SVG "
-                           "(one file per sheet), named after the drawing number."}
+                "ToolTip": "Save the current sheet, or all sheets, as PDF (one file, a page "
+                           "per sheet, with the characteristics list inside), DXF or SVG "
+                           "(a file per sheet), named after the drawing number."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))

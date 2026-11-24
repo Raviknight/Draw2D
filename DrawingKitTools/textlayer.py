@@ -166,10 +166,37 @@ def _fmt(spec, value):
     if not m:
         return spec or ""
     places = int(m.group(2)) if m.group(2) else 2
-    s = ("%" + m.group(1) + ".%df") % places % value
+    s = ("%" + m.group(1) + ".%d" % places + "f") % value
     if m.group(3) in "wW":
         s = _drop_zeros(s)
     return spec[:m.start()] + s + spec[m.end():]
+
+
+def printed_text(dim):
+    """A dimension's value as TechDraw draws it, with its prefix and count
+    but no tolerance ('⌀10', '4X ⌀.250', '0.600')."""
+    spec = dim.FormatSpec or ""
+    if dim.Arbitrary:
+        return spec
+    k = _length_factor(dim)
+    try:
+        value = float(dim.getRawValue()) / k
+    except Exception:
+        value = None
+    if k != 1.0 and value is not None:
+        # getText() ignores the format spec outside millimetres ('0.63 in');
+        # TechDraw draws the value through the spec in the user's unit
+        return _fmt(spec or "%.2w", value).strip()
+    try:
+        printed = dim.getText()
+    except Exception:
+        printed = ""
+    printed = (printed or "").replace(" mm", "").replace("mm", "").strip()
+    if not printed and value is not None:
+        printed = _fmt(spec, value)
+    if "w" in spec:
+        printed = _drop_zeros(printed)    # %w: as drawn, without trailing zeros
+    return printed
 
 
 def dimension_record(dim):
@@ -180,8 +207,9 @@ def dimension_record(dim):
     count}."""
     from . import dims
     spec = dim.FormatSpec or ""
+    k = _length_factor(dim)
     try:
-        value = float(dim.getRawValue())
+        value = float(dim.getRawValue()) / k
     except Exception:
         value = None
     if dims.is_limits(dim):
@@ -190,18 +218,7 @@ def dimension_record(dim):
         return {"text": ("%s %s / %s" % (pre, hi, lo)).strip(), "value_text": None,
                 "value": value, "places": None, "upper": None, "lower": None,
                 "limits": [hi, lo], "type": "limit", "count": _count(spec)}
-    if dim.Arbitrary:
-        printed = spec
-    else:
-        try:
-            printed = dim.getText()
-        except Exception:
-            printed = ""
-        printed = (printed or "").replace(" mm", "").replace("mm", "").strip()
-        if not printed and value is not None:
-            printed = _fmt(spec, value)
-        if "w" in spec:
-            printed = _drop_zeros(printed)    # %w: as drawn, without trailing zeros
+    printed = printed_text(dim)
     # the number as printed (after any 4X count)
     body = re.sub(r"^\s*\d+\s*[Xx×]\s*", "", printed)
     num = re.search(r"[-+]?(?:\d+\.?\d*|\.\d+)", body)
@@ -210,8 +227,8 @@ def dimension_record(dim):
     reference = printed.strip().startswith("(") and printed.strip().endswith(")")
     over = under = 0.0
     try:
-        over = float(getattr(dim.OverTolerance, "Value", dim.OverTolerance))
-        under = float(getattr(dim.UnderTolerance, "Value", dim.UnderTolerance))
+        over = float(getattr(dim.OverTolerance, "Value", dim.OverTolerance)) / k
+        under = float(getattr(dim.UnderTolerance, "Value", dim.UnderTolerance)) / k
     except Exception:
         pass
     upper = lower = None
@@ -244,6 +261,14 @@ def dimension_record(dim):
     return {"text": text.strip(), "value_text": value_text, "value": value, "places": places,
             "upper": upper, "lower": lower, "limits": None, "type": ttype,
             "count": _count(spec)}
+
+
+def _length_factor(dim):
+    """Millimetres per printed unit for a dimension's value: 25.4 when
+    FreeCAD shows lengths in inches, 1 for millimetres and angles."""
+    if "Angle" in str(getattr(dim, "Type", "")):
+        return 1.0
+    return 25.4 if values_unit() == "in" else 1.0
 
 
 def _count(spec):
@@ -710,17 +735,72 @@ def sheet_info(page):
             "scale": t.get("scale", ""), "size_mm": [round(W, 2), round(H, 2)]}
 
 
+def characteristics_path(pdf_path):
+    """'Bracket.pdf' -> 'Bracket.characteristics.json'."""
+    return os.path.splitext(pdf_path)[0] + ".characteristics.json"
+
+
+def pdf_sha256(pdf_path):
+    import hashlib
+    try:
+        with open(pdf_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def write_characteristics(page, pdf_path):
     """Save the sheet's characteristics as JSON beside the PDF
     ('Bracket.pdf' -> 'Bracket.characteristics.json'). Returns the path."""
-    import hashlib
+    path = characteristics_path(pdf_path)
+    data = characteristics_data(page, pdf_path)
+    data["pdf_sha256"] = pdf_sha256(pdf_path)
+    save_json(data, path)
+    return path
+
+
+def save_json(data, path):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(json_text(data))
+    return path
+
+
+def json_text(data):
+    return json.dumps(data, indent=1, ensure_ascii=False) + "\n"
+
+
+def combine_characteristics(sheets):
+    """One list for a PDF of several sheets: the first sheet's header, each
+    sheet's own header under 'sheets', and every item numbered on through
+    the drawing ('no'; 'sheet_no' keeps its number on its sheet)."""
+    if len(sheets) == 1:
+        return sheets[0]
+    head = {k: v for k, v in sheets[0].items() if k != "characteristics"}
+    head["sheets"] = []
+    items, warnings = [], []
+    for s in sheets:
+        start = len(items)
+        head["sheets"].append({k: v for k, v in s.items()
+                               if k not in ("characteristics", "schema", "drawingkit",
+                                            "pdf", "pdf_sha256", "coordinates")})
+        for it in s["characteristics"]:
+            it = dict(it)
+            it["sheet_no"] = it["no"]
+            it["no"] = start + it["no"]
+            if it.get("duplicate_of_no"):
+                it["duplicate_of_no"] = start + it["duplicate_of_no"]
+            items.append(it)
+        warnings += ["%s: %s" % (s.get("sheet"), w) for w in s.get("warnings", [])]
+    head["warnings"] = warnings
+    head["characteristics"] = items
+    return head
+
+
+def characteristics_data(page, pdf_path):
+    """The characteristics file's contents for one sheet (``pdf_sha256``
+    left for the caller: the PDF may still change)."""
     from . import __version__
-    path = os.path.splitext(pdf_path)[0] + ".characteristics.json"
-    try:
-        with open(pdf_path, "rb") as f:
-            sha = hashlib.sha256(f.read()).hexdigest()
-    except OSError:
-        sha = None
+    sha = None
     items = characteristics(page)
     general = general_tolerances(page)
     warnings = []
@@ -751,10 +831,7 @@ def write_characteristics(page, pdf_path):
             "title_block": title_block(page),
             "warnings": warnings,
             "characteristics": items}
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, indent=1, ensure_ascii=False)
-        f.write("\n")
-    return path
+    return data
 
 
 # ---------------------------------------------------------------------------

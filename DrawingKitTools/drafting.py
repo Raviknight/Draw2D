@@ -292,11 +292,17 @@ def chamfer_text(ent, style="iso"):
     if dx < 1e-6 or dy < 1e-6:
         raise ValueError("Pick the slanted chamfer edge")
     ang = math.degrees(math.atan2(dy, dx))
+    from . import textlayer
+    if textlayer.values_unit() == "in":
+        # lengths shown in inches: three places, as an inch drawing reads
+        size = lambda v: "%.3f" % (v / 25.4)
+    else:
+        size = _fmt
     leg = min(dx, dy)
     if abs(ang - 45.0) < 0.5:
-        return ("C%s" % _fmt(leg)) if style == "c" else "%s x 45°" % _fmt(leg)
+        return ("C%s" % size(leg)) if style == "c" else "%s x 45°" % size(leg)
     # leg along the longer side and its angle
-    return "%s x %s°" % (_fmt(max(dx, dy)), _fmt(min(ang, 90 - ang)))
+    return "%s x %s°" % (size(max(dx, dy)), _fmt(min(ang, 90 - ang)))
 
 
 # ---------------------------------------------------------------------------

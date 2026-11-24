@@ -31,15 +31,11 @@ def _dim_font(dim):
 
 
 def dimension_text(dim):
+    from . import textlayer
     try:
-        t = dim.getText()
+        t = textlayer.printed_text(dim)
     except Exception:
         t = ""
-    t = t.replace(" mm", "").replace("mm", "")
-    if "w" in (dim.FormatSpec or ""):
-        # %w drops trailing zeros: 10.00 -> 10, 6.40 -> 6.4
-        t = re.sub(r"(\d+)\.(\d*?)0+(?!\d)",
-                   lambda m: m.group(1) + ("." + m.group(2) if m.group(2) else ""), t)
     return t or "00"
 
 

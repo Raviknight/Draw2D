@@ -468,13 +468,11 @@ def dim_text_side(dim, label_x):
     vo = getattr(dim, "ViewObject", None)
     if vo is not None and hasattr(vo, "Fontsize"):
         fs = float(getattr(vo.Fontsize, "Value", vo.Fontsize))
+    from . import textlayer
     try:
-        txt = dim.getText()            # e.g. '⌀10.00 mm'
+        txt = textlayer.printed_text(dim) or "⌀10"   # e.g. '⌀10'
     except Exception:
         txt = "⌀10"
-    txt = txt.replace(" mm", "").replace("mm", "")
-    if "w" in (dim.FormatSpec or "") and "." in txt:
-        txt = txt.rstrip("0").rstrip(".")   # %w drops trailing zeros
     from . import fonts
     w = len(txt) * fs * (fonts.width_factor(fonts.dimension_font(dim)) + 0.03)
     # the frame's edge just past the shoulder end where the leader leaves,
