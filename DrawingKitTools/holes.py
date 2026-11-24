@@ -467,6 +467,8 @@ def add_callout(page, view, group, shape=None, used_angles=None, clearance=10.0,
     if "%" not in dim.FormatSpec:
         dim.Arbitrary = True        # e.g. 'M6 - 6H THRU': text as written
     page.addView(dim)
+    from . import fonts
+    fonts.style_dimension(dim)
     dim.X, dim.Y = rel   # relative to the view centre, page mm
     set_horizontal_text(dim)
     dim.Label = "Hole %s" % fill_value(dim.FormatSpec, hole.radius * 2)

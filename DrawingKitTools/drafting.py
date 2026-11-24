@@ -19,6 +19,7 @@ import FreeCAD as App
 
 from . import annot
 from . import core
+from . import fonts
 from . import smartdim
 
 GAP = 1.5          # gap between a feature and its extension line (mm on paper)
@@ -163,6 +164,7 @@ def add_baseline(page, view, origin, features, axis="x", chain=False):
         dim.MeasureType = "Projected"
         dim.References2D = [(view, [names[a], names[n]])]
         page.addView(dim)
+        fonts.style_dimension(dim)
         row = k0 + (0 if chain else n - 1)
         mid = (coords[a][i] + coords[n][i]) / 2.0 * s
         if axis == "x":
@@ -634,6 +636,7 @@ def add_balloon(page, view, origin, place, text):
     b = doc.addObject("TechDraw::DrawViewBalloon", "Balloon")
     b.SourceView = view
     page.addView(b)
+    fonts.style_dimension(b)
     # balloon positions are in the view's own (unscaled) units from its centre
     cx, cy = core.view_center(view)
     s = core.view_scale(view)

@@ -1640,6 +1640,15 @@ class ToleranceDialog(QtWidgets.QDialog):
                 "angle_all": ang_all}
 
 
+def layout_key(page):
+    """'iso', 'iso_tol', 'ansi' or 'custom:<design>' of a page's title block."""
+    from . import titleblock as tb
+    st = tb.page_style(page)
+    if st.startswith("custom:"):
+        return st
+    return "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+
+
 class TitleBlockDialog(QtWidgets.QDialog):
     """Every field of a page's title block in one form, with saving the
     fields that are the same on every drawing as your defaults or to a
@@ -1653,7 +1662,8 @@ class TitleBlockDialog(QtWidgets.QDialog):
         lay = QtWidgets.QVBoxLayout(self)
         grid = QtWidgets.QGridLayout()
         self.edits = {}
-        rows = tb.fields(page)
+        # in-block tolerance rows are edited with "Tolerances by size..."
+        rows = [r for r in tb.fields(page) if not r[0].startswith("tolsize_")]
         half = (len(rows) + 1) // 2
         for i, (key, label, value) in enumerate(rows):
             col, row = (0, i) if i < half else (2, i - half)
@@ -1670,14 +1680,20 @@ class TitleBlockDialog(QtWidgets.QDialog):
         lay.addLayout(grid)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Layout of this sheet:"))
+        from . import blocks
+        own = sorted(((k, d["name"]) for k, (d, _p, _w) in blocks.designs().items()),
+                     key=lambda kv: kv[1].lower())
         self.layout_combo = QtWidgets.QComboBox()
         for val, text in (("iso", "ISO"), ("iso_tol", "ISO + tolerance row"),
                           ("ansi", "ANSI (tolerance block, checked by, size)")):
             self.layout_combo.addItem(text, val)
-        cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+        for k, name in own:
+            self.layout_combo.addItem(name, "custom:" + k)
+        cur = layout_key(page)
+        if self.layout_combo.findData(cur) < 0:
+            self.layout_combo.addItem(cur.replace("custom:", "") + " (not found)", cur)
         self.layout_combo.setCurrentIndex(self.layout_combo.findData(cur))
-        self.layout_combo.setToolTip("Swaps DrawingKit's title block at once, keeping what "
-                                     "you typed")
+        self.layout_combo.setToolTip("Swaps the title block at once, keeping what you typed")
         self.switch_to = None
 
         def switch(_i):
@@ -1686,11 +1702,18 @@ class TitleBlockDialog(QtWidgets.QDialog):
             self.done(2)
         self.layout_combo.currentIndexChanged.connect(switch)
         row.addWidget(self.layout_combo)
+        design = QtWidgets.QPushButton("Design title blocks...")
+        design.setToolTip("Draw your own title block: cells for fields, fixed text, your logo, "
+                          "the tolerances by size, the projection symbol")
+        design.clicked.connect(self.open_designer)
+        row.addWidget(design)
         row.addSpacing(16)
         row.addWidget(QtWidgets.QLabel("New sheets:"))
         self.new_combo = QtWidgets.QComboBox()
         for val, text in (("auto", "Auto (ANSI for ASME)"), ("ISO", "ISO"), ("ANSI", "ANSI")):
             self.new_combo.addItem(text, val)
+        for k, name in own:
+            self.new_combo.addItem(name, "custom:" + k)
         try:
             pref = App.ParamGet(tb.PREFS).GetString(tb.STYLE_PREF, "auto") or "auto"
         except Exception:
@@ -1701,7 +1724,7 @@ class TitleBlockDialog(QtWidgets.QDialog):
         lay.addLayout(row)
         # general tolerances by size range (a table on the sheet)
         from . import tables
-        self.tol_table = tables.tolerance_data(page)
+        self.tol_table = tb.block_tolerance_data(page) or tables.tolerance_data(page)
         self.tol_changed = False
         trow = QtWidgets.QHBoxLayout()
         trow.addWidget(QtWidgets.QLabel("General tolerances by size *:"))
@@ -1746,6 +1769,15 @@ class TitleBlockDialog(QtWidgets.QDialog):
         btns.addWidget(ok)
         lay.addLayout(btns)
 
+    def open_designer(self):
+        from . import blockdesigner
+        cur = layout_key(self.page)
+        start = cur[7:] if cur.startswith("custom:") else None
+        use = blockdesigner.run(self.page, start, self)
+        if use:
+            self.switch_to = use
+            self.done(2)
+
     def _show_company(self):
         path = self.tb.company_file()
         self.comp_label.setText("Company file: %s" % (path or "none"))
@@ -1761,7 +1793,8 @@ class TitleBlockDialog(QtWidgets.QDialog):
     def _show_tol(self):
         t = self.tol_table
         if not t:
-            self.tol_label.setText("none (no table on the sheet)")
+            self.tol_label.setText("none" if self.tb.block_tolerance_rows(self.page)
+                                   else "none (no table on the sheet)")
         else:
             n = len(t.get("linear", [])) + len(t.get("angular", []))
             extra = (", angles ±%s" % t["angle_all"].lstrip("±")) if t.get("angle_all") else ""
@@ -1815,6 +1848,42 @@ class TitleBlockDialog(QtWidgets.QDialog):
             self._show_tol()
 
 
+class DesignTitleBlock:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_DesignTitleBlock.svg"),
+                "MenuText": "Design title block...",
+                "ToolTip": "Draw your own title block: split and merge cells, and put a field, "
+                           "fixed text, your logo, the tolerances by size or the projection "
+                           "symbol in each. Save it for yourself or for the company; it then "
+                           "shows up as a layout in the Title block form and for new sheets."}
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+        from . import blockdesigner, titleblock as tb
+        page = target_page() if App.ActiveDocument is not None and \
+            pages(App.ActiveDocument) else None
+        cur = layout_key(page) if page is not None else ""
+        if page is not None and not tb.template_style(page):
+            page = None                     # not DrawingKit's template: can't swap it
+        use = blockdesigner.run(page, cur[7:] if cur.startswith("custom:") else None)
+        if not use or page is None:
+            return
+        doc = page.Document
+
+        def work():
+            if not tb.set_template_variant(page, style_=use):
+                raise ValueError("That title block doesn't fit inside this sheet's frame.")
+            core.make_room_for_tables(page)
+        try:
+            run_in_transaction(doc, "DrawingKit title block", work)
+        except ValueError as e:
+            warn(str(e))
+        doc.recompute()
+        redraw_template(page)
+
+
 class EditTitleBlock:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_EditTitleBlock.svg"),
@@ -1843,26 +1912,32 @@ class EditTitleBlock:
             if not res:
                 break
             vals = dlg.values()
-            want = dlg.layout_combo.currentData()
+            want = dlg.switch_to or dlg.layout_combo.currentData()
             tb.set_style_pref(dlg.new_combo.currentData())
-            cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+            cur = layout_key(page)
             tol = (dlg.tol_table, dlg.units()) if dlg.tol_changed else None
 
             def work():
                 changed = tb.set_fields(page, vals)
                 if tol is not None:
-                    from . import tables
-                    tables.set_tolerance_table(page, tol[0], tol[1])
-                    if tol[0]:
-                        core.make_room_for_tables(page)   # views off the new table
+                    if tb.block_tolerance_rows(page):
+                        tb.fill_block_tolerances(page, tol[0])   # rows in the title block
+                    else:
+                        from . import tables
+                        tables.set_tolerance_table(page, tol[0], tol[1])
+                        if tol[0]:
+                            core.make_room_for_tables(page)   # views off the new table
                 if want != cur:
-                    ok_ = tb.set_template_variant(page, tol_row=(want == "iso_tol"),
-                                                  style_="ansi" if want == "ansi" else "iso")
+                    style_ = want if want.startswith("custom:") else \
+                        ("ansi" if want == "ansi" else "iso")
+                    ok_ = tb.set_template_variant(page, tol_row=(want == "iso_tol"), style_=style_)
                     if not ok_:
-                        raise ValueError("That layout needs DrawingKit's own template (and the "
-                                         "ANSI block needs a sheet at least 210 mm wide inside "
-                                         "the frame).")
+                        raise ValueError("That layout needs DrawingKit's own template, and room "
+                                         "for the block inside the sheet's frame (the ANSI "
+                                         "block needs 210 mm).")
                     tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
+                    if want.startswith("custom:") or cur.startswith("custom:"):
+                        core.make_room_for_tables(page)
                 if tb.match_tolerance_mode(page):    # size table or X.X values, not both
                     tb.set_fields(page, {k: v for k, v in vals.items() if k != "sheet_number"})
                 return changed
@@ -3017,7 +3092,7 @@ def _one_click(page, hint, preview, done):
 class NoteDialog(ui.Popover):
     """Text (several lines), size, font and leader on/off in one small pop-up."""
 
-    def __init__(self, text="", size=3.5, font="osifont", leader=False, editing=False):
+    def __init__(self, text="", size=3.5, font=None, leader=False, editing=False):
         super().__init__("Edit note" if editing else "Note")
         self.text = QtWidgets.QPlainTextEdit(text)
         # tall enough for the note's lines (3 to 8 rows), then it scrolls
@@ -3115,7 +3190,8 @@ class TextStyle:
                 "ToolTip": "Change the text height and font of the selected dimensions, notes, "
                            "datums, tolerance frames and tables (symbols grow with their "
                            "text). With nothing selected it sets the size and font for new "
-                           "DrawingKit notes and symbols."}
+                           "DrawingKit notes, symbols and dimensions, and the title block font "
+                           "of new sheets (DejaVu Sans until you pick one)."}
 
     def IsActive(self):
         return App.ActiveDocument is not None
@@ -3132,7 +3208,7 @@ class TextStyle:
             title = "Text of %d item%s" % (len(objs), "" if len(objs) == 1 else "s")
         else:
             size, font = annot.default_size(), annot.default_font()
-            title = "Default text for new notes and symbols"
+            title = "Default text for new notes, symbols, dimensions and title blocks"
         pop = ui.Popover(title)
         row = ui.TextStyleRow(size, font)
         pop.add_row(*row.widgets(), stretch=True)
@@ -3141,7 +3217,8 @@ class TextStyle:
         size, font = row.value()
         if not objs:
             annot.set_defaults(size, font)
-            say("New notes and symbols: %g mm %s" % (size or annot.default_size(), font))
+            say("New notes, symbols, dimensions and title blocks: %g mm %s"
+                % (size or annot.default_size(), font))
             return
         doc = objs[0].Document
         run_in_transaction(doc, "DrawingKit text size and font",
@@ -3182,6 +3259,7 @@ COMMANDS = [
     ("DrawingKit_HoleTable", HoleTable()),
     ("DrawingKit_FillTitleBlock", FillTitleBlock()),
     ("DrawingKit_EditTitleBlock", EditTitleBlock()),
+    ("DrawingKit_DesignTitleBlock", DesignTitleBlock()),
     ("DrawingKit_Revision", AddRevision()),
     ("DrawingKit_FitToPage", FitToPage()),
     ("DrawingKit_ScaleUp", ScaleStep(+1)),
@@ -3215,7 +3293,7 @@ COMMAND_GROUPS = [
                                "DrawingKit_TextStyle"]),
     ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
                            "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
-                           "DrawingKit_EditTitleBlock",
+                           "DrawingKit_EditTitleBlock", "DrawingKit_DesignTitleBlock",
                            "DrawingKit_Revision", "DrawingKit_Export"]),
 ]
 

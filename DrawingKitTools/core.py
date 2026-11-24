@@ -326,10 +326,17 @@ def annotation_clashes(page, tol=0.5):
 
 def move_tables_clear(page):
     """Move each DrawingKit table that sits on a view's dimensions or
-    callouts to the first free spot. Returns True if one moved."""
+    callouts, or on the title block (after a switch to a bigger one), to
+    the first free spot. Returns True if one moved."""
     from . import annot, tables
     moved = False
     ann = tables._annotated_boxes(page)
+    try:
+        _frame, title = drawing_area(page.Template.Template, *page_size(page))
+        if title:
+            ann.append(title)
+    except Exception:
+        pass
     for v in page.Views:
         if getattr(v, "DrawingKitAnnot", "") not in ("bom", "holetable", "revtable", "toltable"):
             continue
@@ -1494,7 +1501,7 @@ def renumber_sheets(doc, force=False):
             continue
         texts = dict(tpl.EditableTexts)
         if "sheet_number" in texts:
-            want = titleblock.sheet_text(i + 1, n, titleblock.is_ansi(texts))
+            want = titleblock.sheet_text(i + 1, n, titleblock.sheet_of(p, texts))
             if texts["sheet_number"] != want:
                 texts["sheet_number"] = want
                 tpl.EditableTexts = texts

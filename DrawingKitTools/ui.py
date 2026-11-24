@@ -177,7 +177,10 @@ def combo(items, current=None, width=None):
 class TextStyleRow:
     """Size (mm, pick or type) and font widgets for one pop-up row."""
 
-    def __init__(self, size=3.5, font="osifont", sizes=(2.5, 3.5, 5.0, 7.0, 10.0)):
+    def __init__(self, size=3.5, font=None, sizes=(2.5, 3.5, 5.0, 7.0, 10.0)):
+        if not font:
+            from . import fonts
+            font = fonts.drawing_font()
         self.size = QtWidgets.QComboBox()
         self.size.setEditable(True)
         for s in sizes:
@@ -190,13 +193,14 @@ class TextStyleRow:
         v.setLocale(QtCore.QLocale.c())
         self.size.setValidator(v)
         self.font = QtWidgets.QFontComboBox()
-        self.font.setCurrentFont(QtGui.QFont(font or "osifont"))
+        self.font.setCurrentFont(QtGui.QFont(font))
         # a font that isn't installed shows as a stand-in; keep the real name
         # unless the user picks another one
-        self._font0 = font or "osifont"
+        self._font0 = font
         self._shown0 = self.font.currentFont().family()
         self.font.setFixedWidth(140)
-        self.font.setToolTip("Font (osifont is the ISO drawing font)")
+        self.font.setToolTip("Font (DejaVu Sans: plain, clear print font; osifont: "
+                             "hand-lettered ISO style)")
 
     def widgets(self):
         return ["Size", self.size, "mm", self.font]

@@ -76,7 +76,8 @@ def cells(tol_row=False, tol_mode="places"):
 def parse_name(path):
     """(size, orientation, first_angle) of a DrawingKit template file, or None."""
     import re
-    m = re.match(r"DrawingKit_(.+)_(Landscape|Portrait)_(1st|3rd)(_tol|_ansi|_toltab|_ansitab)?\.svg$",
+    m = re.match(r"DrawingKit_(.+?)_(Landscape|Portrait)_(1st|3rd)"
+                 r"(_tol|_ansi|_toltab|_ansitab|_c-[A-Za-z0-9-]+)?\.svg$",
                  os.path.basename(path or ""))
     if not m:
         return None
@@ -87,11 +88,53 @@ def parse_name(path):
     return size, m.group(2), m.group(3) == "1st"
 
 
+def parse_style(path):
+    """'iso', 'ansi' or 'custom:<design>' of a DrawingKit template file."""
+    import re
+    m = re.search(r"_(1st|3rd)(_tol|_ansi|_toltab|_ansitab|_c-[A-Za-z0-9-]+)?\.svg$",
+                  os.path.basename(path or ""))
+    if not m or not m.group(2):
+        return "iso"
+    if m.group(2).startswith("_c-"):
+        return "custom:" + m.group(2)[3:]
+    return "ansi" if m.group(2).startswith("_ansi") else "iso"
+
+
+def custom_design(style):
+    """The design of a 'custom:<name>' style, or None."""
+    if not style or not str(style).startswith("custom:"):
+        return None
+    from . import blocks
+    return blocks.find(style[7:])
+
+
+def fits(style, size, orientation):
+    """Does that title block fit inside the sheet's frame?"""
+    W, H = page_size(size, orientation)
+    if style == "ansi":
+        return W - 30.0 >= ANSI_MIN_FRAME_W
+    d = custom_design(style)
+    if d is not None:
+        return d["width"] <= W - 30.0 + 1e-6 and d["height"] <= H - 20.0 - 20.0
+    return not str(style).startswith("custom:")
+
+
 def page_size(size, orientation):
     if size not in SIZES or orientation not in ORIENTATIONS:
         raise ValueError("Unknown sheet %s %s" % (size, orientation))
     w, h = round(SIZES[size][0], 2), round(SIZES[size][1], 2)
     return (h, w) if orientation == "Portrait" else (w, h)
+
+
+def _ff():
+    """font-family for template text: the drawing font."""
+    from . import fonts
+    return fonts.css_family()
+
+
+def _wf():
+    from . import fonts
+    return fonts.width_factor()
 
 
 def _esc(text):
@@ -247,8 +290,8 @@ def _ansi_block(a, fx1, fy1, size, first_angle, tol_mode="places"):
     lines.append("M %g,%g V %g" % (mx - 18.0, yb, fy1))
     a('<path d="%s"/>' % " ".join(lines))
     a('</g>')
-    a('<g id="title_block_labels" style="font-size:1.8px;font-family:osifont;'
-      'fill:#000000;stroke:none">')
+    a('<g id="title_block_labels" style="font-size:1.8px;font-family:%s;'
+      'fill:#000000;stroke:none">' % _ff())
     a('<text x="%g" y="%g">TITLE</text>' % (mx + 1.0, ys[1] + 2.4))
     for row, c0, c1, label, *_ in ANSI_CELLS:
         a('<text x="%g" y="%g">%s</text>' % (mx + c0 + 1.0, ys[row] + 2.4, _esc(label)))
@@ -256,7 +299,7 @@ def _ansi_block(a, fx1, fy1, size, first_angle, tol_mode="places"):
     a('<text x="%g" y="%g" style="text-anchor:middle">%s ANGLE PROJECTION</text>'
       % (x0 + (ANSI_TOL_W - 18.0) / 2.0, fy1 - 1.2, "FIRST" if first_angle else "THIRD"))
     a('</g>')
-    a('<g id="title_block_data_fields" style="font-family:osifont;fill:#000000;stroke:none">')
+    a('<g id="title_block_data_fields" style="font-family:%s;fill:#000000;stroke:none">' % _ff())
     cx = mx + ANSI_MAIN_W / 2.0
     edit(cx, ys[0] + 6.2, "legal_owner_1", "", 4.5, "middle", "organization", bold=True)
     edit(cx, ys[0] + 10.3, "company_address", "", 2.2, "middle")
@@ -278,7 +321,8 @@ def _ansi_block(a, fx1, fy1, size, first_angle, tol_mode="places"):
                   % (tx, ty, weight, _esc(static)))
             if field:
                 off = {"": 0.0, ".X": 8.0, ".XX": 8.0, ".XXX": 8.0, ".XXXX": 8.0,
-                       "ANGLES": 10.0}.get(static, len(static) * 1.1 + 1.0)
+                       "ANGLES": 10.0 * _wf() / 0.52}.get(
+                    static, len(static) * 2.3 * _wf() * 0.95 + 1.0)
                 edit(tx + off, ty, field, default, 2.3)
         ty += 3.6
     a('</g>')
@@ -292,8 +336,9 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
     ``tol_mode`` 'table': general tolerances are in a size table on the
     sheet, so no X.X / X.XX / X.XXX cells)."""
     W, H = page_size(size, orientation)
-    if style == "ansi" and W - 30.0 < ANSI_MIN_FRAME_W:
-        style = "iso"                       # no room: keep the ISO block
+    design = custom_design(style)
+    if style != "iso" and not fits(style, size, orientation):
+        style, design = "iso", None         # no room (or no such design): the ISO block
     rows = 5 if tol_row else 4
     tb_h = rows * ROW_H
     all_cells = cells(tol_row, tol_mode)
@@ -305,6 +350,7 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
     a = out.append
     a('<?xml version="1.0" encoding="UTF-8" standalone="no"?>')
     a('<svg xmlns="http://www.w3.org/2000/svg" '
+      'xmlns:xlink="http://www.w3.org/1999/xlink" '
       'xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace" '
       'version="1.1" width="%gmm" height="%gmm" viewBox="0 0 %g %g">' % (W, H, W, H))
     a('<!-- DrawingKit template: %s %s, %s angle projection -->'
@@ -316,10 +362,14 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
     a('<rect id="drawing_space_frame" x="%g" y="%g" width="%g" height="%g" '
       'style="stroke-width:0.7"/>' % (fx0, fy0, fx1 - fx0, fy1 - fy0))
     cx, cy = (fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0
-    # centring marks
+    # centring marks (stopping at the frame where the title block reaches them)
+    tb_w = design["width"] if design else (ANSI_W if style == "ansi" else TB_W)
+    tb_hh = design["height"] if design else (ANSI_H if style == "ansi" else tb_h)
+    bottom_in = fy1 if fx1 - tb_w <= cx + 1e-6 else fy1 - 5
+    right_in = fx1 if fy1 - tb_hh <= cy + 1e-6 else fx1 - 5
     a('<path style="stroke-width:0.7" d="M %g,%g V %g M %g,%g V %g M %g,%g H %g M %g,%g H %g"/>'
-      % (cx, gy0 - 5 + 5, fy0 + 5, cx, gy1, fy1 - 5,
-         gx0, cy, fx0 + 5, gx1, cy, fx1 - 5))
+      % (cx, gy0 - 5 + 5, fy0 + 5, cx, gy1, bottom_in,
+         gx0, cy, fx0 + 5, gx1, cy, right_in))
     # zone ticks and labels
     xs = _zones(fx0, fx1, cx)
     ys = _zones(fy0, fy1, cy)
@@ -330,8 +380,8 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
         ticks.append("M %g,%g H %g M %g,%g H %g" % (gx0, y, fx0, fx1, y, gx1))
     a('<path style="stroke-width:0.35" d="%s"/>' % " ".join(ticks))
     a('</g>')
-    a('<g id="drawingkit_zones" style="font-size:3.5px;font-family:osifont;text-anchor:middle;'
-      'fill:#000000;stroke:none">')
+    a('<g id="drawingkit_zones" style="font-size:3.5px;font-family:%s;text-anchor:middle;'
+      'fill:#000000;stroke:none">' % _ff())
     for i, (x0, x1) in enumerate(zip(xs, xs[1:])):
         lab = _zone_labels(len(xs) - 1, False)[i]
         xm = (x0 + x1) / 2.0
@@ -346,6 +396,13 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
 
     if style == "ansi":
         _ansi_block(a, fx1, fy1, size, first_angle, tol_mode)
+        a('</svg>')
+        return "\n".join(out) + "\n"
+    if design is not None:
+        from . import blocks
+        a('<!-- title block: %s -->' % blocks._esc(design["name"]).replace("--", "- -"))
+        a(blocks.svg(design, fx1 - design["width"], fy1 - design["height"], sheet_letter(size),
+                     first_angle))
         a('</svg>')
         return "\n".join(out) + "\n"
 
@@ -364,12 +421,12 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
             lines.append("M %g,%g V %g" % (tx0 + x0, y, y + ROW_H))
     a('<path d="%s"/>' % " ".join(sorted(set(lines))))
     a('</g>')
-    a('<g id="title_block_labels" style="font-size:%gpx;font-family:osifont;'
-      'fill:#000000;stroke:none">' % LABEL_FONT)
+    a('<g id="title_block_labels" style="font-size:%gpx;font-family:%s;'
+      'fill:#000000;stroke:none">' % (LABEL_FONT, _ff()))
     for row, x0, x1, label, *_ in all_cells:
         a('<text x="%g" y="%g">%s</text>' % (tx0 + x0 + 1.0, ty0 + row * ROW_H + 2.8, _esc(label)))
     a('</g>')
-    a('<g id="title_block_data_fields" style="font-family:osifont;fill:#000000;stroke:none">')
+    a('<g id="title_block_data_fields" style="font-family:%s;fill:#000000;stroke:none">' % _ff())
     for row, x0, x1, label, name, default, autofill, font, align in all_cells:
         y = ty0 + row * ROW_H + (7.6 if font < TITLE_FONT else 8.0)
         x = tx0 + (x0 + 1.5 if align == "start" else (x0 + x1) / 2.0)
@@ -397,11 +454,16 @@ def template_path(size, orientation, first_angle=True, out_dir=None, tol_row=Fal
     """Write (if changed) and return the path of a DrawingKit template."""
     out_dir = out_dir or template_dir()
     os.makedirs(out_dir, exist_ok=True)
-    if style == "ansi" and not fits_ansi(size, orientation):
+    if style != "iso" and not fits(style, size, orientation):
         style = "iso"
-    suffix = "_ansi" if style == "ansi" else ("_tol" if tol_row else "")
-    if suffix and tol_mode == "table":
-        suffix += "tab"
+    if str(style).startswith("custom:"):
+        from . import blocks
+        suffix = "_c-" + blocks.slug(style[7:])
+        tol_row = False
+    else:
+        suffix = "_ansi" if style == "ansi" else ("_tol" if tol_row else "")
+        if suffix and tol_mode == "table":
+            suffix += "tab"
     name = "DrawingKit_%s_%s_%s%s.svg" % (size.replace(" ", ""), orientation,
                                       "1st" if first_angle else "3rd", suffix)
     path = os.path.join(out_dir, name)

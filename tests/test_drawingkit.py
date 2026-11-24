@@ -18,6 +18,8 @@ _titleblock.user_file = lambda: _NO_DEFAULTS
 _titleblock.company_file = lambda: ""
 _titleblock.style = lambda: "iso"
 _titleblock.wants_tolerance_row = lambda: False
+from DrawingKitTools import blocks as _blocks
+_blocks.user_dir = lambda: os.path.join(os.path.dirname(_NO_DEFAULTS), "TitleBlocks")
 
 # the model's own front view (most tests are written against it)
 FRONT = core.STANDARD_DIRECTIONS["Front"]
@@ -2269,6 +2271,142 @@ class TestShadedView(DocTest):
         self.assertGreaterEqual(len(shades), 3)
         polys = shaded.edges([a, b], dd, right, up, 50.0)
         self.assertGreaterEqual(len(polys), 9 + 9)         # 9 visible edges per box
+
+
+class TestTitleBlockDesigns(DocTest):
+    """Title blocks of your own: cells, logo, tolerances by size in the block."""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        import tempfile
+        from DrawingKitTools import blocks, templates, titleblock
+        self.blocks, self.templates, self.tb = blocks, templates, titleblock
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (blocks.user_dir, templates.template_dir, titleblock.user_file)
+        blocks.user_dir = lambda: os.path.join(self.tmp, "TitleBlocks")
+        templates.template_dir = lambda: os.path.join(self.tmp, "Templates")
+        titleblock.user_file = lambda: os.path.join(self.tmp, "mine.json")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def tearDown(self):
+        self.blocks.user_dir, self.templates.template_dir, self.tb.user_file = self._saved
+        super().tearDown()
+
+    def test_split_merge_and_move_lines(self):
+        b = self.blocks
+        d = b.new_design("T", 100, 40)
+        left, right = b.split(d, 0, "h")
+        self.assertAlmostEqual(d["cells"][right]["x"], 50.0)
+        top, bottom = b.split(d, right, "v")
+        self.assertAlmostEqual(d["cells"][bottom]["y"], 20.0)
+        # moving the middle line moves both right-hand cells with it
+        b.move_edge(d, left, "right", 60.0)
+        self.assertAlmostEqual(d["cells"][left]["w"], 60.0)
+        self.assertTrue(all(abs(d["cells"][i]["x"] - 60.0) < 1e-9 for i in (top, bottom)))
+        self.assertTrue(all(abs(d["cells"][i]["w"] - 40.0) < 1e-9 for i in (top, bottom)))
+        # can't squash a cell to nothing, and the outline doesn't move
+        self.assertAlmostEqual(b.move_edge(d, left, "right", 99.9), 100 - b.MIN_CELL)
+        self.assertAlmostEqual(b.move_edge(d, left, "left", 10.0), 0.0)
+        b.move_edge(d, left, "right", 60.0)
+        i = b.merge(d, top, "below")
+        self.assertAlmostEqual(d["cells"][i]["h"], 40.0)
+        self.assertEqual(len(d["cells"]), 2)
+        with self.assertRaises(ValueError):
+            b.merge(d, i, "right")                 # nothing to the right
+        self.assertEqual(b.problems(d), [])
+        b.resize(d, 200, 50)
+        self.assertAlmostEqual(d["cells"][i]["x"], 120.0)
+        self.assertAlmostEqual(d["cells"][i]["h"], 50.0)
+
+    def test_problems_found(self):
+        b = self.blocks
+        d = b.new_design("T", 100, 20)
+        b.split(d, 0, "h")
+        for c in d["cells"]:
+            c.update(kind="field", field="title")
+        self.assertTrue(any("same field" in p for p in b.problems(d)))
+        d["cells"].pop()
+        self.assertTrue(any("don't fill" in p for p in b.problems(d)))
+
+    def test_tolerance_rows_from_a_saved_table(self):
+        from DrawingKitTools import tables
+        v = self.blocks.tolerance_values(dict(tables.iso2768("m"), angle_all="1°"), 6)
+        self.assertEqual(v["tolsize_r1"], "0.5-3")
+        self.assertEqual(v["tolsize_t1"], "±0.1")
+        self.assertEqual(v["tolsize_r5"], ">120")         # the rest in one open-ended row
+        self.assertEqual((v["tolsize_r6"], v["tolsize_t6"]), ("∠", "±1°"))
+
+    def test_svg_has_fields_logo_and_upright_text(self):
+        b = self.blocks
+        d = b.preset_size_table()
+        png = os.path.join(self.tmp, "logo.png")
+        import base64
+        with open(png, "wb") as f:     # 1 x 1 PNG
+            f.write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+        logo = [c for c in d["cells"] if c["kind"] == "logo"][0]
+        b.load_image(logo, png)
+        self.assertEqual(b.image_size(logo), (1, 1))
+        s = b.svg(d, 0, 0, "A3")
+        for name in ("title", "drawing_number", "sheet_number", "tolsize_r1", "tolsize_t6"):
+            self.assertIn('freecad:editable="%s"' % name, s)
+        self.assertIn('freecad:autofill="date"', s)
+        self.assertIn("data:image/png;base64,", s)
+        self.assertIn("rotate(-90", s)                       # CONFIDENTIAL runs upwards
+        self.assertEqual(b.problems(d), [])
+
+    def test_saved_design_becomes_the_sheet_template(self):
+        from DrawingKitTools import tables
+        b, t, tb = self.blocks, self.templates, self.tb
+        d = b.preset_size_table()
+        d["name"] = "Shop block"
+        b.save(d)
+        self.assertIn("Shop-block", b.designs())
+        path = t.template_path("A3", "Landscape", True, self.tmp, style="custom:Shop-block")
+        self.assertTrue(path.endswith("_c-Shop-block.svg"))
+        self.assertEqual(t.parse_name(path), ("A3", "Landscape", True))
+        self.assertEqual(t.parse_style(path), "custom:Shop-block")
+        _, title = core.drawing_area(path, 420, 297)
+        self.assertAlmostEqual(title[2] - title[0], 200.0, places=3)
+        self.assertAlmostEqual(title[3] - title[1], 50.0, places=3)
+        # a sheet with a size table on it switches to the block: the rows move in
+        tb.save_user_defaults({tb.TOL_TABLE: dict(tables.iso2768("m"), angle_all="1°")})
+        page = core.create_page(self.doc, "A3", "Landscape")
+        self.assertIsNotNone(tables.tolerance_table(page))
+        self.assertTrue(tb.set_template_variant(page, style_="custom:Shop-block"))
+        self.assertEqual(tb.page_style(page), "custom:Shop-block")
+        self.assertFalse(tb.is_ansi(page))
+        self.assertEqual(tb.block_tolerance_rows(page), 6)
+        self.assertIsNone(tables.tolerance_table(page))
+        texts = dict(page.Template.EditableTexts)
+        self.assertEqual(texts["tolsize_t3"], "±0.2")
+        self.assertTrue(texts["sheet_number"].endswith("OF 1"))
+        data = tb.block_tolerance_data(page)
+        self.assertEqual(data["linear"][0], ["0.5", "3", "±0.1"])
+        self.assertEqual(data["angle_all"], "±1°")
+        # saved again with a new caption: the open sheet follows, keeping its values
+        tb.set_fields(page, {"drawing_number": "D-77"})
+        d["cells"][1]["label"] = "GENERAL TOL."
+        b.save(d)
+        self.assertEqual(tb.refresh_design("Shop-block"), [page])
+        with open(page.Template.Template, encoding="utf-8") as f:
+            self.assertIn("GENERAL TOL.", f.read())
+        self.assertEqual(dict(page.Template.EditableTexts)["drawing_number"], "D-77")
+        # and back to the ISO block: the table comes back on the sheet
+        self.assertTrue(tb.set_template_variant(page, style_="iso"))
+        self.assertIsNotNone(tables.tolerance_table(page))
+        # a design too big for the sheet isn't used
+        d["width"], d["name"] = 400.0, "Huge"
+        b.save(d)
+        self.assertFalse(t.fits("custom:Huge", "A4", "Portrait"))
+        self.assertNotIn("_c-", os.path.basename(
+            t.template_path("A4", "Portrait", True, self.tmp, style="custom:Huge")))
+
+    def test_drawing_font(self):
+        from DrawingKitTools import fonts, templates
+        self.assertEqual(fonts.drawing_font(), "DejaVu Sans")
+        self.assertIn("font-family:'DejaVu Sans'", templates.make_svg("A3", "Landscape"))
+        self.assertTrue(fonts._font_files())                 # FreeCAD carries it
 
 
 class TestBalloonLeaders(unittest.TestCase):

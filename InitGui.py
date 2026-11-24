@@ -4,6 +4,12 @@
 # everything the class needs inside the methods themselves.
 import FreeCADGui as Gui
 
+try:   # the drawing font, so saved drawings show right before the workbench loads
+    from DrawingKitTools import fonts as _dk_fonts
+    _dk_fonts.ensure_registered()
+except Exception:
+    pass
+
 
 class DrawingKitWorkbench(Gui.Workbench):
     MenuText = "DrawingKit"
@@ -43,7 +49,8 @@ class DrawingKitWorkbench(Gui.Workbench):
 
     def Initialize(self):
         import TechDrawGui  # noqa: F401  (page display, and registers TechDraw's commands)
-        from DrawingKitTools import commands
+        from DrawingKitTools import commands, fonts
+        fonts.ensure_registered()      # DejaVu Sans, the drawing font
         for name, cmds in commands.COMMAND_GROUPS:
             self.appendToolbar(name, cmds)
         self.appendMenu("DrawingKit", commands.COMMAND_NAMES)

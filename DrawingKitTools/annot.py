@@ -51,15 +51,9 @@ def default_size():
 
 
 def default_font():
-    """Until one is set, TechDraw's label font."""
-    try:
-        f = App.ParamGet(PREFS).GetString("Font", "")
-        if f:
-            return f
-        return App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/Labels").GetString(
-            "LabelFont", "osifont") or "osifont"
-    except Exception:
-        return "osifont"
+    """The drawing font: the one chosen in Text style, else DejaVu Sans."""
+    from . import fonts
+    return fonts.drawing_font()
 
 
 def set_defaults(size=None, font=None):
@@ -213,7 +207,7 @@ class Sketch:
         self.items = []
         self.xs, self.ys = [], []
         self.k = k                       # text size / 3.5 mm
-        self.font = font or "osifont"
+        self.font = font or default_font()
         self.body = None                 # the part that must not clash (no leader)
 
     def _p(self, x, y):
@@ -481,7 +475,8 @@ def dim_text_side(dim, label_x):
     txt = txt.replace(" mm", "").replace("mm", "")
     if "w" in (dim.FormatSpec or "") and "." in txt:
         txt = txt.rstrip("0").rstrip(".")   # %w drops trailing zeros
-    w = len(txt) * fs * 0.55
+    from . import fonts
+    w = len(txt) * fs * (fonts.width_factor(fonts.dimension_font(dim)) + 0.03)
     # the frame's edge just past the shoulder end where the leader leaves,
     # so the leader runs clear of it
     return ("left" if p1[0] < label_x else "right"), w / 2.0 - 1.5
@@ -709,7 +704,9 @@ def dim_text_box(dim):
         has_tol, over, under = False, "", ""
     if has_tol and not dim.TheoreticalExact:
         fs = clearance._dim_font(dim)
-        tw = max(len(over), len(under), 4) * fs * 0.58 * 0.75 + 1.0
+        from . import fonts
+        tw = max(len(over), len(under), 4) * fs * (fonts.width_factor(fonts.dimension_font(dim))
+                                                   + 0.06) * 0.75 + 1.0
         if _text_upright(dim):               # value reads upwards: tolerance above it
             y1 += tw
         else:
@@ -752,8 +749,8 @@ def draw_note(sk, anchor, box_centre, lines, align="left"):
     when anchor is given."""
     size = gdt.FONT * sk.k
     pitch = size * 1.6
-    # osifont capitals average about half the text height wide
-    w = max(len(ln) for ln in lines) * size * 0.52 if lines else size
+    from . import fonts
+    w = max(len(ln) for ln in lines) * size * fonts.width_factor(sk.font) if lines else size
     h = pitch * (len(lines) - 1)
     bx, by = box_centre
     x0 = bx - w / 2.0
@@ -1267,7 +1264,7 @@ def text_style(obj):
     None if the object has no text."""
     if is_annotation(obj):
         p = _params(obj)
-        return float(p.get("tsize", 3.5)), p.get("font", "osifont")
+        return float(p.get("tsize", 3.5)), p.get("font") or default_font()
     if obj.isDerivedFrom("TechDraw::DrawViewDimension") or obj.isDerivedFrom("TechDraw::DrawViewBalloon"):
         vo = getattr(obj, "ViewObject", None)
         if vo is not None and hasattr(vo, "Fontsize"):

@@ -418,6 +418,8 @@ def add_dimension(page, view, picks, mouse_local, label_page=None):
     dim.MeasureType = "Projected"
     dim.References2D = [(view, names)]
     page.addView(dim)
+    from . import fonts
+    fonts.style_dimension(dim)
     cx, cy = core.view_center(view)
     s = core.view_scale(view)
     if label_page is None:

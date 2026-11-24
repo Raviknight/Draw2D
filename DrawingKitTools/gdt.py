@@ -93,9 +93,12 @@ def symbol_paths(name, x0, y0, h=H):
     raise ValueError("Unknown characteristic %r" % name)
 
 
-def _text(x, y, txt, editable=None, anchor="middle", size=FONT, font="osifont"):
+def _text(x, y, txt, editable=None, anchor="middle", size=FONT, font=None):
     ed = ' freecad:editable="%s"' % editable if editable else ""
-    font = (font or "osifont").replace("'", "").replace('"', "").replace(";", "")
+    if not font:
+        from . import fonts
+        font = fonts.drawing_font()
+    font = font.replace("'", "").replace('"', "").replace(";", "")
     return ('<text x="%.3f" y="%.3f"%s style="font-size:%gpx;font-family:\'%s\';'
             'text-anchor:%s;fill:#000000;stroke:none"><tspan>%s</tspan></text>'
             % (x, y, ed, size, _esc(font), anchor, _esc(txt)))

@@ -72,22 +72,61 @@ def style():
         pref = "auto"
     if pref.upper() in ("ISO", "ANSI"):
         return pref.lower()
+    if pref.startswith("custom:"):
+        from . import templates
+        if templates.custom_design(pref) is not None:
+            return pref
     return "ansi" if standards.is_asme() else "iso"
 
 
 def set_style_pref(value):
-    if value not in ("auto", "ISO", "ANSI"):
-        raise ValueError("Title block style must be auto, ISO or ANSI")
+    if value not in ("auto", "ISO", "ANSI") and not str(value).startswith("custom:"):
+        raise ValueError("Title block style must be auto, ISO, ANSI or custom:<design>")
     App.ParamGet(PREFS).SetString(STYLE_PREF, value)
+
+
+def template_style(page):
+    """'iso', 'ansi' or 'custom:<design>' from the page's template file
+    ('' for a template that isn't DrawingKit's)."""
+    from . import templates
+    tpl = page.Template
+    path = getattr(tpl, "Template", "") or "" if tpl is not None else ""
+    if templates.parse_name(path) is None:
+        return ""
+    return templates.parse_style(path)
+
+
+def is_custom(page):
+    return template_style(page).startswith("custom:")
 
 
 def is_ansi(page_or_texts):
     texts = page_or_texts
     if not isinstance(texts, dict):
+        if is_custom(page_or_texts):
+            return False
         tpl = page_or_texts.Template
         texts = dict(tpl.EditableTexts) if tpl is not None and \
             "EditableTexts" in tpl.PropertiesList else {}
     return "checked_by" in texts
+
+
+def sheet_of(page, texts=None):
+    """Sheet numbers as '1 OF 3' (ANSI, or a design that writes it so)
+    rather than '1 / 3'?"""
+    if texts is None:
+        texts = _texts(page)
+    if is_custom(page):
+        cur = (texts.get("sheet_number") or "").upper()
+        if cur.strip():
+            return " OF " in cur
+        from . import templates
+        d = templates.custom_design(template_style(page))
+        for c in (d or {}).get("cells", []):
+            if c.get("field") == "sheet_number":
+                return "OF" in (c.get("text") or "").upper()
+        return False
+    return is_ansi(texts)
 
 
 def sheet_text(i, n, ansi=False):
@@ -216,6 +255,11 @@ def apply_tolerance_table(page, values=None):
     from . import tables
     vals = load_defaults() if values is None else values
     data = vals.get(TOL_TABLE)
+    if block_tolerance_rows(page):
+        # the title block has its own rows: no table on the sheet
+        if data and block_tolerance_data(page) is None:
+            fill_block_tolerances(page, data)
+        return None
     if data and tables.tolerance_table(page) is None:
         return tables.set_tolerance_table(page, data, units_label(vals))
     return None
@@ -286,7 +330,61 @@ def tolerance_mode(page):
 
 
 def page_style(page):
+    st = template_style(page)
+    if st.startswith("custom:"):
+        return st
     return "ansi" if is_ansi(page) else "iso"
+
+
+# ---------------------------------------------------------------------------
+# tolerances by size inside a title block of your own
+# ---------------------------------------------------------------------------
+def block_tolerance_rows(page):
+    """Number of tolerance-by-size rows in the page's title block (0: none)."""
+    from . import blocks
+    t = _texts(page)
+    n = 0
+    while (blocks.TOL_RANGE % (n + 1)) in t:
+        n += 1
+    return n
+
+
+def fill_block_tolerances(page, data):
+    """Write a tolerance table ({'linear', 'angular', 'angle_all'}) into the
+    title block's own tolerance rows. True if the block has them."""
+    from . import blocks
+    n = block_tolerance_rows(page)
+    if not n:
+        return False
+    set_fields(page, blocks.tolerance_values(data, n))
+    return True
+
+
+def block_tolerance_data(page):
+    """The page's in-block tolerance rows as a tolerance table, or None."""
+    from . import blocks
+    t = _texts(page)
+    n = block_tolerance_rows(page)
+    lin, ang = [], ""
+    for i in range(1, n + 1):
+        r, v = (t.get(blocks.TOL_RANGE % i) or "").strip(), (t.get(blocks.TOL_VALUE % i) or "").strip()
+        if not v:
+            continue
+        if r in ("∠", "ANGLES", "ANGULAR"):
+            ang = v
+            continue
+        if r.startswith("<"):
+            lin.append(["", r[1:], v])
+        elif r.startswith(">"):
+            lin.append([r[1:], "", v])
+        elif "-" in r:
+            a, b = r.split("-", 1)
+            lin.append([a.strip(), b.strip(), v])
+        else:
+            lin.append(["", r, v])
+    if not lin and not ang:
+        return None
+    return {"preset": "", "linear": lin, "angular": [], "angle_all": ang}
 
 
 def match_tolerance_mode(page):
@@ -294,6 +392,8 @@ def match_tolerance_mode(page):
     on the sheet the title block drops its X.X / X.XX / X.XXX values (and
     gets them back when the table goes). Returns True if it switched."""
     from . import tables
+    if is_custom(page):
+        return False                 # your own block is as you drew it
     want = "table" if tables.tolerance_table(page) is not None else "places"
     t = _texts(page)
     if "units" not in t or tolerance_mode(page) == want:
@@ -314,14 +414,16 @@ def set_template_variant(page, tol_row=None, style_=None, tol_mode=None):
         return False
     size, orient, first = info
     style_ = style_ or page_style(page)
-    if style_ == "ansi" and not templates.fits_ansi(size, orient):
+    if style_ != "iso" and not templates.fits(style_, size, orient):
         return False
     if tol_row is None:
         tol_row = has_tolerance_row(page)
+    from . import tables
     if tol_mode is None:
-        from . import tables
         tol_mode = "table" if tables.tolerance_table(page) is not None else "places"
     keep = dict(tpl.EditableTexts)
+    # the tolerances by size, wherever they are now (block rows or a table)
+    tol_data = block_tolerance_data(page) or tables.tolerance_data(page)
     tpl.Template = templates.template_path(size, orient, first, tol_row=tol_row, style=style_,
                                            tol_mode=tol_mode)
     texts = dict(tpl.EditableTexts)
@@ -329,6 +431,20 @@ def set_template_variant(page, tol_row=None, style_=None, tol_mode=None):
         if k in texts and k != "sheet_number":
             texts[k] = v
     tpl.EditableTexts = texts
+    if block_tolerance_rows(page):
+        if tol_data:
+            fill_block_tolerances(page, tol_data)
+            if tables.tolerance_table(page) is not None:   # now in the block: table goes
+                t = tables.tolerance_table(page)
+                page.removeView(t)
+                page.Document.removeObject(t.Name)
+    elif tol_data and tables.tolerance_table(page) is None and not str(style_).startswith("custom:"):
+        tables.set_tolerance_table(page, tol_data, units_label(texts))
+    try:
+        page.Document.recompute()
+        core.move_tables_clear(page)      # off a taller title block
+    except Exception:
+        pass
     apply_defaults(page)
     try:
         core.set_title_block_scale(page, core.view_scale(core.page_content(page)[0]))
@@ -336,6 +452,24 @@ def set_template_variant(page, tol_row=None, style_=None, tol_mode=None):
         pass
     core.renumber_sheets(page.Document, force=True)
     return True
+
+
+def refresh_design(key):
+    """After a design is saved again: redraw the title block of every sheet
+    using it in the open drawings (FreeCAD keeps its own copy of the
+    template in each drawing). Returns the sheets updated."""
+    style_ = "custom:" + key
+    done = []
+    for doc in App.listDocuments().values():
+        for page in [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")]:
+            try:
+                if template_style(page) == style_ and set_template_variant(page, style_=style_):
+                    done.append(page)
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit: %s: %s\n" % (page.Label, e))
+        if any(p.Document is doc for p in done):
+            doc.recompute()
+    return done
 
 
 def set_tolerance_row(page, on):
