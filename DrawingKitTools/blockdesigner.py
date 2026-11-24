@@ -412,7 +412,9 @@ class TitleBlockDesigner(QtWidgets.QDialog):
     def changed(self, remember=False):
         self.canvas.refresh()
         probs = blocks.problems(self.design)
-        self.problem.setText("  ".join(probs))
+        warn_ = blocks.warnings(self.design)
+        self.problem.setStyleSheet("color:#c0392b" if probs else "color:#b9770e")
+        self.problem.setText("  ".join(probs + warn_))
 
     def select(self, i):
         self.current = i

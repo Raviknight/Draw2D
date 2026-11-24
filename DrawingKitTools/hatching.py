@@ -218,8 +218,8 @@ def align_offset(sec):
     up across both views. None for an aligned section TechDraw hasn't drawn
     yet."""
     base = sec.BaseView
-    full_c = core.source_shape(base.Source).BoundBox.Center
     d, rb, ub = core.view_axes(base)
+    full_c = core.shape_centre(core.source_shape(base.Source), d)
     if is_aligned(sec):
         key = (sec.Document.Name, sec.Name)
         _aligned_anchor.pop(key, None)    # the model may have changed

@@ -1230,7 +1230,9 @@ def add_note(page, box, lines, anchor=None, size=None, font=None):
         p["font"] = font
     label = "Note " + (lines[0][:20] if lines and lines[0] else "")
     if anchor is None:
-        return _new(page, "note", label.strip(), p, "free", None, box, (0, 0), avoid="explicit")
+        sym = _new(page, "note", label.strip(), p, "free", None, box, (0, 0), avoid="explicit")
+        keep_in_frame(page, sym)
+        return sym
     kind, view, local, _ = attach_point(page, anchor[0], anchor[1])
     if kind == "view":
         hit = nearest_edge(view, local, max_dist=4.0 / core.view_scale(view))
@@ -1239,6 +1241,38 @@ def add_note(page, box, lines, anchor=None, size=None, font=None):
     return _new(page, "note", label.strip(), p, kind, view,
                 local if kind == "view" else anchor, (box[0] - anchor[0], box[1] - anchor[1]),
                 avoid="explicit")
+
+
+def keep_in_frame(page, sym, margin=3.0):
+    """Slide a free-standing symbol (a note) so all of it is inside the
+    drawing frame and off the title block. Returns True if it moved."""
+    from . import clearance
+    try:
+        b = clearance.symbol_box(sym)
+        frame, title = core.drawing_area(page.Template.Template, *core.page_size(page))
+    except Exception:
+        return False
+    if b is None or getattr(sym, ANCHOR_KIND, "free") != "free":
+        return False
+    x0, y0, x1, y1 = b
+    w, h = x1 - x0, y1 - y0
+    fx0, fy0, fx1, fy1 = frame[0] + margin, frame[1] + margin, frame[2] - margin, frame[3] - margin
+    dx = (fx0 - x0) if x0 < fx0 else ((fx1 - x1) if x1 > fx1 else 0.0)
+    dy = (fy0 - y0) if y0 < fy0 else ((fy1 - y1) if y1 > fy1 else 0.0)
+    nx0, ny0 = x0 + dx, y0 + dy
+    if title and nx0 < title[2] and title[0] < nx0 + w and ny0 < title[3] + margin and title[1] < ny0 + h:
+        # on the title block: beside it if there's room on the left, else above it
+        if title[0] - margin - w >= fx0:
+            dx += (title[0] - margin) - (nx0 + w)
+        else:
+            dy += (title[3] + margin) - ny0
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        return False
+    c = getattr(sym, ANCHOR)
+    setattr(sym, ANCHOR, App.Vector(c.x + dx, c.y + dy, 0))
+    sym.X, sym.Y = float(sym.X) + dx, float(sym.Y) + dy
+    render(sym)
+    return True
 
 
 def is_note(obj):

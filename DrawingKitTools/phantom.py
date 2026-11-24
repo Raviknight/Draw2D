@@ -38,8 +38,8 @@ def outline(view, obj):
     shape = _part_shape(obj)
     if shape is None or shape.isNull():
         raise ValueError("%s has no shape" % obj.Label)
-    centre = core.source_shape(view.Source).BoundBox.Center
     d, right, up = core.view_axes(view)
+    centre = core.shape_centre(core.source_shape(view.Source), d)
     m = App.Matrix(right.x, right.y, right.z, 0,
                    up.x, up.y, up.z, 0,
                    d.x, d.y, d.z, 0,

@@ -103,9 +103,10 @@ def hole_rows(view, shape=None):
     return out
 
 
-def _annotated_boxes(page):
+def _annotated_boxes(page, named=False):
     """Each part view's box grown to take in its dimensions (texts and the
-    extension lines out to them) and the callouts and symbols on it."""
+    extension lines out to them) and the callouts and symbols on it
+    ({view name: box} with ``named``)."""
     from . import clearance
     boxes = {}
     for v in core.part_views(page):
@@ -129,6 +130,8 @@ def _annotated_boxes(page):
             continue
         a = boxes[owner.Name]
         boxes[owner.Name] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+    if named:
+        return {k: tuple(b) for k, b in boxes.items()}
     return [tuple(b) for b in boxes.values()]
 
 

@@ -1414,6 +1414,65 @@ class TestSmartDimension(DocTest):
         self.assertEqual(d.Type, "Diameter")
         self.assertAlmostEqual(d.getRawValue(), 10.0, places=6)
 
+    def test_across_a_cylinder_is_a_diameter(self):
+        import Part
+        hub = self.doc.addObject("Part::Feature", "Hub")
+        hub.Shape = Part.makeCylinder(20, 35).fuse(Part.makeCylinder(40, 10))
+        self.doc.recompute()
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [hub])
+        self.doc.recompute()
+        side = [v for v in g.Views if not any(e.kind == "circle" for e in self.sd.entities(v))][0]
+        ents = self.sd.entities(side)
+        lines = [e for e in ents if e.kind == "line"]
+        d, right, up = core.view_axes(side)
+
+        def outline(r):
+            # the two lines along the axis at +-r (axis is model Z)
+            ax = core.model_to_local(side, App.Vector(0, 0, 0))
+            ay = core.model_to_local(side, App.Vector(0, 0, 1))
+            out = []
+            for e in lines:
+                (p, q) = e.pts
+                if abs(abs((q[0] - p[0]) * (ay[0] - ax[0]) + (q[1] - p[1]) * (ay[1] - ax[1]))
+                       - math.hypot(q[0] - p[0], q[1] - p[1])) > 1e-6:
+                    continue
+                off = abs((p[0] - ax[0]) * (ay[1] - ax[1]) - (p[1] - ax[1]) * (ay[0] - ax[0]))
+                if abs(off - r) < 1e-3:
+                    out.append(e)
+            return out
+        hub_lines = outline(20.0)
+        self.assertGreaterEqual(len(hub_lines), 2)
+        pair = [hub_lines[0], [e for e in hub_lines[1:] if e.pts[0] != hub_lines[0].pts[0]][0]]
+        self.assertAlmostEqual(self.sd.diameter_across(side, pair), 20.0)
+        dim = self.sd.add_dimension(page, side, pair, (0, -40))
+        self.assertTrue(dim.FormatSpec.startswith("⌀"))
+        self.assertIsNone(self.sd.diameter_across(side, [pair[0], pair[0]]))
+
+    def test_dimension_between_views_gets_room(self):
+        from DrawingKitTools import annot, clearance
+        # a long dimension on the front view, its text pushed into the next view
+        top = self.find("line", (0, 25))
+        views = list(self.g.Views)
+        others = [v for v in views if v is not self.v]
+        tgt = others[0]
+        tx, ty = core.view_center(tgt)
+        cx, cy = core.view_center(self.v)
+        s = core.view_scale(self.v)
+        self.sd.add_dimension(self.page, self.v, [top], ((tx - cx) / s, (ty - cy) / s))
+        self.doc.recompute()
+        self.assertTrue(any(c > 0 for c in core.view_crowding(self.page)))
+        core.make_room_for_tables(self.page)
+        self.doc.recompute()
+        self.assertEqual(core.view_crowding(self.page), (0.0, 0.0))
+        # a note asked for off the frame's left edge lands inside it
+        note = annot.add_note(self.page, (5.0, 60.0), ["NOTES:", "1. A LONG LINE OF NOTE TEXT HERE"])
+        self.doc.recompute()
+        b = clearance.symbol_box(note)
+        frame, title = core.drawing_area(self.page.Template.Template, *core.page_size(self.page))
+        self.assertGreaterEqual(b[0], frame[0])
+        self.assertLessEqual(b[2], frame[2])
+
     def test_line_length_and_mouse_choice(self):
         top = self.find("line", (0, 25))
         self.assertEqual(self.sd.plan([top], (0, 40))[0], "DistanceX")
@@ -2171,9 +2230,13 @@ class TestDimensionPreview(unittest.TestCase):
 
     def test_diameter_and_angle(self):
         c = self.E("circle", 1, [(0.0, 0.0)], radius=5.0)
-        sh = self.sd.preview_shapes([c], (20.0, 0.0), 2.0)
+        sh = self.sd.preview_shapes([c], (3.0, 0.0), 2.0)            # inside: across
         self.assertEqual(len(self.tips(sh)), 2)
+        sh = self.sd.preview_shapes([c], (20.0, 0.0), 2.0)           # outside: leader
+        self.assertEqual(len(self.tips(sh)), 1)
         self.assertTrue(any(abs(l[-1][0] - 20.0) < 1e-9 for l in self.lines(sh)))   # leader
+        shoulder = [l for l in self.lines(sh) if abs(l[0][1] - l[-1][1]) < 1e-9 and l[0][0] >= 20.0 - 1e-9]
+        self.assertTrue(shoulder)                                    # then horizontal
         l1 = self.E("line", 1, [(0.0, 0.0), (10.0, 0.0)])
         l2 = self.E("line", 2, [(0.0, 0.0), (0.0, 10.0)])
         sh = self.sd.preview_shapes([l1, l2], (5.0, 5.0), 1.0)
@@ -2418,7 +2481,13 @@ class TestTitleBlockDesigns(DocTest):
         b.save(d)
         key = b.slug(d["name"])
         self.assertTrue(t.fits("custom:" + key, "ANSI B", "Landscape"))
-        self.assertFalse(t.fits("custom:" + key, "A4", "Landscape"))   # 280 mm: too wide
+        self.assertAlmostEqual(d["width"], 200.0)                       # a usual width
+        self.assertEqual(b.warnings(d), [])
+        self.assertTrue(t.fits("custom:" + key, "A4", "Landscape"))
+        self.assertFalse(t.fits("custom:" + key, "A4", "Portrait"))     # 180 mm frame
+        wide = b.copy_of(d)
+        b.resize(wide, 280, 50)
+        self.assertTrue(b.warnings(wide))
         page = core.create_page(self.doc, "ANSI B", "Landscape", style="custom:" + key)
         self.assertEqual(tb.page_style(page), "custom:" + key)
         texts = dict(page.Template.EditableTexts)
@@ -2434,6 +2503,166 @@ class TestTitleBlockDesigns(DocTest):
         self.assertEqual(fonts.drawing_font(), "DejaVu Sans")
         self.assertIn("font-family:'DejaVu Sans'", templates.make_svg("A3", "Landscape"))
         self.assertTrue(fonts._font_files())                 # FreeCAD carries it
+
+
+class TestTextLayer(DocTest):
+    """Real text over TechDraw's outlined PDF, and the characteristics list."""
+
+    @staticmethod
+    def minimal_pdf(path, w_pt, h_pt):
+        objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources 5 0 R "
+                b"/MediaBox [0 0 %.6f %.6f] >>" % (w_pt, h_pt),
+                b"<< /Length 8 >>\nstream\n0 0 m S\n\nendstream",
+                b"<< /ProcSet [/PDF /Text] >>"]
+        out = bytearray(b"%PDF-1.4\n")
+        offs = []
+        for i, o in enumerate(objs):
+            offs.append(len(out))
+            out += b"%d 0 obj\n" % (i + 1) + o + b"\nendobj\n"
+        x = len(out)
+        out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+        for o in offs:
+            out += b"%010d 00000 n \n" % o
+        out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+        with open(path, "wb") as f:
+            f.write(bytes(out))
+
+    def test_layer_and_characteristics(self):
+        import json
+        import re
+        import tempfile
+        from DrawingKitTools import annot, smartdim, textlayer
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box])
+        self.doc.recompute()
+        v = g.Anchor
+        ents = smartdim.entities(v)
+        top = max((e for e in ents if e.kind == "line"), key=lambda e: e.pts[0][1] + e.pts[1][1])
+        smartdim.add_dimension(page, v, [top], (0, top.pts[0][1] + 15.0 / core.view_scale(v)))
+        annot.add_note(page, (80, 60), ["NOTES:", "1. BREAK SHARP EDGES.", "2 x 45°"])
+        self.doc.recompute()
+        texts = textlayer.page_texts(page)
+        self.assertTrue(any(t["source"] == "dimension" for t in texts))
+        self.assertTrue(any(t["text"] == "1. BREAK SHARP EDGES." for t in texts))
+        self.assertTrue(any(t["source"] == "title block" for t in texts))
+        tmp = tempfile.mkdtemp()
+        pdf = os.path.join(tmp, "sheet.pdf")
+        W, H = core.page_size(page)
+        self.minimal_pdf(pdf, W * 72 / 25.4, H * 72 / 25.4)
+        n = textlayer.add_text_layer(page, pdf)
+        self.assertEqual(n, len(texts))
+        raw = open(pdf, "rb").read()
+        self.assertIn(b"(1. BREAK SHARP EDGES.) Tj", raw)
+        self.assertIn(b"3 Tr", raw)                              # invisible
+        self.assertIn(b"/BaseFont /Helvetica", raw)
+        # the update's cross-reference table points at the objects it names
+        last = int(re.findall(rb"startxref\s+(\d+)", raw)[-1])
+        self.assertTrue(raw[last:].startswith(b"xref"))
+        for first, count, body in re.findall(rb"\n(\d+) (\d+)\n((?:\d{10} \d{5} n \n)+)", raw[last:]):
+            for k, line in enumerate(body.split(b"\n")[:int(count)]):
+                off = int(line[:10])
+                self.assertTrue(raw[off:].startswith(b"%d 0 obj" % (int(first) + k)))
+        self.assertIn(b"/Prev", raw[last:])
+        # TechDraw's drawing bracketed in q ... Q, the layer after it
+        m = re.findall(rb"/Contents \[(\d+) 0 R 4 0 R (\d+) 0 R (\d+) 0 R\]", raw)
+        self.assertTrue(m)
+        q, Q, layer = (int(x) for x in m[-1])
+        self.assertIn(b"stream\nq\n", raw[raw.index(b"%d 0 obj" % q):][:80])
+        self.assertIn(b"stream\nQ\n", raw[raw.index(b"%d 0 obj" % Q):][:80])
+        # characteristics: the dimension with its nominal, each note line, the chamfer
+        path = textlayer.write_characteristics(page, pdf)
+        data = json.load(open(path, encoding="utf-8"))
+        self.assertEqual(data["schema"], 1)
+        self.assertEqual(len(data["pdf_sha256"]), 64)
+        kinds = [c["kind"] for c in data["characteristics"]]
+        self.assertIn("length", kinds)
+        self.assertIn("chamfer", kinds)
+        self.assertEqual([c["text"] for c in data["characteristics"]
+                          if c["kind"] == "note" and c["subtype"] == "general"],
+                         ["1. BREAK SHARP EDGES."])
+        length = [c for c in data["characteristics"] if c["kind"] == "length"][0]
+        self.assertIsInstance(length["nominal"], str)
+        self.assertEqual(length["tolerance_type"], "general")
+        self.assertEqual(length["tolerance_source"], "general")
+        self.assertEqual(length["page"], 1)
+        self.assertIn("general_tol", length)
+        notes = [c for c in data["characteristics"] if c["kind"] == "note" and c["subtype"] == "general"]
+        self.assertTrue(all("#" in c["source"] for c in notes))     # one id per line
+        self.assertTrue(all(c["zone"] for c in data["characteristics"]))
+        self.assertEqual([c["no"] for c in data["characteristics"]],
+                         list(range(1, len(kinds) + 1)))
+        self.assertEqual(textlayer._drop_zeros("4X ⌀8.00 THRU 12.50"), "4X ⌀8 THRU 12.5")
+        self.assertEqual(textlayer.zone(page, 25.0, H - 15.0), "A1")
+
+    def test_dimension_records_as_printed(self):
+        from DrawingKitTools import dims, smartdim, textlayer
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box])
+        self.doc.recompute()
+        v = g.Anchor
+        top = max((e for e in smartdim.entities(v) if e.kind == "line"),
+                  key=lambda e: e.pts[0][1] + e.pts[1][1])
+        d = smartdim.add_dimension(page, v, [top], (0, top.pts[0][1] + 10))
+        self.doc.recompute()
+        dims.set_dimension(d, decimals=3, tol="symmetric", upper=0.05, lower=0.05)
+        self.doc.recompute()
+        r = textlayer.dimension_record(d)
+        self.assertEqual((r["type"], r["upper"], r["lower"]), ("bilateral", "0.050", "-0.050"))
+        self.assertEqual(r["places"], 3)
+        dims.set_dimension(d, decimals=2, tol="deviation", upper=0.1, lower=0.0)
+        r = textlayer.dimension_record(d)
+        self.assertEqual(r["type"], "unilateral")
+        dims.set_dimension(d, decimals=2, basic=True)
+        self.assertEqual(textlayer.dimension_record(d)["type"], "basic")
+        dims.set_dimension(d, decimals=2, reference=True)
+        self.assertEqual(textlayer.dimension_record(d)["type"], "reference")
+        dims.set_dimension(d, decimals=2, tol="limits", upper=0.1, lower=0.1)
+        r = textlayer.dimension_record(d)
+        self.assertEqual(r["type"], "limit")
+        self.assertEqual(len(r["limits"]), 2)
+
+    def test_general_tolerances_resolved(self):
+        from DrawingKitTools import textlayer, titleblock as tb
+        page = core.create_page(self.doc, "A3", "Landscape")
+        tb.set_template_variant(page, style_="ansi")
+        tb.set_fields(page, {"units": "INCHES", "tol_2": "±.01", "tol_3": "±.005",
+                             "tol_angle": "±0.5°", "part_material": "17-4 PH"})
+        g = textlayer.general_tolerances(page)
+        self.assertEqual(g["unit"], "in")
+        self.assertEqual(g["linear_by_places"], {"2": ".01", "3": ".005"})
+        self.assertEqual(g["angular"], "0.5")
+        self.assertNotIn("part_material", g)
+        self.assertEqual(textlayer.title_block(page)["part_material"], "17-4 PH")
+        mats = [c for c in textlayer.characteristics(page) if c.get("subtype") == "material"]
+        self.assertEqual([c["text"] for c in mats], ["17-4 PH"])
+
+    def test_general_tolerance_per_item(self):
+        from DrawingKitTools import textlayer as tl
+        dim = {"kind": "length", "tolerance_type": "general", "nominal_value": 25.0, "places": 2}
+        self.assertEqual(tl.resolve_general(dim, {"linear_by_places": {"2": "0.01"}})[0], "±0.01")
+        tol, why = tl.resolve_general(dict(dim, places=0), {"linear_by_places": {"1": "0.2", "2": "0.05"}})
+        self.assertIsNone(tol)
+        self.assertIn("1 place(s), 2 place(s)", why)
+        self.assertEqual(tl.resolve_general(dim, {"standard_class": "ISO 2768-m"})[0], "±0.2")
+        self.assertEqual(tl.resolve_general(dict(dim, nominal_value=80.0),
+                                            {"standard_class": "ISO 2768-m"})[0], "±0.3")
+        self.assertEqual(tl.resolve_general({"kind": "angle", "tolerance_type": "general"},
+                                            {"angular": "0.5"})[0], "±0.5")
+        self.assertEqual(tl.resolve_general(dict(dim, tolerance_type="bilateral"), {}), (None, None))
+        # chamfers: ISO 2768-1's own table for chamfer heights, and the angle by its side
+        ch = {"kind": "chamfer", "tolerance_type": "general", "nominal_value": 2.0, "places": 0}
+        iso_m = {"standard_class": "ISO 2768-m"}
+        self.assertEqual(tl.resolve_general(ch, iso_m)[0], "±0.2")
+        self.assertEqual(tl.resolve_general(dict(ch, nominal_value=4.0), iso_m)[0], "±0.5")
+        self.assertEqual(tl.resolve_general(dict(ch, nominal_value=4.0),
+                                            {"standard_class": "ISO 2768-c"})[0], "±1")
+        self.assertEqual(tl.resolve_angle(ch, iso_m)[0], "±1°")
+
+    def test_pdf_strings(self):
+        from DrawingKitTools import textlayer
+        self.assertEqual(textlayer._pdf_string("⌀8 ±0.1 (a)"), "(\xd88 \xb10.1 \\(a\\))")
 
 
 class TestBalloonLeaders(unittest.TestCase):

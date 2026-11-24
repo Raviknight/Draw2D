@@ -642,7 +642,7 @@ def preset_notes():
     """A wide block with room for the general notes: tolerances, edges,
     draft and radii, surface finish, specification, hardness, material,
     item number, drawn and approved."""
-    d = new_design("Notes + inch tolerances", 280.0, 50.0)
+    d = new_design("Notes + inch tolerances (wide)", 280.0, 50.0)
     C = [
         cell(0, 0, 130, 7, "text", text="UNLESS OTHERWISE SPECIFIED", size=3.2, align="centre"),
         cell(0, 7, 42, 36, "field", field="tolerance_notes", lines=7, size=2.5, align="centre",
@@ -676,15 +676,33 @@ def preset_notes():
              align="centre"),
         cell(225, 24, 55, 15, "field", label="ITEM NO.", field="drawing_number", size=5.0,
              align="centre"),
-        cell(195, 39, 24, 11, "field", label="DRAWN", field="creator", size=2.8),
-        cell(219, 39, 18, 11, "field", label="DATE", field="date_of_issue", size=2.5,
-             align="right"),
-        cell(237, 39, 25, 11, "field", label="APPROVED", field="approval_person", size=2.8),
-        cell(262, 39, 18, 11, "field", label="DATE", field="approved_date", size=2.5,
-             align="right"),
+        cell(195, 39, 20, 11, "field", label="DRAWN", field="creator", size=2.8),
+        cell(215, 39, 22, 11, "field", label="DATE", field="date_of_issue", size=2.5,
+             align="centre"),
+        cell(237, 39, 21, 11, "field", label="APPROVED", field="approval_person", size=2.8),
+        cell(258, 39, 22, 11, "field", label="DATE", field="approved_date", size=2.5,
+             align="centre"),
     ]
     d["cells"] = C
+    # drawn on a 280 mm grid, kept at a usual title block width: 200 mm
+    resize(d, 200.0, 50.0)
+    for c in d["cells"]:
+        c["size"] = round(max(1.8, c["size"] * 0.8), 2)
+    d["name"] = "Notes + inch tolerances"
     return d
+
+
+WIDE = 200.0          # wider than this crowds an A3 / ANSI B sheet
+
+
+def warnings(d):
+    """Things worth a second look that don't stop the design working."""
+    out = []
+    if d["width"] > WIDE + 1e-6:
+        out.append("%.0f mm wide: most title blocks are 180-200 mm, whatever the sheet. "
+                   "On A3 or ANSI B this one takes %.0f%% of the drawing's width."
+                   % (d["width"], 100.0 * d["width"] / 390.0))
+    return out
 
 
 def preset_blank():
@@ -693,7 +711,7 @@ def preset_blank():
 
 PRESETS = [("Blank 180 x 40", preset_blank), ("Copy of DrawingKit ISO", preset_iso),
            ("Tolerances by size + logo", preset_size_table),
-           ("Notes + inch tolerances (280 wide)", preset_notes)]
+           ("Notes + inch tolerances", preset_notes)]
 
 
 # ---------------------------------------------------------------------------

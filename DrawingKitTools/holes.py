@@ -346,19 +346,37 @@ def circle_edge_name(view, hole, shape=None):
     """'EdgeN' of the circle TechDraw drew for this hole, or None."""
     shape = shape or core.source_shape(view.Source)
     lx, ly = core.model_to_local(view, hole.centre, shape)
+    best, best_d = None, match_tolerance(hole.radius)
+    for i, c in _view_circles(view):
+        if abs(c.Radius - hole.radius) > 1e-3:
+            continue
+        d = math.hypot(c.Center.x - lx, c.Center.y - ly)
+        if d < best_d:
+            best, best_d = "Edge%d" % i, d
+    return best
+
+
+def match_tolerance(radius):
+    """How far a drawn circle's centre may sit from where DrawingKit works
+    out the hole to be (view-local mm). TechDraw and the model's bounding
+    box can disagree by a few hundredths on round parts; a hole of the same
+    size is never that close to another."""
+    return max(0.25, min(radius * 0.5, 2.0))
+
+
+def _view_circles(view):
+    out = []
     i = 0
     while i < 10000:
         try:
             e = view.getEdgeByIndex(i)   # unscaled, Y up
         except Exception:
-            return None
+            break
         c = getattr(e, "Curve", None)
-        if c is not None and "Circle" in c.TypeId and \
-                abs(c.Radius - hole.radius) < 1e-4 and \
-                abs(c.Center.x - lx) < 1e-3 and abs(c.Center.y - ly) < 1e-3:
-            return "Edge%d" % i
+        if c is not None and "Circle" in c.TypeId:
+            out.append((i, c))
         i += 1
-    return None
+    return out
 
 
 PREFERRED_ANGLES = [45, 135, 315, 225, 90, 0, 180, 270]
@@ -534,8 +552,8 @@ def holes_for_edges(view, edge_names, shape=None):
             continue
         for h in holes_seen_end_on(view, shape):
             lx, ly = core.model_to_local(view, h.centre, shape)
-            if abs(c.Radius - h.radius) < 1e-4 and abs(c.Center.x - lx) < 1e-3 \
-                    and abs(c.Center.y - ly) < 1e-3:
+            if abs(c.Radius - h.radius) < 1e-3 and \
+                    math.hypot(c.Center.x - lx, c.Center.y - ly) < match_tolerance(h.radius):
                 picked.append(h)
     if not picked:
         return []

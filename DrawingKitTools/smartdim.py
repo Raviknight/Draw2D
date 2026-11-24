@@ -326,15 +326,20 @@ def preview_shapes(picks, mouse, scale=1.0):
         u = _unit(_sub(mouse, c))
         far = _add(c, u, r)
         out = []
-        if t == "Diameter":
+        outside = math.hypot(*_sub(mouse, c)) > r
+        if t == "Diameter" and not outside:
             near = _add(c, u, -r)
             out.append(("line", [near, far]))
             out.append(_arrow(near, _sub(near, far), ARROW * k))
-        else:
+        elif t == "Radius":
             out.append(("line", [c, far]))
-        out.append(_arrow(far, u, ARROW * k))
-        if math.hypot(*_sub(mouse, c)) > r:
+        # from inside the arrow points out at the circle; on a leader from
+        # outside it points in
+        out.append(_arrow(far, (-u[0], -u[1]) if outside else u, ARROW * k))
+        if outside:
             out.append(("line", [far, mouse]))           # leader out to the text
+            side = 1.0 if mouse[0] >= c[0] else -1.0     # then a horizontal shoulder
+            out.append(("line", [mouse, (mouse[0] + side * 8.0 * k, mouse[1])]))
         return out
     if t == "Angle":
         a, b = ents
@@ -405,6 +410,38 @@ def ref_name(view, ent):
     return "Edge%d" % ent.index
 
 
+def diameter_across(view, ents, tol=0.01):
+    """Radius of the cylinder whose two outline lines (seen from the side)
+    these two line entities are, else None: that distance is a diameter."""
+    if len(ents) != 2 or any(e.kind != "line" for e in ents):
+        return None
+    try:
+        shape = core.source_shape(view.Source)
+        d, right, up = core.view_axes(view)
+    except Exception:
+        return None
+    for face in core._round_faces(shape):
+        axis = App.Vector(face.Surface.Axis)
+        axis.normalize()
+        if abs(axis.dot(d)) > 1e-6:
+            continue                          # not seen from the side
+        r = face.Surface.Radius
+        c = core.model_to_local(view, face.Surface.Center, shape)
+        a = core.model_to_local(view, App.Vector(face.Surface.Center) + axis, shape)
+        u = _unit(_sub(a, c))
+        n = (-u[1], u[0])
+        sides = []
+        for e in ents:
+            p, q = e.pts
+            if abs(abs(_dot(_unit(_sub(q, p)), u)) - 1.0) > 1e-6:
+                break                          # not along the axis
+            sides.append(_dot(_sub(p, c), n))
+        if len(sides) == 2 and abs(abs(sides[0]) - r) < tol and abs(abs(sides[1]) - r) < tol \
+                and sides[0] * sides[1] < 0:
+            return r
+    return None
+
+
 def add_dimension(page, view, picks, mouse_local, label_page=None):
     """Create the dimension the picks + mouse describe. ``label_page`` is
     where the text goes (page point); default: the mouse position."""
@@ -427,4 +464,15 @@ def add_dimension(page, view, picks, mouse_local, label_page=None):
     dim.X, dim.Y = label_page[0] - cx, label_page[1] - cy
     from . import standards
     standards.style_dimension(dim)
+    if t in ("Distance", "DistanceX", "DistanceY") and diameter_across(view, ents) is not None:
+        spec = dim.FormatSpec or "%.2w"
+        if "⌀" not in spec and "Ø" not in spec:
+            dim.FormatSpec = "⌀" + spec          # across a cylinder: a diameter
+    if t in ("Diameter", "Radius"):
+        # text outside the circle: horizontal, on a leader with a shoulder
+        # (TechDraw's own style would tilt it along the leader)
+        e = ents[0]
+        if math.hypot(mouse_local[0] - e.point[0], mouse_local[1] - e.point[1]) > e.radius:
+            from . import holes
+            holes.set_horizontal_text(dim)
     return dim

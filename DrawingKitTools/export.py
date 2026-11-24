@@ -46,8 +46,40 @@ def sheet_paths(path, pages):
     return out
 
 
-def export_pages(pages, path, fmt):
-    """Write each page; returns the files written."""
+PREFS = "User parameter:BaseApp/Preferences/Mod/DrawingKit"
+
+
+def wants_characteristics():
+    """Write the characteristics list beside each PDF ('Characteristics'
+    preference, on unless turned off)."""
+    try:
+        return App.ParamGet(PREFS).GetBool("Characteristics", True)
+    except Exception:
+        return True
+
+
+def finish_pdf(page, out, characteristics=None):
+    """After TechDraw has written a sheet's PDF: add the real-text layer and
+    (unless turned off) the characteristics file. Returns the extra files."""
+    from . import textlayer
+    extra = []
+    try:
+        n = textlayer.add_text_layer(page, out)
+        if not n:
+            App.Console.PrintWarning("DrawingKit: no text layer added to %s\n" % out)
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit: text layer for %s failed: %s\n" % (out, e))
+    if wants_characteristics() if characteristics is None else characteristics:
+        try:
+            extra.append(textlayer.write_characteristics(page, out))
+        except Exception as e:
+            App.Console.PrintWarning("DrawingKit: characteristics for %s failed: %s\n" % (out, e))
+    return extra
+
+
+def export_pages(pages, path, fmt, characteristics=None):
+    """Write each page; returns the files written (PDFs come with a real
+    text layer and, unless turned off, a characteristics file beside them)."""
     fmt = fmt.lower()
     paths = sheet_paths(path, pages)
     done = []
@@ -62,6 +94,8 @@ def export_pages(pages, path, fmt):
             Gui.updateGui()
             if fmt == "pdf":
                 TechDrawGui.exportPageAsPdf(page, out)
+                if os.path.exists(out):
+                    done += finish_pdf(page, out, characteristics)
             elif fmt == "svg":
                 TechDrawGui.exportPageAsSvg(page, out)
             else:

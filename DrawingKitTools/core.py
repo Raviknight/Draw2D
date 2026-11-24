@@ -309,12 +309,78 @@ def annotation_margins(page, extra=2.0):
     return tuple(max(0.0, x) + (extra if x > 1e-6 else 0.0) for x in m)
 
 
+def view_crowding(page, gap=2.0):
+    """How far (paper mm, across and up/down) the dimensions and callouts of
+    the projection group's views reach into a neighbouring view: (dx, dy),
+    (0, 0) when they're clear."""
+    from . import tables
+    group, _ = page_content(page)
+    if group is None:
+        return 0.0, 0.0
+    try:
+        ann = tables._annotated_boxes(page, named=True)
+    except Exception:
+        return 0.0, 0.0
+    items = [v for v in group.Views if v.Name in ann]
+    need_x = need_y = 0.0
+    for a in items:
+        A = ann[a.Name]
+        for b in items:
+            if b is a:
+                continue
+            try:
+                B = view_box(b)
+            except Exception:
+                continue
+            ox = min(A[2], B[2]) - max(A[0], B[0])
+            oy = min(A[3], B[3]) - max(A[1], B[1])
+            if ox <= -gap or oy <= -gap:
+                continue                       # clear
+            ca, cb = view_box(a), B
+            side_by_side = min(ca[3], cb[3]) - max(ca[1], cb[1]) > 0
+            if side_by_side:
+                need_x = max(need_x, ox + gap)
+            else:
+                need_y = max(need_y, oy + gap)
+    return need_x, need_y
+
+
+def widen_view_gaps(page, gap=2.0):
+    """Open up the projection group's spacing where a view's dimensions
+    reach into the next view. Returns True if the spacing changed."""
+    group, _ = page_content(page)
+    if group is None:
+        return False
+    dx, dy = view_crowding(page, gap)
+    if dx < 1e-6 and dy < 1e-6:
+        return False
+    if dx > 1e-6:
+        group.spacingX = float(group.spacingX) + dx
+    if dy > 1e-6:
+        group.spacingY = float(group.spacingY) + dy
+    return True
+
+
+def scaled_margins(page, old, new):
+    """annotation_margins as they would be at scale ``new`` (dimensions sit
+    further out as the views grow), or None."""
+    m = annotation_margins(page)
+    if not m or old <= 0:
+        return m
+    k = new / old
+    return tuple(x * k for x in m)
+
+
 def annotation_clashes(page, tol=0.5):
     """True if a view, or the dimensions and callouts round it, sits on a
-    DrawingKit table or runs off the drawing area."""
+    DrawingKit table, on another view of the group, or runs off the
+    drawing area."""
     from . import tables
     boxes = table_boxes(page, pad=0.0)
     frame, _t = drawing_area(page.Template.Template, *page_size(page))
+    dx, dy = view_crowding(page)
+    if dx > 1e-6 or dy > 1e-6:
+        return True
     for vb in tables._annotated_boxes(page):
         if any(vb[0] < b[2] and b[0] < vb[2] and vb[1] < b[3] and b[1] < vb[3] for b in boxes):
             return True
@@ -358,6 +424,14 @@ def move_tables_clear(page):
     return moved
 
 
+def _texts_scale(page):
+    """What the title block's scale field says now (None if it has none)."""
+    try:
+        return dict(page.Template.EditableTexts).get("scale") or None
+    except Exception:
+        return None
+
+
 def make_room_for_tables(page):
     """If a view, or the dimensions and callouts around it, sits on a
     DrawingKit table or runs off the drawing area: move the table to a free
@@ -373,12 +447,26 @@ def make_room_for_tables(page):
     except Exception:
         return False
     scale0 = view_scale(group)
+    if not any(abs(scale_value(r) - scale0) < 1e-9 for r in STANDARD_SCALES):
+        # a scale the user typed (1.5:1, NTS...): keep it, only make room at it
+        label = _texts_scale(page)
+        for _ in range(3):
+            move_tables_clear(page)
+            if not annotation_clashes(page):
+                return True
+            widen_view_gaps(page)
+            fit_page(page, exact=scale0, title_text=label, pad=annotation_margins(page))
+            if not annotation_clashes(page):
+                return True
+        move_tables_clear(page)
+        return True
     smaller = [scale_value(r) for r in STANDARD_SCALES if scale_value(r) < scale0 - 1e-12]
     for max_s in [scale0] + smaller[:2]:
         for _ in range(3):
             move_tables_clear(page)
             if not annotation_clashes(page):
                 return True
+            widen_view_gaps(page)        # dimensions between views get room
             fit_page(page, max_scale=max_s, pad=annotation_margins(page))
             if not annotation_clashes(page):
                 return True
@@ -772,12 +860,14 @@ def page_content(page):
     return group, extras
 
 
-def fits_at(page, group, extras_views, s, layout=None):
-    """True if the group and extra views fit a drawing region at scale s."""
+def fits_at(page, group, extras_views, s, layout=None, pad=None):
+    """True if the group and extra views fit a drawing region at scale s
+    (with ``pad`` (left, bottom, right, top) paper mm kept round them for
+    their dimensions and callouts)."""
     layout = layout or group_layout(group)
     sizes = [extra_view_size(v) for v in extras_views]
     gw, gh = group_box(layout, s)
-    for region in page_regions(page):
+    for region in _shrink(page_regions(page), pad):
         rw, rh = region[2] - region[0], region[3] - region[1]
         for tw, th, _ in _arrangements(gw, gh, sizes, s):
             if tw <= rw + 1e-9 and th <= rh + 1e-9:
@@ -968,7 +1058,8 @@ def step_page_scale(page, step):
         raise ValueError("The page is already at %s, the %s standard scale"
                          % (scale_text(old), "largest" if step > 0 else "smallest"))
     if step > 0:
-        s, _ = plan_page(page, group, extras, max_scale=target)
+        s, _ = plan_page(page, group, extras, max_scale=target,
+                         pad=scaled_margins(page, old, target))
         if s < target - 1e-12:
             raise ValueError("The views do not fit the sheet at %s. Use a bigger "
                              "sheet, or Fit to page for the largest scale that fits."
@@ -1116,6 +1207,14 @@ def set_page_scale(page, value, label=None, draw=True):
     if not fits_at(page, group, extras, value):
         raise ValueError("The views do not fit the sheet at %s. Use a smaller "
                          "scale or a bigger sheet." % (label or scale_text(value)))
+    pad = scaled_margins(page, view_scale(group), value)
+    if pad and not fits_at(page, group, extras, value, pad=pad):
+        ok = [s for s in (scale_value(r) for r in STANDARD_SCALES)
+              if s < value and fits_at(page, group, extras, s,
+                                       pad=scaled_margins(page, view_scale(group), s))]
+        raise ValueError("At %s the views fit, but not their dimensions and callouts. "
+                         "Largest standard scale that fits with them: %s."
+                         % (label or scale_text(value), scale_text(max(ok)) if ok else "none"))
     details = [(d, view_scale(d) / view_scale(d.BaseView)) for d in page.Views
                if d.isDerivedFrom("TechDraw::DrawViewDetail") and getattr(d, "BaseView", None)]
     scale = fit_page(page, exact=value, title_text=label, draw=draw)
@@ -1946,15 +2045,142 @@ def view_scale(view):
     return float(view.getScale()) if hasattr(view, "getScale") else float(view.Scale)
 
 
+def shape_centre(shape, direction=None):
+    """The point TechDraw centres a view of ``shape`` on: the exact
+    bounding-box centre. Shape.BoundBox is not exact once the part has been
+    shown in 3D (it is then taken from the display mesh, off by up to a few
+    hundredths of a mm on round parts), which put DrawingKit's points beside
+    TechDraw's edges."""
+    direction = App.Vector(direction) if direction is not None else App.Vector(0, 0, 1)
+    try:
+        key = (shape.hashCode(), round(direction.x, 6), round(direction.y, 6), round(direction.z, 6))
+    except Exception:
+        key = None
+    if key is not None and key in _CENTRES:
+        return App.Vector(_CENTRES[key])
+    try:
+        import TechDraw
+        c = App.Vector(TechDraw.findCentroid(shape, direction))
+    except Exception:
+        try:
+            c = App.Vector(shape.optimalBoundingBox(False, False).Center)
+        except Exception:
+            c = App.Vector(shape.BoundBox.Center)
+    if key is not None:
+        if len(_CENTRES) > 200:
+            _CENTRES.clear()
+        _CENTRES[key] = App.Vector(c)
+    return c
+
+
+_CENTRES = {}
+
+
+_OFFSETS = {}
+
+
+def _drawn_circles(view):
+    """[(radius, cx, cy)] of the circles and arcs TechDraw drew (unscaled, Y up)."""
+    out = []
+    i = 0
+    while i < 20000:
+        try:
+            e = view.getEdgeByIndex(i)
+        except Exception:
+            break
+        c = getattr(e, "Curve", None)
+        if c is not None and c.TypeId in ("Part::GeomCircle", "Part::GeomArcOfCircle"):
+            out.append((c.Radius, c.Center.x, c.Center.y))
+        i += 1
+    return out
+
+
+def _outline_offset(view, shape, centre, d, right, up, limit=0.5):
+    """The drift measured from the whole outline: centre of what TechDraw
+    drew minus the centre of the part's exact extent in the view. Plain
+    views only (a section or detail draws less than the whole part); a
+    difference over ``limit`` mm isn't drift, so (0, 0)."""
+    if view.isDerivedFrom("TechDraw::DrawViewSection") or \
+            view.isDerivedFrom("TechDraw::DrawViewDetail"):
+        return (0.0, 0.0)
+    ext = drawn_extent(view)
+    if ext is None:
+        return None
+    try:
+        m = App.Matrix(right.x, right.y, right.z, 0, up.x, up.y, up.z, 0,
+                       d.x, d.y, d.z, 0, 0, 0, 0, 1)
+        moved = shape.copy()
+        moved.translate(-centre)
+        moved = moved.transformGeometry(m)
+        bb = moved.optimalBoundingBox(False, False)
+    except Exception:
+        return (0.0, 0.0)
+    ox = (ext[0] + ext[2]) / 2.0 - (bb.XMin + bb.XMax) / 2.0
+    oy = (ext[1] + ext[3]) / 2.0 - (bb.YMin + bb.YMax) / 2.0
+    if math.hypot(ox, oy) > limit or math.hypot(ox, oy) < 1e-6:
+        return (0.0, 0.0)
+    return (ox, oy)
+
+
+def view_offset(view, shape=None):
+    """(dx, dy) to add to DrawingKit's view coordinates so they land on what
+    TechDraw drew. TechDraw's centring and the model's bounding box can
+    disagree by a few hundredths of a mm on round parts; measured once per
+    view from the round features both see end-on. (0, 0) when there is
+    nothing to measure or the view isn't drawn yet."""
+    shape = shape or source_shape(view.Source)
+    d, right, up = view_axes(view)
+    try:
+        key = (view.Document.Name, view.Name, shape.hashCode(),
+               round(d.x, 6), round(d.y, 6), round(d.z, 6), round(right.x, 6), round(right.y, 6))
+    except Exception:
+        return 0.0, 0.0
+    if key in _OFFSETS:
+        return _OFFSETS[key]
+    drawn = _drawn_circles(view)
+    centre = shape_centre(shape, d)
+    if not drawn:
+        off = _outline_offset(view, shape, centre, d, right, up)
+        if off is None:
+            return 0.0, 0.0                  # not drawn yet: measure next time
+        _OFFSETS[key] = off
+        return off
+    diffs = []
+    for face in _round_faces(shape):
+        axis = App.Vector(face.Surface.Axis)
+        if abs(abs(axis.normalize().dot(d)) - 1.0) > 1e-6:
+            continue
+        v = App.Vector(face.Surface.Center) - centre
+        mx, my, r = v.dot(right), v.dot(up), face.Surface.Radius
+        near = [(cx - mx, cy - my) for rr, cx, cy in drawn
+                if abs(rr - r) < 1e-3 and math.hypot(cx - mx, cy - my) < 1.0]
+        if near:
+            diffs.append(min(near, key=lambda q: math.hypot(*q)))
+    off = (0.0, 0.0)
+    if diffs:
+        xs = sorted(q[0] for q in diffs)
+        ys = sorted(q[1] for q in diffs)
+        mx, my = xs[len(xs) // 2], ys[len(ys) // 2]
+        agree = [q for q in diffs if abs(q[0] - mx) < 0.01 and abs(q[1] - my) < 0.01]
+        if len(agree) * 2 > len(diffs) and math.hypot(mx, my) > 1e-6:
+            off = (mx, my)
+    if len(_OFFSETS) > 500:
+        _OFFSETS.clear()
+    _OFFSETS[key] = off
+    return off
+
+
 def model_to_local(view, point, shape=None):
     """3D point -> unscaled view coordinates (Y up), as cosmetic lines want.
 
-    TechDraw centres a view on the bounding-box centre of its source shape.
+    TechDraw centres a view on the bounding-box centre of its source shape
+    (corrected by view_offset where TechDraw's drawing says otherwise).
     """
     shape = shape or source_shape(view.Source)
     d, right, up = view_axes(view)
-    v = App.Vector(point) - shape.BoundBox.Center
-    return v.dot(right), v.dot(up)
+    v = App.Vector(point) - shape_centre(shape, d)
+    ox, oy = view_offset(view, shape)
+    return v.dot(right) + ox, v.dot(up) + oy
 
 
 def model_to_page(view, point, shape=None):
@@ -1970,7 +2196,8 @@ def page_to_model(view, px, py, shape=None):
     d, right, up = view_axes(view)
     cx, cy = view_center(view)
     s = view_scale(view)
-    return shape.BoundBox.Center + right * ((px - cx) / s) + up * ((py - cy) / s)
+    ox, oy = view_offset(view, shape)
+    return shape_centre(shape, d) + right * ((px - cx) / s - ox) + up * ((py - cy) / s - oy)
 
 
 # ---------------------------------------------------------------------------
