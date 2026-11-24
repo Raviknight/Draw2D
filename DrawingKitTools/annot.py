@@ -745,7 +745,7 @@ def render(sym):
         elif kind in ("ordinate", "surface", "weld"):
             from . import drafting
             fields = drafting.draw(kind, sk, sym, (ax, ay), sdir, box, p, values)
-        elif kind in ("holetable", "revtable", "bom"):
+        elif kind in ("holetable", "revtable", "bom", "toltable"):
             from . import tables
             tables.draw_table(sk, box, p, values)
         else:
@@ -779,7 +779,7 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=Non
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
         "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note",
         "ordinate": "Ordinate", "surface": "SurfaceFinish", "weld": "Weld",
-        "bom": "PartsList", "hatch": "PartHatch"}[kind])
+        "bom": "PartsList", "hatch": "PartHatch", "toltable": "GeneralTolerances"}[kind])
     page.addView(sym)
     sym.ScaleType = "Custom"
     sym.Scale = 1.0

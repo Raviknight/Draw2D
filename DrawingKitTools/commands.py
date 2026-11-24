@@ -1512,6 +1512,99 @@ def redraw_template(page):
         pass
 
 
+class ToleranceDialog(QtWidgets.QDialog):
+    """General tolerances by size range: an ISO 2768 class or your own
+    rows (over, up to, ±) for lengths and for angles."""
+
+    def __init__(self, data, units="mm", parent=None):
+        from . import tables
+        super().__init__(parent or Gui.getMainWindow())
+        self.tables = tables
+        self.setWindowTitle("General tolerances by size")
+        lay = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("Start from:"))
+        self.preset = QtWidgets.QComboBox()
+        self.preset.addItem("(keep the rows below)", "")
+        for cls, text in tables.TOL_PRESETS:
+            self.preset.addItem(text, cls)
+        self.preset.activated.connect(self.load_preset)
+        top.addWidget(self.preset)
+        top.addStretch(1)
+        lay.addLayout(top)
+        self.name = QtWidgets.QLineEdit((data or {}).get("preset", ""))
+        self.name.setPlaceholderText("e.g. ISO 2768-m, or your company standard")
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Shown as:"))
+        row.addWidget(self.name, 1)
+        lay.addLayout(row)
+        self.lin = self._grid(["Over (%s)" % units, "Up to (%s)" % units, "±"],
+                              (data or {}).get("linear", []))
+        self.ang = self._grid(["Side over (%s)" % units, "Up to (%s)" % units, "±"],
+                              (data or {}).get("angular", []))
+        for title, grid in (("Lengths", self.lin), ("Angles", self.ang)):
+            lay.addWidget(QtWidgets.QLabel("<b>%s</b>" % title))
+            lay.addWidget(grid)
+            btns = QtWidgets.QHBoxLayout()
+            add = QtWidgets.QPushButton("Add row")
+            add.clicked.connect(lambda _=False, g=grid: g.insertRow(g.rowCount()))
+            rem = QtWidgets.QPushButton("Remove row")
+            rem.clicked.connect(lambda _=False, g=grid: g.removeRow(max(0, g.currentRow()))
+                                if g.rowCount() else None)
+            btns.addWidget(add)
+            btns.addWidget(rem)
+            btns.addStretch(1)
+            lay.addLayout(btns)
+        note = QtWidgets.QLabel("Leave the rows empty for no table on the sheet. Save it for every "
+                                "drawing with \"Save * as my defaults\" or \"to company file\".")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+        self.resize(460, 560)
+
+    def _grid(self, headers, rows):
+        g = QtWidgets.QTableWidget(len(rows), 3)
+        g.setHorizontalHeaderLabels(headers)
+        g.horizontalHeader().setStretchLastSection(True)
+        g.verticalHeader().setVisible(False)
+        for i, r in enumerate(rows):
+            for j, v in enumerate(r):
+                g.setItem(i, j, QtWidgets.QTableWidgetItem(str(v)))
+        return g
+
+    def _fill(self, grid, rows):
+        grid.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            for j, v in enumerate(r):
+                grid.setItem(i, j, QtWidgets.QTableWidgetItem(str(v)))
+
+    def load_preset(self, _i):
+        cls = self.preset.currentData()
+        if not cls:
+            return
+        d = self.tables.iso2768(cls)
+        self._fill(self.lin, d["linear"])
+        self._fill(self.ang, d["angular"])
+        self.name.setText(d["preset"])
+
+    def _rows(self, grid):
+        out = []
+        for i in range(grid.rowCount()):
+            cells = [(grid.item(i, j).text().strip() if grid.item(i, j) else "") for j in range(3)]
+            if cells[2]:
+                out.append(cells)
+        return out
+
+    def data(self):
+        lin, ang = self._rows(self.lin), self._rows(self.ang)
+        if not lin and not ang:
+            return None
+        return {"preset": self.name.text().strip(), "linear": lin, "angular": ang}
+
+
 class TitleBlockDialog(QtWidgets.QDialog):
     """Every field of a page's title block in one form, with saving the
     fields that are the same on every drawing as your defaults or to a
@@ -1571,6 +1664,22 @@ class TitleBlockDialog(QtWidgets.QDialog):
         row.addWidget(self.new_combo)
         row.addStretch(1)
         lay.addLayout(row)
+        # general tolerances by size range (a table on the sheet)
+        from . import tables
+        self.tol_table = tables.tolerance_data(page)
+        self.tol_changed = False
+        trow = QtWidgets.QHBoxLayout()
+        trow.addWidget(QtWidgets.QLabel("General tolerances by size *:"))
+        self.tol_label = QtWidgets.QLabel()
+        trow.addWidget(self.tol_label, 1)
+        tol_btn = QtWidgets.QPushButton("Tolerances by size...")
+        tol_btn.setToolTip("A table of tolerances by size range (e.g. ISO 2768-m: 0.5-3 ±0.1, "
+                           "3-6 ±0.1, 6-30 ±0.2...) above the title block - the usual way on "
+                           "metric drawings, instead of X.X / X.XX / X.XXX")
+        tol_btn.clicked.connect(self.edit_tolerances)
+        trow.addWidget(tol_btn)
+        lay.addLayout(trow)
+        self._show_tol()
         note = QtWidgets.QLabel("* fields are the same on every drawing. New sheets start from "
                                 "the company file, then your own defaults on top.")
         note.setWordWrap(True)
@@ -1610,8 +1719,36 @@ class TitleBlockDialog(QtWidgets.QDialog):
     def values(self):
         return {k: e.text() for k, e in self.edits.items()}
 
+    def units(self):
+        e = self.edits.get("units")
+        return self.tb.units_label({"units": e.text() if e else "mm"})
+
+    def _show_tol(self):
+        t = self.tol_table
+        if not t:
+            self.tol_label.setText("none (no table on the sheet)")
+        else:
+            n = len(t.get("linear", [])) + len(t.get("angular", []))
+            self.tol_label.setText("%s table, %d row(s)" % (t.get("preset") or "Own", n))
+
+    def edit_tolerances(self):
+        dlg = ToleranceDialog(self.tol_table, self.units(), self)
+        if dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec():
+            self.tol_table = dlg.data()
+            self.tol_changed = True
+            self._show_tol()
+            g = self.edits.get("general_tolerances")
+            if g is not None and self.tol_table:
+                name = self.tol_table.get("preset") or ""
+                g.setText(name if name.upper().startswith("ISO") else "SEE TABLE")
+
+    def defaults_values(self):
+        v = self.values()
+        v[self.tb.TOL_TABLE] = self.tol_table
+        return v
+
     def save_mine(self):
-        path = self.tb.save_user_defaults(self.values())
+        path = self.tb.save_user_defaults(self.defaults_values())
         say("Title block defaults saved to %s" % path)
 
     def save_company(self):
@@ -1619,7 +1756,7 @@ class TitleBlockDialog(QtWidgets.QDialog):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Company title block file", start,
                                                         "DrawingKit defaults (*.json)")
         if path:
-            self.tb.save_company_defaults(self.values(), path)
+            self.tb.save_company_defaults(self.defaults_values(), path)
             self._show_company()
             say("Company title block defaults saved to %s" % path)
 
@@ -1636,6 +1773,10 @@ class TitleBlockDialog(QtWidgets.QDialog):
         for k in self.tb.SHARED:
             if k in self.edits and k in vals:
                 self.edits[k].setText(vals[k])
+        if self.tb.TOL_TABLE in vals:
+            self.tol_table = vals[self.tb.TOL_TABLE]
+            self.tol_changed = True
+            self._show_tol()
 
 
 class EditTitleBlock:
@@ -1669,9 +1810,15 @@ class EditTitleBlock:
             want = dlg.layout_combo.currentData()
             tb.set_style_pref(dlg.new_combo.currentData())
             cur = "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
+            tol = (dlg.tol_table, dlg.units()) if dlg.tol_changed else None
 
             def work():
                 changed = tb.set_fields(page, vals)
+                if tol is not None:
+                    from . import tables
+                    tables.set_tolerance_table(page, tol[0], tol[1])
+                    if tol[0]:
+                        core.make_room_for_tables(page)   # views off the new table
                 if want != cur:
                     ok_ = tb.set_template_variant(page, tol_row=(want == "iso_tol"),
                                                   style_="ansi" if want == "ansi" else "iso")

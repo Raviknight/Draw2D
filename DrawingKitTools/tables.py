@@ -120,7 +120,7 @@ def _annotated_boxes(page):
                 owner, b = o.References2D[0][0], clearance.dimension_label_box(o)
             elif o.isDerivedFrom("TechDraw::DrawViewSymbol"):
                 owner = getattr(o, annot.LINK, None)
-                if getattr(o, annot.KIND, "") in ("bom", "holetable", "revtable"):
+                if getattr(o, annot.KIND, "") in ("bom", "holetable", "revtable", "toltable"):
                     continue
                 b = clearance.symbol_box(o)
         except Exception:
@@ -262,4 +262,111 @@ def add_revision(page, description, approved="", date=None, eco=""):
         if "revision_index" in texts:
             texts["revision_index"] = rev
             tpl.EditableTexts = texts
+    return table
+
+
+# ---------------------------------------------------------------------------
+# General tolerances by size range (ISO 2768-1 or your own)
+# ---------------------------------------------------------------------------
+# linear: (over, up to) mm; ISO 2768-1 starts at 0.5 mm
+ISO2768_RANGES = [("0.5", "3"), ("3", "6"), ("6", "30"), ("30", "120"), ("120", "400"),
+                  ("400", "1000"), ("1000", "2000"), ("2000", "4000")]
+ISO2768_LINEAR = {
+    "f": ["0.05", "0.05", "0.1", "0.15", "0.2", "0.3", "0.5", ""],
+    "m": ["0.1", "0.1", "0.2", "0.3", "0.5", "0.8", "1.2", "2"],
+    "c": ["0.2", "0.3", "0.5", "0.8", "1.2", "2", "3", "4"],
+    "v": ["", "0.5", "1", "1.5", "2.5", "4", "6", "8"],
+}
+# angular, by the length of the shorter side of the angle (mm)
+ISO2768_ANGLE_RANGES = [("", "10"), ("10", "50"), ("50", "120"), ("120", "400"), ("400", "")]
+ISO2768_ANGULAR = {
+    "f": ["1°", "0°30'", "0°20'", "0°10'", "0°5'"],
+    "m": ["1°", "0°30'", "0°20'", "0°10'", "0°5'"],
+    "c": ["1°30'", "1°", "0°30'", "0°15'", "0°10'"],
+    "v": ["3°", "2°", "1°", "0°30'", "0°20'"],
+}
+TOL_PRESETS = [("f", "ISO 2768-f (fine)"), ("m", "ISO 2768-m (medium)"),
+               ("c", "ISO 2768-c (coarse)"), ("v", "ISO 2768-v (very coarse)")]
+
+
+def iso2768(cls):
+    """{'preset', 'linear': [[over, up_to, tol]], 'angular': [...]} of an
+    ISO 2768-1 class (rows with no value in that class left out)."""
+    lin = [[a, b, t] for (a, b), t in zip(ISO2768_RANGES, ISO2768_LINEAR[cls]) if t]
+    ang = [[a, b, t] for (a, b), t in zip(ISO2768_ANGLE_RANGES, ISO2768_ANGULAR[cls]) if t]
+    return {"preset": "ISO 2768-%s" % cls, "linear": lin, "angular": ang}
+
+
+def _range_text(over, up_to, units=""):
+    u = (" " + units) if units else ""
+    if over and up_to:
+        return "%s - %s%s" % (over, up_to, u)
+    if up_to:
+        return "UP TO %s%s" % (up_to, u)
+    return "OVER %s%s" % (over, u)
+
+
+def _tol_text(t):
+    t = str(t).strip()
+    return t if not t or t[0] in "±+-" else "±" + t
+
+
+def tolerance_params(data, units="mm"):
+    """Table settings for a general tolerance table from
+    {'preset', 'linear', 'angular'}."""
+    rows = [[_range_text(a, b), _tol_text(t)] for a, b, t in data.get("linear", []) if t]
+    ang = [[_range_text(a, b), _tol_text(t)] for a, b, t in data.get("angular", []) if t]
+    if ang:
+        rows.append(["ANGLES (SHORTER SIDE)", ""])
+        rows += ang
+    title = "GENERAL TOLERANCES"
+    if data.get("preset"):
+        title += "  " + data["preset"]
+    return {"title": title, "headers": ["SIZE (%s)" % units.upper(), "TOLERANCE"],
+            "rows": rows, "widths": [34.0, 22.0], "tsize": 3.5,
+            "data": {"preset": data.get("preset", ""), "linear": data.get("linear", []),
+                     "angular": data.get("angular", []), "units": units}}
+
+
+def tolerance_table(page):
+    for v in page.Views:
+        if getattr(v, annot.KIND, "") == "toltable":
+            return v
+    return None
+
+
+def tolerance_data(page):
+    """What the page's general tolerance table holds, or None."""
+    t = tolerance_table(page)
+    if t is None:
+        return None
+    return annot._params(t).get("data")
+
+
+def set_tolerance_table(page, data, units="mm"):
+    """Make, update or (with no rows) remove the page's general tolerance
+    table. It goes above the title block, or the first free spot. Returns
+    the table or None."""
+    import json
+    table = tolerance_table(page)
+    has_rows = data and (any(r[2] for r in data.get("linear", [])) or
+                         any(r[2] for r in data.get("angular", [])))
+    if not has_rows:
+        if table is not None:
+            page.removeView(table)
+            page.Document.removeObject(table.Name)
+        return None
+    p = tolerance_params(data, units)
+    W, Ht = table_size(p)
+    if table is None:
+        place = free_table_spot(page, W, Ht)
+        return annot._new(page, "toltable", "General tolerances", p, "free", None, place, (0, 0))
+    # keep its spot, grown or shrunk from the top-right corner
+    old_w, old_h = table_size(annot._params(table))
+    x1 = float(table.X) + old_w / 2.0
+    y0 = float(table.Y) - old_h / 2.0
+    setattr(table, annot.PARAMS, json.dumps(p))
+    setattr(table, annot.ANCHOR, App.Vector(x1 - W / 2.0, y0 + Ht / 2.0, 0))
+    table.EditableTexts = []
+    annot.render(table)
     return table

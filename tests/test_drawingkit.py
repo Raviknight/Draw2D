@@ -1979,6 +1979,42 @@ class TestTitleBlockDefaults(DocTest):
         self.assertEqual(texts["general_tolerances"], "ASME Y14.5-2018")
         self.assertIn("Y14.36", texts["surface_note"])
 
+    def test_tolerance_table_by_size(self):
+        import json
+        from DrawingKitTools import tables
+        m = tables.iso2768("m")
+        self.assertEqual(m["linear"][0], ["0.5", "3", "0.1"])
+        self.assertEqual(m["linear"][-1], ["2000", "4000", "2"])
+        self.assertEqual(len(tables.iso2768("f")["linear"]), 7)     # no 2000-4000 in f
+        self.assertEqual(tables.iso2768("v")["linear"][0], ["3", "6", "0.5"])
+        page = core.create_page(self.doc, "A3", "Landscape")
+        t = tables.set_tolerance_table(page, m)
+        p = json.loads(t.DrawingKitParams)
+        self.assertIn("ISO 2768-m", p["title"])
+        self.assertEqual(p["rows"][0], ["0.5 - 3", "±0.1"])
+        self.assertIn(["ANGLES (SHORTER SIDE)", ""], p["rows"])
+        self.assertIn(["UP TO 10", "±1°"], p["rows"])
+        # own ranges replace it, in the same table
+        own = {"preset": "", "linear": [["0", "2", "0.01"], ["2", "6", "0.02"]], "angular": []}
+        t2 = tables.set_tolerance_table(page, own)
+        self.assertEqual(t2.Name, t.Name)
+        self.assertEqual(json.loads(t2.DrawingKitParams)["rows"],
+                         [["0 - 2", "±0.01"], ["2 - 6", "±0.02"]])
+        self.assertEqual(tables.tolerance_data(page)["linear"], own["linear"])
+        # off the drawing area's views: it is one of the tables views keep clear of
+        self.assertEqual(len(core.table_boxes(page)), 1)
+        self.assertIsNone(tables.set_tolerance_table(page, None))
+        self.assertIsNone(tables.tolerance_table(page))
+
+    def test_saved_tolerance_table_goes_on_new_sheets(self):
+        from DrawingKitTools import tables
+        own = {"preset": "ACME STD-12", "linear": [["0", "2", "0.01"], ["2", "6", "0.02"]],
+               "angular": []}
+        self.tb.save_user_defaults({"units": "MM", self.tb.TOL_TABLE: own})
+        self.assertEqual(self.tb.load_defaults(asme=False)[self.tb.TOL_TABLE]["preset"], "ACME STD-12")
+        page = core.create_page(self.doc, "A3", "Landscape")
+        self.assertEqual(tables.tolerance_data(page)["linear"], own["linear"])
+
     def test_fields_in_order(self):
         page = core.create_page(self.doc, "A3", "Landscape")
         keys = [k for k, _, _ in self.tb.fields(page)]

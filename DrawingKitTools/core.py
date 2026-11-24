@@ -263,6 +263,7 @@ def create_page(doc, size, orientation, templates=None, drawingkit_template=True
     try:
         from . import titleblock
         titleblock.apply_defaults(page)   # company name, tolerances, finish...
+        titleblock.apply_tolerance_table(page)   # general tolerances by size, if saved
     except Exception as e:
         App.Console.PrintWarning("DrawingKit title block defaults: %s\n" % e)
     try:
@@ -330,7 +331,7 @@ def move_tables_clear(page):
     moved = False
     ann = tables._annotated_boxes(page)
     for v in page.Views:
-        if getattr(v, "DrawingKitAnnot", "") not in ("bom", "holetable", "revtable"):
+        if getattr(v, "DrawingKitAnnot", "") not in ("bom", "holetable", "revtable", "toltable"):
             continue
         try:
             w, h = tables.table_size(annot._params(v))
@@ -388,7 +389,7 @@ def table_boxes(page, pad=3.0):
     except Exception:
         return out
     for v in page.Views:
-        if getattr(v, "DrawingKitAnnot", "") in ("bom", "holetable", "revtable"):
+        if getattr(v, "DrawingKitAnnot", "") in ("bom", "holetable", "revtable", "toltable"):
             try:
                 w, h = tables.table_size(annot._params(v))
             except Exception:

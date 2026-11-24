@@ -120,13 +120,36 @@ def read_file(path):
         App.Console.PrintWarning("DrawingKit: can't read %s: %s\n" % (path, e))
         return {}
     fields = data.get("fields", data) if isinstance(data, dict) else {}
-    return {k: str(v) for k, v in fields.items() if k in SHARED}
+    out = {k: str(v) for k, v in fields.items() if k in SHARED}
+    if isinstance(data, dict) and TOL_TABLE in data:
+        out[TOL_TABLE] = _clean_table(data[TOL_TABLE])
+    return out
+
+
+TOL_TABLE = "tolerance_table"     # general tolerances by size range (or None)
+
+
+def _clean_table(t):
+    """{'preset', 'linear': [[over, up_to, tol]], 'angular': [...]} or None."""
+    if not isinstance(t, dict):
+        return None
+
+    def rows(rs):
+        out = []
+        for r in rs or []:
+            if isinstance(r, (list, tuple)) and len(r) == 3:
+                out.append([str(x).strip() for x in r])
+        return out
+    return {"preset": str(t.get("preset", "")), "linear": rows(t.get("linear")),
+            "angular": rows(t.get("angular"))}
 
 
 def write_file(path, values):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     data = {"drawingkit": "title block defaults",
             "fields": {k: values.get(k, "") for k in SHARED if k in values}}
+    if TOL_TABLE in values:
+        data[TOL_TABLE] = _clean_table(values[TOL_TABLE])
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -181,6 +204,21 @@ def _template_defaults(key):
             if f == key:
                 out.add(default)
     return out
+
+
+def units_label(vals):
+    u = (vals.get("units") or "").strip().lower()
+    return "in" if u.startswith("inch") or u == "in" else (u or "mm")
+
+
+def apply_tolerance_table(page, values=None):
+    """New sheets: put in the saved general tolerance table, if any."""
+    from . import tables
+    vals = load_defaults() if values is None else values
+    data = vals.get(TOL_TABLE)
+    if data and tables.tolerance_table(page) is None:
+        return tables.set_tolerance_table(page, data, units_label(vals))
+    return None
 
 
 def apply_defaults(page, values=None, only_blank=True):
