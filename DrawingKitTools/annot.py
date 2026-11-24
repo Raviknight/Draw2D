@@ -746,9 +746,10 @@ def note_lines(p, values):
     return [values.get("line%d" % (i + 1), ln) for i, ln in enumerate(lines)]
 
 
-def draw_note(sk, anchor, box_centre, lines):
-    """Left-aligned multi-line note centred on box_centre; with a leader
-    (horizontal shoulder, then to the arrow tip) when anchor is given."""
+def draw_note(sk, anchor, box_centre, lines, align="left"):
+    """Multi-line note (left-aligned, or ``align`` 'centre') centred on
+    box_centre; with a leader (horizontal shoulder, then to the arrow tip)
+    when anchor is given."""
     size = gdt.FONT * sk.k
     pitch = size * 1.6
     # osifont capitals average about half the text height wide
@@ -759,7 +760,10 @@ def draw_note(sk, anchor, box_centre, lines):
     ytop = by + h / 2.0
     sk.body = (x0, ytop - h - size * 0.4, x0 + w, ytop + size * 0.8)
     for i, ln in enumerate(lines):
-        sk.text(x0, ytop - i * pitch, ln, anchor="start", editable="line%d" % (i + 1))
+        if align == "centre":
+            sk.text(bx, ytop - i * pitch, ln, anchor="middle", editable="line%d" % (i + 1))
+        else:
+            sk.text(x0, ytop - i * pitch, ln, anchor="start", editable="line%d" % (i + 1))
     if anchor is not None:
         left = anchor[0] < bx
         gap = size * 0.5
@@ -825,8 +829,9 @@ def render(sym):
             if math.hypot(off.x, off.y) > 8.0 * sk.k:
                 sk.line((box[0], box[1] - 1.5 * sk.k), (ax, ay), 0.25)
         elif kind == "note":
-            anchor = None if getattr(sym, ANCHOR_KIND, "free") == "free" else (ax, ay)
-            draw_note(sk, anchor, box, note_lines(p, values))
+            anchor = None if getattr(sym, ANCHOR_KIND, "free") == "free" or p.get("noleader") \
+                else (ax, ay)
+            draw_note(sk, anchor, box, note_lines(p, values), p.get("align", "left"))
         elif kind == "hatch":
             from . import hatching
             hatching.draw(sk, getattr(sym, LINK), p)

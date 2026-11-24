@@ -396,6 +396,15 @@ def table_boxes(page, pad=3.0):
                 continue
             x, y = float(v.X), float(v.Y)
             out.append((x - w / 2 - pad, y - h / 2 - pad, x + w / 2 + pad, y + h / 2 + pad))
+        elif v.isDerivedFrom("TechDraw::DrawViewImage") and getattr(v, "DrawingKitShaded", ""):
+            # the shaded picture (and its caption under it): views keep off it
+            try:
+                from . import shaded
+                w, h = shaded.size_on_sheet(v)
+            except Exception:
+                continue
+            x, y = float(v.X), float(v.Y)
+            out.append((x - w / 2 - pad, y - h / 2 - 15.0 - pad, x + w / 2 + pad, y + h / 2 + pad))
     return out
 
 

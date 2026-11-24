@@ -2241,6 +2241,36 @@ class TestAlternatePosition(DocTest):
             self.ph.add(self.v, self.arm, 0.0, pivot)
 
 
+class TestShadedView(DocTest):
+    def test_frame_matches_techdraw_iso(self):
+        from DrawingKitTools import shaded
+        d, x = core.STANDARD_DIRECTIONS["FrontTopRight"]
+        dd, right, up = shaded.view_frame(d, x)
+        self.assertAlmostEqual(right.dot(App.Vector(1, 1, 0).normalize()), 1.0, places=9)
+        self.assertGreater(up.z, 0.5)                       # up is up the model
+        self.assertAlmostEqual(right.cross(up).dot(dd), 1.0, places=9)
+
+    def test_triangles_lit_and_sorted(self):
+        import Part
+        from DrawingKitTools import shaded
+        a = self.doc.addObject("Part::Feature", "A")
+        a.Shape = Part.makeBox(20, 20, 20)
+        b = self.doc.addObject("Part::Feature", "B")
+        b.Shape = Part.makeBox(10, 10, 10, App.Vector(30, 0, 0))
+        self.doc.recompute()
+        d, x = core.STANDARD_DIRECTIONS["FrontTopRight"]
+        dd, right, up = shaded.view_frame(d, x)
+        tris = shaded.triangles([a, b], dd, right, up)
+        self.assertGreater(len(tris), 12)
+        depths = [t[0] for t in tris]
+        self.assertEqual(depths, sorted(depths))           # far first
+        # three faces of a cube face the iso viewer: three different shades
+        shades = {round(t[2][0], 3) for t in tris if t[0] > 0}
+        self.assertGreaterEqual(len(shades), 3)
+        polys = shaded.edges([a, b], dd, right, up, 50.0)
+        self.assertGreaterEqual(len(polys), 9 + 9)         # 9 visible edges per box
+
+
 class TestBalloonLeaders(unittest.TestCase):
     def test_crossing_leaders_are_swapped(self):
         from DrawingKitTools import drafting

@@ -2068,6 +2068,77 @@ class EditDimension:
         say("%d dimension(s) updated" % len(dims))
 
 
+class ShadedView:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Shaded.svg"),
+                "MenuText": "Shaded isometric view",
+                "ToolTip": "A shaded picture of the part or assembly from the isometric "
+                           "direction (each part in its colour, edges drawn), marked reference "
+                           "only, not to scale. Select parts, a view, or nothing (the sheet's "
+                           "parts), then click where it goes (Enter: a free spot). With a "
+                           "shaded view selected, paints it again after the model changed."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import shaded, interact
+        doc = App.ActiveDocument
+        sel = Gui.Selection.getSelection()
+        old = [o for o in sel if shaded.is_shaded(o)]
+        if old:
+            try:
+                run_in_transaction(doc, "DrawingKit update shaded view",
+                                   lambda: [shaded.update(o) for o in old])
+            except ValueError as e:
+                warn(str(e))
+                return
+            doc.recompute()
+            say("%d shaded view(s) painted again" % len(old))
+            return
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        objs = selected_parts()
+        if not objs:
+            for o in sel:
+                if o.isDerivedFrom("TechDraw::DrawViewPart"):
+                    objs = list(o.Source)
+                    break
+                if o.isDerivedFrom("TechDraw::DrawProjGroup"):
+                    objs = list(o.Source)
+                    break
+        if not objs:
+            group, extras = core.page_content(page)
+            src = group if group is not None else (extras[0] if extras else None)
+            objs = list(src.Source) if src is not None else []
+        if not objs:
+            warn("Select the part(s) to show, or a view of them.")
+            return
+        show_page(page)
+        Gui.Selection.clearSelection()
+        frame, _ = core.drawing_area(page.Template.Template, *core.page_size(page))
+        width = round(min(110.0, max(60.0, (frame[2] - frame[0]) * 0.25)) / 5.0) * 5.0
+
+        def on_done(points):
+            place = points[-1] if points else None
+            try:
+                img = run_in_transaction(doc, "DrawingKit shaded view",
+                                         lambda: shaded.add(page, objs, width, place))
+            except ValueError as e:
+                warn(str(e))
+                return
+            doc.recompute()
+            say("Shaded isometric view added (%s)" % img.Label)
+
+        interact.PagePicker(page, "DrawingKit: click where the shaded isometric view goes "
+                                  "(Enter: a free spot, Esc: cancel)",
+                            on_move=lambda pt, _p: [("rect", pt[0], pt[1], width, width * 0.75)],
+                            on_click=lambda pt, pts: True, on_done=on_done,
+                            finish_on_right_click=True)
+
+
 class AlternatePosition:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_Phantom.svg"),
@@ -3098,6 +3169,7 @@ COMMANDS = [
     ("DrawingKit_Note", Note()),
     ("DrawingKit_Flag", SpecialCharacteristic()),
     ("DrawingKit_Phantom", AlternatePosition()),
+    ("DrawingKit_Shaded", ShadedView()),
     ("DrawingKit_TextStyle", TextStyle()),
     ("DrawingKit_Ordinate", OrdinateDims()),
     ("DrawingKit_Centerline", Centerline()),
@@ -3132,7 +3204,7 @@ COMMAND_GROUPS = [
                           "DrawingKit_DetailView",
                           "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_ScaleUp",
                           "DrawingKit_ScaleDown", "DrawingKit_SetScale", "DrawingKit_HiddenLines",
-                          "DrawingKit_Phantom",
+                          "DrawingKit_Phantom", "DrawingKit_Shaded",
                           "DrawingKit_SpeedToggle"]),
     ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
                                "DrawingKit_CenterMarks", "DrawingKit_Centerline",
