@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """DrawingKit toolbar commands (GUI only)."""
 
+import math
 import os
 
 import FreeCAD as App
@@ -1542,10 +1543,28 @@ class ToleranceDialog(QtWidgets.QDialog):
                               (data or {}).get("linear", []))
         self.ang = self._grid(["Side over (%s)" % units, "Up to (%s)" % units, "±"],
                               (data or {}).get("angular", []))
+        d = data or {}
+        self.ang_mode = QtWidgets.QComboBox()
+        for val, text in (("size", "By size (rows below)"), ("all", "One tolerance for all angles"),
+                          ("none", "None in this table")):
+            self.ang_mode.addItem(text, val)
+        mode = "all" if d.get("angle_all") else ("size" if d.get("angular") or data is None else "none")
+        self.ang_all = QtWidgets.QLineEdit(d.get("angle_all", "") or "1°")
+        self.ang_all.setPlaceholderText("e.g. 1° or 0°30'")
+        self.ang_all.setMaximumWidth(90)
         for title, grid in (("Lengths", self.lin), ("Angles", self.ang)):
             lay.addWidget(QtWidgets.QLabel("<b>%s</b>" % title))
+            if grid is self.ang:
+                arow = QtWidgets.QHBoxLayout()
+                arow.addWidget(self.ang_mode)
+                arow.addWidget(QtWidgets.QLabel("±"))
+                arow.addWidget(self.ang_all)
+                arow.addStretch(1)
+                lay.addLayout(arow)
             lay.addWidget(grid)
             btns = QtWidgets.QHBoxLayout()
+            if grid is self.ang:
+                self.ang_btns = btns
             add = QtWidgets.QPushButton("Add row")
             add.clicked.connect(lambda _=False, g=grid: g.insertRow(g.rowCount()))
             rem = QtWidgets.QPushButton("Remove row")
@@ -1555,6 +1574,17 @@ class ToleranceDialog(QtWidgets.QDialog):
             btns.addWidget(rem)
             btns.addStretch(1)
             lay.addLayout(btns)
+        def ang_sync(*_):
+            m = self.ang_mode.currentData()
+            self.ang.setVisible(m == "size")
+            for i in range(self.ang_btns.count()):
+                w = self.ang_btns.itemAt(i).widget()
+                if w is not None:
+                    w.setVisible(m == "size")
+            self.ang_all.setVisible(m == "all")
+        self.ang_mode.currentIndexChanged.connect(ang_sync)
+        self.ang_mode.setCurrentIndex(self.ang_mode.findData(mode))
+        ang_sync()
         note = QtWidgets.QLabel("Leave the rows empty for no table on the sheet. Save it for every "
                                 "drawing with \"Save * as my defaults\" or \"to company file\".")
         note.setWordWrap(True)
@@ -1589,6 +1619,7 @@ class ToleranceDialog(QtWidgets.QDialog):
         self._fill(self.lin, d["linear"])
         self._fill(self.ang, d["angular"])
         self.name.setText(d["preset"])
+        self.ang_mode.setCurrentIndex(self.ang_mode.findData("size"))
 
     def _rows(self, grid):
         out = []
@@ -1599,10 +1630,14 @@ class ToleranceDialog(QtWidgets.QDialog):
         return out
 
     def data(self):
-        lin, ang = self._rows(self.lin), self._rows(self.ang)
-        if not lin and not ang:
+        mode = self.ang_mode.currentData()
+        lin = self._rows(self.lin)
+        ang = self._rows(self.ang) if mode == "size" else []
+        ang_all = self.ang_all.text().strip() if mode == "all" else ""
+        if not lin and not ang and not ang_all:
             return None
-        return {"preset": self.name.text().strip(), "linear": lin, "angular": ang}
+        return {"preset": self.name.text().strip(), "linear": lin, "angular": ang,
+                "angle_all": ang_all}
 
 
 class TitleBlockDialog(QtWidgets.QDialog):
@@ -1729,7 +1764,8 @@ class TitleBlockDialog(QtWidgets.QDialog):
             self.tol_label.setText("none (no table on the sheet)")
         else:
             n = len(t.get("linear", [])) + len(t.get("angular", []))
-            self.tol_label.setText("%s table, %d row(s)" % (t.get("preset") or "Own", n))
+            extra = (", angles ±%s" % t["angle_all"].lstrip("±")) if t.get("angle_all") else ""
+            self.tol_label.setText("%s table, %d row(s)%s" % (t.get("preset") or "Own", n, extra))
 
     def edit_tolerances(self):
         dlg = ToleranceDialog(self.tol_table, self.units(), self)
@@ -2030,6 +2066,166 @@ class EditDimension:
                            lambda: [dimsmod.set_dimension(d, **c) for d in dims])
         doc.recompute()
         say("%d dimension(s) updated" % len(dims))
+
+
+class AlternatePosition:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Phantom.svg"),
+                "MenuText": "Alternate position (phantom lines)",
+                "ToolTip": "Show a part swung or slid to another position in phantom lines "
+                           "(long dash, double dot). Click the part in a view, then the pivot "
+                           "(snaps to hole centres and corners) and swing it with the mouse; "
+                           "or press Enter instead of a pivot to slide it. Select a view that "
+                           "has some and press it again to remove them."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import annot, interact, phantom, drafting, smartdim
+        doc = App.ActiveDocument
+        sel = [o for o in Gui.Selection.getSelection()
+               if o.isDerivedFrom("TechDraw::DrawViewPart") and phantom.entries(o)]
+        if sel:
+            n = sum(len(phantom.entries(v)) for v in sel)
+            if ui.choose("%d alternate position(s) on the selected view(s)" % n,
+                         [(True, "Remove them"), (False, "Keep")]):
+                run_in_transaction(doc, "DrawingKit remove alternate positions",
+                                   lambda: [phantom.remove(v) for v in sel])
+                doc.recompute()
+                say("Alternate positions removed")
+            return
+        page = target_page()
+        if page is None:
+            warn("Open the page first.")
+            return
+        show_page(page)
+        Gui.Selection.clearSelection()
+        st = {}
+
+        def ghost(polys):
+            return [("line", [annot.view_point(st["view"], q) for q in poly]) for poly in polys]
+
+        # 1. the part
+        def pick_part(pt, points):
+            points.clear()
+            view = interact._view_under(page, pt[0], pt[1], margin=1.0)
+            if view is None:
+                say("Click on a part in a view")
+                return False
+            try:
+                _it, obj = drafting.part_at(view, pt[0], pt[1])
+            except Exception:
+                obj = None
+            if obj is None and len(view.Source) == 1:
+                obj = view.Source[0]
+            if obj is None:
+                say("No part there - click on the part's outline or face")
+                return False
+            try:
+                polys = phantom.outline(view, obj)
+            except Exception as e:
+                warn(str(e))
+                return False
+            st.update(view=view, obj=obj, polys=polys,
+                      grab=annot.page_to_local(view, *pt))
+            return True
+
+        def hover_part(pt, _points):
+            view = interact._view_under(page, pt[0], pt[1], margin=1.0)
+            if view is None:
+                return []
+            try:
+                _it, obj = drafting.part_at(view, pt[0], pt[1])
+            except Exception:
+                obj = None
+            if obj is None:
+                return []
+            try:
+                st["view"] = view
+                return [("hl_line", line[i:i + 2], "#ff7f0e")
+                        for line in [[annot.view_point(view, q) for q in poly]
+                                     for poly in _cached_outline(st, view, obj)]
+                        for i in range(len(line) - 1)]
+            except Exception:
+                return []
+
+        # 2. the pivot (Enter: slide instead)
+        def snap(pt):
+            view = st["view"]
+            local = annot.page_to_local(view, *pt)
+            try:
+                e = smartdim.pick(view, local, smartdim.entities(view))
+            except Exception:
+                e = None
+            if e is not None and e.kind in ("circle", "arc", "vertex", "centre"):
+                return e.point
+            return local
+
+        def after_part(points):
+            if "obj" not in st:
+                return
+            interact.PagePicker(page, "DrawingKit: click the pivot to swing %s about (snaps to "
+                                      "hole centres and corners), or press Enter to slide it"
+                                % st["obj"].Label,
+                                on_move=lambda pt, _p: ghost(st["polys"]) +
+                                [("hl_point", annot.view_point(st["view"], snap(pt)), 1.6, "#ff7f0e")],
+                                on_click=lambda pt, pts: True,
+                                on_done=after_pivot, finish_on_right_click=True)
+
+        # 3. the new position
+        def placement(pt):
+            view = st["view"]
+            local = annot.page_to_local(view, *pt)
+            if st.get("pivot") is None:
+                return 0.0, (0.0, 0.0), (local[0] - st["grab"][0], local[1] - st["grab"][1])
+            px, py = st["pivot"]
+            a0 = math.atan2(st["grab"][1] - py, st["grab"][0] - px)
+            a1 = math.atan2(local[1] - py, local[0] - px)
+            ang = math.degrees(a1 - a0)
+            ang = (ang + 180.0) % 360.0 - 180.0
+            return round(ang / 5.0) * 5.0, (px, py), (0.0, 0.0)
+
+        def after_pivot(points):
+            st["pivot"] = snap(points[-1]) if points else None
+
+            def show(pt, _p):
+                ang, piv, mv = placement(pt)
+                shapes = ghost(phantom.moved(st["polys"], piv, ang, mv))
+                label = ("%g°" % ang) if st["pivot"] is not None else \
+                    "%.1f, %.1f" % (mv[0], mv[1])
+                shapes.append(("text", pt[0] + 3.0, pt[1] + 3.0, label))
+                return shapes
+
+            def place(pt, pts):
+                ang, piv, mv = placement(pt)
+                try:
+                    n = run_in_transaction(doc, "DrawingKit alternate position",
+                                           lambda: phantom.add(st["view"], st["obj"], ang, piv, mv))
+                except ValueError as e:
+                    say(str(e))
+                    return False
+                doc.recompute()
+                say("%s shown in phantom lines (%d lines)" % (st["obj"].Label, n))
+                return True
+
+            interact.PagePicker(page, "DrawingKit: move the mouse to %s %s, click to place "
+                                      "(Esc: cancel)" % ("swing" if st["pivot"] is not None
+                                                         else "slide", st["obj"].Label),
+                                on_move=show, on_click=place, finish_on_right_click=False)
+
+        interact.PagePicker(page, "DrawingKit: click the part to show in another position",
+                            on_move=hover_part, on_click=pick_part, on_done=after_part,
+                            finish_on_right_click=False)
+
+
+def _cached_outline(st, view, obj):
+    from . import phantom
+    key = (view.Name, obj.Name)
+    cache = st.setdefault("outlines", {})
+    if key not in cache:
+        cache[key] = phantom.outline(view, obj)
+    return cache[key]
 
 
 FLAG_PREF = "FlagText"
@@ -2901,6 +3097,7 @@ COMMANDS = [
     ("DrawingKit_ToleranceFrame", ToleranceFrame()),
     ("DrawingKit_Note", Note()),
     ("DrawingKit_Flag", SpecialCharacteristic()),
+    ("DrawingKit_Phantom", AlternatePosition()),
     ("DrawingKit_TextStyle", TextStyle()),
     ("DrawingKit_Ordinate", OrdinateDims()),
     ("DrawingKit_Centerline", Centerline()),
@@ -2935,6 +3132,7 @@ COMMAND_GROUPS = [
                           "DrawingKit_DetailView",
                           "DrawingKit_AuxView", "DrawingKit_FitToPage", "DrawingKit_ScaleUp",
                           "DrawingKit_ScaleDown", "DrawingKit_SetScale", "DrawingKit_HiddenLines",
+                          "DrawingKit_Phantom",
                           "DrawingKit_SpeedToggle"]),
     ("DrawingKit dimensions", ["DrawingKit_Dimension", "DrawingKit_Ordinate", "DrawingKit_EditDimension",
                                "DrawingKit_CenterMarks", "DrawingKit_Centerline",

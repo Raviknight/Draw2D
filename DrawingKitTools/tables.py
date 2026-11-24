@@ -319,13 +319,16 @@ def tolerance_params(data, units="mm"):
     if ang:
         rows.append(["ANGLES (SHORTER SIDE)", ""])
         rows += ang
+    elif data.get("angle_all"):
+        rows.append(["ANGLES", _tol_text(data["angle_all"])])   # one for all angles
     title = "GENERAL TOLERANCES"
     if data.get("preset"):
         title += "  " + data["preset"]
     return {"title": title, "headers": ["SIZE (%s)" % units.upper(), "TOLERANCE"],
             "rows": rows, "widths": [34.0, 22.0], "tsize": 3.5,
             "data": {"preset": data.get("preset", ""), "linear": data.get("linear", []),
-                     "angular": data.get("angular", []), "units": units}}
+                     "angular": data.get("angular", []),
+                     "angle_all": data.get("angle_all", ""), "units": units}}
 
 
 def tolerance_table(page):
@@ -350,7 +353,8 @@ def set_tolerance_table(page, data, units="mm"):
     import json
     table = tolerance_table(page)
     has_rows = data and (any(r[2] for r in data.get("linear", [])) or
-                         any(r[2] for r in data.get("angular", [])))
+                         any(r[2] for r in data.get("angular", [])) or
+                         bool(data.get("angle_all")))
     from . import titleblock
     if not has_rows:
         if table is not None:

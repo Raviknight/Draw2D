@@ -2098,6 +2098,23 @@ class TestTitleBlockDefaults(DocTest):
         with open(page2.Template.Template, encoding="utf-8") as f:
             self.assertIn("TOLERANCES: SEE TABLE", f.read())
 
+    def test_one_tolerance_for_all_angles(self):
+        import json
+        from DrawingKitTools import tables
+        page = core.create_page(self.doc, "A3", "Landscape")
+        d = {"preset": "", "linear": [["0", "6", "0.02"]], "angular": [], "angle_all": "1°"}
+        t = tables.set_tolerance_table(page, d)
+        rows = json.loads(t.DrawingKitParams)["rows"]
+        self.assertEqual(rows, [["0 - 6", "±0.02"], ["ANGLES", "±1°"]])
+        self.assertEqual(tables.tolerance_data(page)["angle_all"], "1°")
+        # only an angle tolerance is still a table
+        t = tables.set_tolerance_table(page, {"preset": "", "linear": [], "angular": [],
+                                              "angle_all": "0°30'"})
+        self.assertEqual(json.loads(t.DrawingKitParams)["rows"], [["ANGLES", "±0°30'"]])
+        # kept with the defaults
+        self.tb.save_user_defaults({self.tb.TOL_TABLE: d})
+        self.assertEqual(self.tb.load_defaults(asme=False)[self.tb.TOL_TABLE]["angle_all"], "1°")
+
     def test_saved_tolerance_table_goes_on_new_sheets(self):
         from DrawingKitTools import tables
         own = {"preset": "ACME STD-12", "linear": [["0", "2", "0.01"], ["2", "6", "0.02"]],
@@ -2161,6 +2178,67 @@ class TestDimensionPreview(unittest.TestCase):
         arc = max(self.lines(sh), key=len)
         for p in arc:
             self.assertAlmostEqual(math.hypot(*p), math.hypot(5.0, 5.0), places=6)
+
+
+class TestAlternatePosition(DocTest):
+    def setUp(self):
+        super().setUp()
+        import Part
+        from DrawingKitTools import phantom
+        self.ph = phantom
+        self.base = self.doc.addObject("Part::Feature", "Base")
+        self.base.Shape = Part.makeBox(100, 40, 10)
+        self.arm = self.doc.addObject("Part::Feature", "Arm")
+        self.arm.Shape = Part.makeBox(40, 8, 6, App.Vector(60, 16, 10))
+        self.asm = self.doc.addObject("App::Part", "Assembly")
+        self.asm.addObjects([self.base, self.arm])
+        self.doc.recompute()
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        self.g = core.add_standard_views(self.page, [self.asm],
+                                         front=core.STANDARD_DIRECTIONS["Top"])
+        self.doc.recompute()
+        self.v = self.g.Anchor
+
+    def test_turning(self):
+        (p,), = self.ph.moved([[(10.0, 0.0)]], (0.0, 0.0), 90.0)
+        self.assertAlmostEqual(p[0], 0.0)
+        self.assertAlmostEqual(p[1], 10.0)
+        (p,), = self.ph.moved([[(10.0, 0.0)]], (5.0, 0.0), 180.0, (1.0, 2.0))
+        self.assertAlmostEqual(p[0], 1.0)
+        self.assertAlmostEqual(p[1], 2.0)
+
+    def test_outline_is_the_part_as_the_view_sees_it(self):
+        polys = self.ph.outline(self.v, self.arm)
+        xs = [x for poly in polys for x, _ in poly]
+        ys = [y for poly in polys for _, y in poly]
+        bb = self.arm.Shape.BoundBox
+        lo = core.model_to_local(self.v, App.Vector(bb.XMin, bb.YMin, bb.ZMax))
+        hi = core.model_to_local(self.v, App.Vector(bb.XMax, bb.YMax, bb.ZMax))
+        self.assertAlmostEqual(min(xs), min(lo[0], hi[0]), places=4)
+        self.assertAlmostEqual(max(xs), max(lo[0], hi[0]), places=4)
+        self.assertAlmostEqual(min(ys), min(lo[1], hi[1]), places=4)
+        self.assertAlmostEqual(max(ys), max(lo[1], hi[1]), places=4)
+
+    def test_add_refresh_remove(self):
+        pivot = core.model_to_local(self.v, App.Vector(64, 20, 13))
+        n = self.ph.add(self.v, self.arm, 30.0, pivot)
+        self.assertGreaterEqual(n, 4)
+        items = self.ph.entries(self.v)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["part"], "Arm")
+        for tag in items[0]["tags"]:
+            self.assertIsNotNone(self.v.getCosmeticEdge(tag))
+        # the model changes: drawn again, same number of lines
+        self.arm.Shape = self.arm.Shape.copy()
+        self.assertEqual(self.ph.refresh(self.v), n)
+        old = self.ph.entries(self.v)[0]["tags"]
+        self.assertEqual(self.ph.remove(self.v), 1)
+        self.assertEqual(self.ph.entries(self.v), [])
+        for tag in old:
+            with self.assertRaises(Exception):     # TechDraw: "edge ... not found"
+                self.v.getCosmeticEdge(tag)
+        with self.assertRaises(ValueError):
+            self.ph.add(self.v, self.arm, 0.0, pivot)
 
 
 class TestBalloonLeaders(unittest.TestCase):

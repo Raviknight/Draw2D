@@ -1194,6 +1194,11 @@ def refresh_page(page):
         dims.refresh_limits(page)     # limit dimensions follow the model
     except Exception:
         pass
+    try:
+        from . import phantom
+        phantom.refresh_page(page)    # alternate positions follow the model
+    except Exception:
+        pass
     return refresh(annotations_on(page))
 
 

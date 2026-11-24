@@ -141,7 +141,7 @@ def _clean_table(t):
                 out.append([str(x).strip() for x in r])
         return out
     return {"preset": str(t.get("preset", "")), "linear": rows(t.get("linear")),
-            "angular": rows(t.get("angular"))}
+            "angular": rows(t.get("angular")), "angle_all": str(t.get("angle_all", "") or "")}
 
 
 def write_file(path, values):
