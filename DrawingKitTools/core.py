@@ -223,7 +223,7 @@ def free_regions(frame, title, pad=5.0):
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
-def create_page(doc, size, orientation, templates=None, drawingkit_template=True):
+def create_page(doc, size, orientation, templates=None, drawingkit_template=True, style=None):
     """New page of the given paper size.
 
     Uses DrawingKit's own frame and title block (any size, both orientations,
@@ -245,7 +245,7 @@ def create_page(doc, size, orientation, templates=None, drawingkit_template=True
             from . import titleblock
             path = d2t.template_path(size, orientation, page_first_angle(page),
                                      tol_row=titleblock.wants_tolerance_row(),
-                                     style=titleblock.style())
+                                     style=style or titleblock.style())
         except Exception as e:
             App.Console.PrintWarning("DrawingKit template failed, using FreeCAD's: %s\n" % e)
     if path is None:

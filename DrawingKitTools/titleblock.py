@@ -295,8 +295,37 @@ def fields(page):
     if tpl is None or "EditableTexts" not in tpl.PropertiesList:
         return []
     texts = dict(tpl.EditableTexts)
-    keys = [k for k in ORDER if k in texts] + sorted(k for k in texts if k not in ORDER)
-    return [(k, LABELS.get(k, k.replace("_", " ").capitalize()), texts[k]) for k in keys]
+    labels = dict(LABELS)
+    order = list(ORDER)
+    d = None
+    if is_custom(page):
+        from . import templates
+        d = templates.custom_design(template_style(page))
+    if d is not None:
+        # a design of your own: its captions name the fields, in its order
+        from . import blocks
+        order = []
+        for c in d["cells"]:
+            cap = (c["label"].splitlines() or [""])[0].strip().capitalize()
+            if c["kind"] == "field" and c["field"]:
+                names = blocks.line_names(c)
+                base = cap or LABELS.get(c["field"], c["field"].replace("_", " ").capitalize())
+                for k, n in enumerate(names):
+                    if len(names) > 1:
+                        labels[n] = "%s (line %d)" % (base, k + 1)
+                    elif n not in LABELS or cap:
+                        labels[n] = base
+                    order.append(n)
+            elif c["kind"] == "surface":
+                v, note = blocks.surface_names(c)
+                labels[v], labels[note] = "Surface finish value", "Surface finish note"
+                order += [v, note]
+    keys = [k for k in order if k in texts] + sorted(k for k in texts if k not in order)
+    out = [(k, labels.get(k, k.replace("_", " ").capitalize()), texts[k]) for k in keys]
+    seen = [lab for _k, lab, _v in out]
+    # two cells with the same caption (DATE, DATE): say which is which
+    return [(k, lab if seen.count(lab) == 1 or k in LABELS and LABELS[k] == lab
+             else "%s (%s)" % (lab, k.replace("_", " ")), v) for k, lab, v in out]
 
 
 def set_fields(page, values):

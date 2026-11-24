@@ -226,6 +226,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         form.addRow("Holds", self.kind)
         self.label = QtWidgets.QLineEdit()
         self.label.setPlaceholderText("small caption in the corner, e.g. DRAWN BY")
+        self.label.setToolTip("A | starts a second caption line")
         self.label.editingFinished.connect(self._edited)
         form.addRow("Caption", self.label)
         self.field = QtWidgets.QComboBox()
@@ -267,6 +268,12 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.rows.setToolTip("Rows of size ranges; the last one takes the angle tolerance")
         self.rows.valueChanged.connect(self._edited)
         form.addRow("Rows", self.rows)
+        self.lines = QtWidgets.QSpinBox()
+        self.lines.setRange(1, blocks.MAX_LINES)
+        self.lines.setToolTip("Lines of text in this field (notes, specifications): each line "
+                              "is its own value in the Title block form")
+        self.lines.valueChanged.connect(self._edited)
+        form.addRow("Lines", self.lines)
         pic = QtWidgets.QHBoxLayout()
         self.pic_btn = QtWidgets.QPushButton("Choose picture...")
         self.pic_btn.clicked.connect(self._pick_picture)
@@ -419,7 +426,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.cell_box.setEnabled(c is not None)
         if c is not None:
             self.kind.setCurrentIndex(self.kind.findData(c["kind"]))
-            self.label.setText(c["label"])
+            self.label.setText(c["label"].replace("\n", " | "))
             i = self.field.findData(c["field"])
             if i >= 0:
                 self.field.setCurrentIndex(i)
@@ -432,16 +439,24 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             self.vertical.setChecked(c["vertical"])
             self.align.setCurrentIndex(self.align.findData(c["align"]))
             self.rows.setValue(c["rows"])
+            self.lines.setValue(c["lines"])
             self.cw.setValue(c["w"])
             self.ch.setValue(c["h"])
             k = c["kind"]
-            self.field.setEnabled(k == "field")
-            self.text.setEnabled(k in ("field", "text"))
-            self.size.setEnabled(k in ("field", "text", "tolerance"))
-            self.bold.setEnabled(k in ("field", "text", "tolerance"))
+            self.field.setEnabled(k in ("field", "surface"))
+            self.text.setEnabled(k in ("field", "text", "surface"))
+            self.text.setToolTip({
+                "surface": "Line 1: the roughness value over the symbol (e.g. 63). "
+                           "Line 2: the note after it (e.g. MACHINE).",
+                "field": "Starting value of the field, one line per field line. {size} is the "
+                         "sheet size letter.",
+            }.get(k, "Fixed text; several lines are fine. {size} is the sheet size letter."))
+            self.size.setEnabled(k in ("field", "text", "tolerance", "surface"))
+            self.bold.setEnabled(k in ("field", "text", "tolerance", "surface"))
             self.vertical.setEnabled(k == "text")
-            self.align.setEnabled(k in ("field", "text", "logo"))
+            self.align.setEnabled(k in ("field", "text", "logo", "surface"))
             self.rows.setEnabled(k == "tolerance")
+            self.lines.setEnabled(k == "field")
             self.pic_btn.setEnabled(k == "logo")
             self.pic_clear.setEnabled(k == "logo" and bool(c["image"]))
             self.label.setEnabled(k != "text")
@@ -461,8 +476,13 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         c = self.design["cells"][self.current]
         new = dict(c)
         new["kind"] = self.kind.currentData()
-        new["label"] = self.label.text()
-        new["field"] = self._field_key() if new["kind"] == "field" else c["field"]
+        new["label"] = "\n".join(p.strip() for p in self.label.text().split("|")).strip()
+        new["field"] = self._field_key() if new["kind"] in ("field", "surface") else c["field"]
+        new["lines"] = self.lines.value()
+        if new["kind"] == "surface" and c["kind"] != "surface":
+            new["field"] = new["field"] if c["kind"] == "field" and new["field"] else "surface_finish"
+            if not c["text"]:
+                new["text"] = "63\nMACHINE"
         new["size"] = self.size.value()
         new["bold"] = self.bold.isChecked()
         new["vertical"] = self.vertical.isChecked()
@@ -484,7 +504,9 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         c = self.design["cells"][self.current]
         t = self.text.toPlainText()
         if c["kind"] == "field":
-            t = t.splitlines()[0] if t else ""      # a field is one line
+            t = "\n".join(t.splitlines()[:c["lines"]])   # one value per field line
+        elif c["kind"] == "surface":
+            t = "\n".join(t.splitlines()[:2])
         if t != c["text"]:
             c["text"] = t
             self.changed()

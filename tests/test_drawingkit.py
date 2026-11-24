@@ -2402,6 +2402,33 @@ class TestTitleBlockDesigns(DocTest):
         self.assertNotIn("_c-", os.path.basename(
             t.template_path("A4", "Portrait", True, self.tmp, style="custom:Huge")))
 
+    def test_notes_block_lines_and_surface_finish(self):
+        b, t, tb = self.blocks, self.templates, self.tb
+        d = b.preset_notes()
+        self.assertEqual(b.problems(d), [])
+        names = b.field_names(d)
+        for n in ("tolerance_notes", "tolerance_notes_7", "edge_note_2", "specification_2",
+                  "surface_finish", "surface_finish_note", "hardness", "approved_date"):
+            self.assertIn(n, names)
+        s = b.svg(d, 0, 0, "B")
+        self.assertIn('freecad:editable="tolerance_notes_4"', s)
+        self.assertIn(">ANGLES  ±.5°<", s)
+        self.assertIn(">MACHINE<", s)                         # surface note default
+        self.assertIn(">64<", s)
+        b.save(d)
+        key = b.slug(d["name"])
+        self.assertTrue(t.fits("custom:" + key, "ANSI B", "Landscape"))
+        self.assertFalse(t.fits("custom:" + key, "A4", "Landscape"))   # 280 mm: too wide
+        page = core.create_page(self.doc, "ANSI B", "Landscape", style="custom:" + key)
+        self.assertEqual(tb.page_style(page), "custom:" + key)
+        texts = dict(page.Template.EditableTexts)
+        self.assertEqual(texts["edge_note_2"], "AND SHARP EDGES")
+        self.assertEqual(texts["sheet_size"], "B")
+        labels = dict((k, lab) for k, lab, _v in tb.fields(page))
+        self.assertEqual(labels["specification_2"], "Specifications (line 2)")
+        self.assertEqual(labels["surface_finish"], "Surface finish value")
+        self.assertEqual(labels["title"], "Description")
+
     def test_drawing_font(self):
         from DrawingKitTools import fonts, templates
         self.assertEqual(fonts.drawing_font(), "DejaVu Sans")

@@ -2,7 +2,7 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>DrawingKit</name>
   <description>Community add-on for the TechDraw workbench: Onshape-style drawings with sized sheets and a clean title block, fitted standard views, projected views by pointing, click-defined and stepped sections, detail views, centre marks with bolt circles, hole callouts, datum flags and geometric tolerance frames.</description>
-  <version>0.10.0</version>
+  <version>0.10.1</version>
   <date>2026-11-24</date>
   <maintainer email="101029458+Raviknight@users.noreply.github.com">Raviknight</maintainer>
   <license file="LICENSE">LGPL-2.1-or-later</license>

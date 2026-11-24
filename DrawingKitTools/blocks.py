@@ -28,10 +28,12 @@ import re
 
 import FreeCAD as App
 
-KINDS = ["field", "text", "logo", "tolerance", "projection", "empty"]
+KINDS = ["field", "text", "logo", "tolerance", "surface", "projection", "empty"]
 KIND_NAMES = {"field": "Field (typed per drawing)", "text": "Fixed text", "logo": "Picture / logo",
-              "tolerance": "Tolerances by size (table)", "projection": "Projection symbol",
-              "empty": "Empty"}
+              "tolerance": "Tolerances by size (table)",
+              "surface": "Surface finish symbol (value + note)",
+              "projection": "Projection symbol", "empty": "Empty"}
+MAX_LINES = 12
 ALIGNS = ["left", "centre", "right"]
 CAPTION_SIZE = 1.8
 MIN_CELL = 2.0
@@ -48,7 +50,7 @@ EPS = 1e-6
 def cell(x, y, w, h, kind="empty", **kw):
     c = {"x": float(x), "y": float(y), "w": float(w), "h": float(h), "kind": kind,
          "label": "", "field": "", "text": "", "size": 3.5, "bold": False, "align": "left",
-         "vertical": False, "rows": 6, "image": "", "image_type": ""}
+         "vertical": False, "rows": 6, "lines": 1, "image": "", "image_type": ""}
     c.update(kw)
     return c
 
@@ -79,6 +81,10 @@ def clean(d):
                 pass
         try:
             n["rows"] = max(1, min(20, int(c.get("rows", 6))))
+        except (TypeError, ValueError):
+            pass
+        try:
+            n["lines"] = max(1, min(MAX_LINES, int(c.get("lines", 1))))
         except (TypeError, ValueError):
             pass
         n["bold"] = bool(c.get("bold"))
@@ -233,12 +239,27 @@ def resize(d, width=None, height=None):
     d["width"], d["height"] = d["width"] * kx, d["height"] * ky
 
 
+def line_names(c):
+    """Editable names of a field cell's lines: notes, notes_2, notes_3..."""
+    if not c["field"]:
+        return []
+    return [c["field"]] + ["%s_%d" % (c["field"], k) for k in range(2, c["lines"] + 1)]
+
+
+def surface_names(c):
+    """(value, note) editable names of a surface finish cell."""
+    f = c["field"] or "surface_finish"
+    return f, f + "_note"
+
+
 def field_names(d):
     """Editable field names the design makes, in order."""
     out = []
     for c in d["cells"]:
         if c["kind"] == "field" and c["field"]:
-            out.append(c["field"])
+            out += line_names(c)
+        elif c["kind"] == "surface":
+            out += list(surface_names(c))
         elif c["kind"] == "tolerance":
             for r in range(c["rows"]):
                 out += [TOL_RANGE % (r + 1), TOL_VALUE % (r + 1)]
@@ -369,9 +390,48 @@ def tolerance_values(data, rows):
     return out
 
 
+def _caption_h(c):
+    n = len(c["label"].splitlines()) if c["label"] else 0
+    return CAPTION_SIZE * 1.25 * n + 0.6 if n else 0.0
+
+
+def _surface(a, c, cx0, cy0, weight, preview):
+    """Surface texture symbol (√) with its value over the V and a note after
+    it, e.g. 63 √ MACHINE: both editable."""
+    val_name, note_name = surface_names(c)
+    defaults = (c["text"].splitlines() + ["", ""])[:2]
+    s = c["size"]
+    h = s * 1.5                               # height of the short leg
+    top = cy0 + _caption_h(c)
+    note_w = max(len(defaults[1]), 6) * s * 0.64
+    sym_w = 1.25 * h
+    total = sym_w + 1.0 + note_w
+    if c["align"] == "left":
+        x = cx0 + 1.5
+    elif c["align"] == "right":
+        x = cx0 + c["w"] - 1.5 - total
+    else:
+        x = cx0 + (c["w"] - total) / 2.0
+    # the V: bottom point, short leg up-left, long leg up-right (60 degrees)
+    by = top + (cy0 + c["h"] - top) / 2.0 + h * 0.55
+    bx = x + 0.58 * h * 0.6
+    lx, ly = bx - 0.35 * h, by - 0.6 * h
+    rx, ry = bx + 0.69 * h, by - 1.2 * h
+    a('<path style="fill:none;stroke:#000000;stroke-width:0.3" d="M %.3f,%.3f L %.3f,%.3f '
+      'L %.3f,%.3f"/>' % (lx, ly, bx, by, rx, ry))
+    names = ((val_name, defaults[0], lx + 0.1 * h, ly - 0.6, "middle", s * 0.8),
+             (note_name, defaults[1], rx + 1.0, by, "start", s))
+    for name, default, tx, ty, anchor, fs in names:
+        a('<text x="%.3f" y="%.3f" freecad:editable="%s" style="font-size:%gpx;text-anchor:%s%s">'
+          '<tspan>%s</tspan></text>' % (tx, ty, _esc(name), fs, anchor, weight, _esc(default)))
+        if preview and not default:
+            a('<text x="%.3f" y="%.3f" style="font-size:%gpx;text-anchor:%s;fill:#9aa5b1;'
+              'font-style:italic">%s</text>' % (tx, ty, fs * 0.8, anchor, _esc(name)))
+
+
 def _value_y(c, y0, size):
     """Baseline of a cell's main text: centred in the space under its caption."""
-    top = y0 + c["y"] + (CAPTION_SIZE + 0.8 if c["label"] else 0.0)
+    top = y0 + c["y"] + _caption_h(c)
     bottom = y0 + c["y"] + c["h"]
     return (top + bottom) / 2.0 + size * 0.36
 
@@ -409,21 +469,30 @@ def svg(d, x0, y0, size_letter="", first_angle=True, preview=False, font=None):
     for c in d["cells"]:
         cx0, cy0 = x0 + c["x"], y0 + c["y"]
         weight = ";font-weight:bold" if c["bold"] else ""
-        if c["label"] and c["kind"] in ("field", "logo", "projection", "empty"):
-            a('<text x="%.3f" y="%.3f" style="font-size:%gpx">%s</text>'
-              % (cx0 + 0.9, cy0 + CAPTION_SIZE + 0.5, CAPTION_SIZE, _esc(c["label"])))
+        if c["label"] and c["kind"] in ("field", "logo", "projection", "empty", "surface"):
+            for k, cap in enumerate(c["label"].splitlines()):
+                a('<text x="%.3f" y="%.3f" style="font-size:%gpx%s">%s</text>'
+                  % (cx0 + c["w"] / 2.0 if c["align"] == "centre" else cx0 + 0.9,
+                     cy0 + CAPTION_SIZE + 0.5 + k * CAPTION_SIZE * 1.25, CAPTION_SIZE,
+                     ";text-anchor:middle" if c["align"] == "centre" else "", _esc(cap)))
         if c["kind"] == "field" and c["field"]:
             x, anchor = _anchor_x(c, x0)
-            y = _value_y(c, y0, c["size"])
-            default = c["text"].replace("{size}", size_letter)
-            auto = ' freecad:autofill="%s"' % AUTOFILL[c["field"]] if c["field"] in AUTOFILL else ""
-            a('<text x="%.3f" y="%.3f" freecad:editable="%s"%s style="font-size:%gpx;'
-              'text-anchor:%s%s"><tspan>%s</tspan></text>'
-              % (x, y, _esc(c["field"]), auto, c["size"], anchor, weight, _esc(default)))
-            if preview and not default:
-                a('<text x="%.3f" y="%.3f" style="font-size:%gpx;text-anchor:%s;fill:#9aa5b1;'
-                  'font-style:italic">%s</text>'
-                  % (x, y, min(c["size"], 3.0), anchor, _esc(c["field"])))
+            names = line_names(c)
+            defaults = c["text"].replace("{size}", size_letter).splitlines() or [""]
+            pitch = c["size"] * 1.3
+            y = _value_y(c, y0, c["size"]) - pitch * (len(names) - 1) / 2.0
+            for k, name in enumerate(names):
+                default = defaults[k] if k < len(defaults) else ""
+                auto = ' freecad:autofill="%s"' % AUTOFILL[name] if name in AUTOFILL else ""
+                a('<text x="%.3f" y="%.3f" freecad:editable="%s"%s style="font-size:%gpx;'
+                  'text-anchor:%s%s"><tspan>%s</tspan></text>'
+                  % (x, y + k * pitch, _esc(name), auto, c["size"], anchor, weight, _esc(default)))
+                if preview and not default:
+                    a('<text x="%.3f" y="%.3f" style="font-size:%gpx;text-anchor:%s;fill:#9aa5b1;'
+                      'font-style:italic">%s</text>'
+                      % (x, y + k * pitch, min(c["size"], 3.0), anchor, _esc(name)))
+        elif c["kind"] == "surface":
+            _surface(a, c, cx0, cy0, weight, preview)
         elif c["kind"] == "text" and c["text"]:
             tl = c["text"].replace("{size}", size_letter).splitlines() or [""]
             pitch = c["size"] * 1.25
@@ -569,12 +638,62 @@ def preset_size_table():
     return d
 
 
+def preset_notes():
+    """A wide block with room for the general notes: tolerances, edges,
+    draft and radii, surface finish, specification, hardness, material,
+    item number, drawn and approved."""
+    d = new_design("Notes + inch tolerances", 280.0, 50.0)
+    C = [
+        cell(0, 0, 130, 7, "text", text="UNLESS OTHERWISE SPECIFIED", size=3.2, align="centre"),
+        cell(0, 7, 42, 36, "field", field="tolerance_notes", lines=7, size=2.5, align="centre",
+             text="TOLERANCES (INCH)\n.XX  ±.01\n.XXX  ±.005\nANGLES  ±.5°\nALL DIMENSIONS\n"
+                  "ARE IN INCHES\n"),
+        cell(0, 43, 42, 7, "text", text="DO NOT SCALE", size=3.0, align="centre"),
+        cell(42, 7, 50, 10, "field", field="edge_note", lines=2, size=2.3, align="centre",
+             text="REMOVE ALL BURRS\nAND SHARP EDGES"),
+        cell(92, 7, 38, 10, "field", label="DRAFT ANGLE", field="draft_angle", size=2.8,
+             align="centre"),
+        cell(42, 17, 44, 9, "field", label="FILLET RADII", field="fillet_radii", size=2.8,
+             align="centre"),
+        cell(86, 17, 44, 9, "field", label="CORNER RADII", field="corner_radii", size=2.8,
+             align="centre"),
+        cell(42, 26, 88, 24, "surface", label="SURFACE FINISH, MICROINCH Ra\nMAX ALL MACHINED SURFACES",
+             field="surface_finish", text="64\nMACHINE", size=3.5, align="centre"),
+        cell(130, 0, 65, 26, "field", label="SPECIFICATIONS", field="specification", lines=2,
+             size=4.0, align="centre"),
+        cell(130, 26, 65, 13, "field", label="NOTES", field="general_notes", lines=2, size=2.5),
+        cell(130, 39, 65, 11, "field", label="HARDNESS", field="hardness", size=3.0,
+             align="centre"),
+        cell(195, 0, 85, 11, "field", label="DESCRIPTION", field="title", size=3.5,
+             align="centre"),
+        cell(195, 11, 14, 13, "field", label="SCALE", field="scale", text="1:1", size=3.0,
+             align="centre"),
+        cell(209, 11, 71, 13, "field", label="MATERIAL", field="part_material", size=3.5,
+             align="centre"),
+        cell(195, 24, 14, 15, "field", label="SIZE", field="sheet_size", text="{size}", size=6.0,
+             align="centre"),
+        cell(209, 24, 16, 15, "field", label="REV", field="revision_index", text="A", size=5.0,
+             align="centre"),
+        cell(225, 24, 55, 15, "field", label="ITEM NO.", field="drawing_number", size=5.0,
+             align="centre"),
+        cell(195, 39, 24, 11, "field", label="DRAWN", field="creator", size=2.8),
+        cell(219, 39, 18, 11, "field", label="DATE", field="date_of_issue", size=2.5,
+             align="right"),
+        cell(237, 39, 25, 11, "field", label="APPROVED", field="approval_person", size=2.8),
+        cell(262, 39, 18, 11, "field", label="DATE", field="approved_date", size=2.5,
+             align="right"),
+    ]
+    d["cells"] = C
+    return d
+
+
 def preset_blank():
     return new_design("Blank", 180.0, 40.0)
 
 
 PRESETS = [("Blank 180 x 40", preset_blank), ("Copy of DrawingKit ISO", preset_iso),
-           ("Tolerances by size + logo", preset_size_table)]
+           ("Tolerances by size + logo", preset_size_table),
+           ("Notes + inch tolerances (280 wide)", preset_notes)]
 
 
 # ---------------------------------------------------------------------------

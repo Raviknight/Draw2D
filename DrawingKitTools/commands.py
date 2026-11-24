@@ -212,6 +212,7 @@ class SheetDialog(ui.Popover):
 
     last_size = "A3"
     last_orient = "Landscape"
+    last_block = None
 
     def __init__(self, templates, parent=None):
         super().__init__("New sheet", parent)
@@ -226,6 +227,19 @@ class SheetDialog(ui.Popover):
         group.addButton(self.land)
         group.addButton(self.port)
         self.add_row(self.size, self.land, self.port)
+        # a company can have several title blocks: pick one per sheet
+        from . import blocks, titleblock
+        own = sorted(((k, d["name"]) for k, (d, _p, _w) in blocks.designs().items()),
+                     key=lambda kv: kv[1].lower())
+        self.block = None
+        if own:
+            items = [(None, "Title block: default"), ("iso", "ISO"), ("ansi", "ANSI")]
+            items += [("custom:" + k, name) for k, name in own]
+            self.block = ui.combo(items, SheetDialog.last_block, 200)
+            self.block.setToolTip("Title block for this sheet (default: as set in the Title "
+                                  "block form for new sheets, now %s)"
+                                  % titleblock.style().replace("custom:", ""))
+            self.add_row(self.block, stretch=True)
         has_part = bool(selected_parts())
         self.views = ui.toggle("+ Views", has_part, "Add front, top and right views of the selected part")
         self.iso = ui.toggle("+ Isometric", False, "Add an isometric view too")
@@ -243,7 +257,11 @@ class SheetDialog(ui.Popover):
         orient = "Portrait" if self.port.isChecked() else "Landscape"
         SheetDialog.last_size = self.size.currentData()
         SheetDialog.last_orient = orient
+        SheetDialog.last_block = self.block.currentData() if self.block is not None else None
         return (self.size.currentData(), orient, self.views.isChecked(), self.iso.isChecked())
+
+    def title_style(self):
+        return self.block.currentData() if self.block is not None else None
 
 
 def ask_isometric():
@@ -272,9 +290,10 @@ class NewSheet:
         if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
             return
         size, orient, add_views, iso = dlg.choice()
+        block = dlg.title_style()
 
         def work():
-            page = core.create_page(doc, size, orient)
+            page = core.create_page(doc, size, orient, style=block)
             if add_views and parts:
                 core.add_standard_views(page, parts, iso)
             return page
@@ -317,9 +336,10 @@ class StandardViews:
             if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
                 return
             size, orient, _, iso = dlg.choice()
+            block = dlg.title_style()
             page = run_in_transaction(
                 doc, "DrawingKit new sheet",
-                lambda: core.create_page(doc, size, orient))
+                lambda: core.create_page(doc, size, orient, style=block))
         else:
             iso = ask_isometric()
             if iso is None:

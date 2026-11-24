@@ -153,11 +153,11 @@ def _zones(start, end, centre, step=50.0):
     """Zone boundaries: every `step` mm out from the centring mark."""
     cuts = {round(centre, 3)}
     x = centre - step
-    while x > start + 1e-6:
+    while x > start + 10.0:          # no sliver of a zone at the corner
         cuts.add(round(x, 3))
         x -= step
     x = centre + step
-    while x < end - 1e-6:
+    while x < end - 10.0:
         cuts.add(round(x, 3))
         x += step
     return [start] + sorted(cuts) + [end]
