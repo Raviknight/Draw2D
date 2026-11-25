@@ -2798,15 +2798,64 @@ def _visible_circle_centres(view):
     return out
 
 
+MARKS_GEOM_PROP = "DrawingKitCenterMarkLines"
+
+
+def _mark_key(ce):
+    """Where a cosmetic line or circle is: its tag changes each time the file
+    is opened, this doesn't."""
+    try:
+        r = float(ce.Radius)
+        c = ce.Center
+        return "C %.3f %.3f %.3f" % (c.x, c.y, r)
+    except Exception:
+        pass
+    a, b = sorted([(round(ce.Start.x, 3), round(ce.Start.y, 3)),
+                   (round(ce.End.x, 3), round(ce.End.y, 3))])
+    return "L %.3f %.3f %.3f %.3f" % (a[0] + 0.0, a[1] + 0.0, b[0] + 0.0, b[1] + 0.0)
+
+
+def _mark_style(ce):
+    try:
+        return ce.Format.get("style")
+    except Exception:
+        return None
+
+
 def clear_center_marks(view):
+    """Remove DrawingKit's centre marks from view. TechDraw gives cosmetic
+    lines new tags when the file is opened again, so the marks are also
+    found by where they are."""
     tags = list(getattr(view, MARKS_PROP, []) or [])
-    for tag in tags:
+    geoms = set(getattr(view, MARKS_GEOM_PROP, []) or [])
+    try:
+        existing = list(view.CosmeticEdges)
+    except Exception:
+        existing = []
+    have = {}
+    for ce in existing:
+        try:
+            have[ce.Tag] = ce
+        except Exception:
+            pass
+    remove = [t for t in tags if t in have]
+    if len(remove) < len(tags):
+        if geoms:
+            remove += [t for t, ce in have.items() if t not in remove and _mark_key(ce) in geoms]
+        else:
+            # a drawing from before the positions were kept: the centre-line
+            # styled cosmetic lines are DrawingKit's if there are just as many
+            styled = [t for t, ce in have.items() if _mark_style(ce) == CENTER_LINE_STYLE]
+            if len(styled) == len(tags):
+                remove = styled
+    for tag in remove:
         try:
             view.removeCosmeticEdge(tag)
         except Exception:
             pass
-    if MARKS_PROP in view.PropertiesList:
-        setattr(view, MARKS_PROP, [])
+    for prop in (MARKS_PROP, MARKS_GEOM_PROP):
+        if prop in view.PropertiesList:
+            setattr(view, prop, [])
     return len(tags)
 
 
@@ -2881,7 +2930,17 @@ def add_center_marks(view):
     if MARKS_PROP not in view.PropertiesList:
         view.addProperty("App::PropertyStringList", MARKS_PROP, "DrawingKit",
                          "Cosmetic lines DrawingKit made as centre marks (replaced on refresh)")
+    if MARKS_GEOM_PROP not in view.PropertiesList:
+        view.addProperty("App::PropertyStringList", MARKS_GEOM_PROP, "DrawingKit",
+                         "Where DrawingKit's centre marks are (their tags change on reopening)")
+    geoms = []
+    for tag in tags:
+        try:
+            geoms.append(_mark_key(view.getCosmeticEdge(tag)))
+        except Exception:
+            pass
     setattr(view, MARKS_PROP, tags)
+    setattr(view, MARKS_GEOM_PROP, geoms)
     return len(tags)
 
 

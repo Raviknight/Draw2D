@@ -3474,6 +3474,7 @@ class AlignmentObserver:
 
     def __init__(self):
         self.pending = set()
+        self.settling = {}
 
     def slotDeletedObject(self, obj):
         """A symbol deleted: its leader goes too (after the deletion is done)."""
@@ -3496,6 +3497,14 @@ class AlignmentObserver:
             except Exception:
                 pass
         QtCore.QTimer.singleShot(0, drop)
+
+    def slotDeletedDocument(self, doc):
+        try:
+            from . import dimrefs
+            dimrefs.forget_document(doc.Name)
+            self.settling.pop(doc.Name, None)
+        except Exception:
+            pass
 
     def slotCreatedDocument(self, doc):
         """A document made or opened. Python observers get no 'restored'
@@ -3542,6 +3551,10 @@ class AlignmentObserver:
                     return
             except Exception:
                 return
+            try:
+                dimrefs.update_views(d)     # first look: notes where everything is
+            except Exception:
+                pass
             if dims and is_ready:
                 try:
                     fixed = dimrefs.repair(d)
@@ -3558,7 +3571,77 @@ class AlignmentObserver:
                     App.Console.PrintWarning("DrawingKit leaders: %s\n" % e)
         QtCore.QTimer.singleShot(500, tidy)
 
+    def slotRecomputedDocument(self, doc):
+        """The model or the drawing changed: once TechDraw has redrawn the
+        views, put back any dimension that lost its edge (see dimrefs)."""
+        from . import dimrefs
+        if dimrefs.BUSY[0]:
+            return
+        try:
+            name = doc.Name
+            if not any(o.isDerivedFrom("TechDraw::DrawViewDimension") for o in doc.Objects):
+                return
+        except Exception:
+            return
+        self.settle_then_check(name)
+
+    def settle_then_check(self, name):
+        from . import dimrefs
+        if name in self.settling:
+            self.settling[name] = [None, 0, 0]          # start waiting again
+            return
+        self.settling[name] = [None, 0, 0]              # last snapshot, same count, polls
+
+        def poll():
+            st = self.settling.get(name)
+            if st is None:
+                return
+            try:
+                d = App.getDocument(name)
+            except Exception:
+                d = None
+            if d is None:
+                self.settling.pop(name, None)
+                return
+            try:
+                snap = dimrefs.snapshot(d)
+            except Exception:
+                snap = None
+            st[1] = st[1] + 1 if snap == st[0] else 0
+            st[0] = snap
+            st[2] += 1
+            # TechDraw redraws the views and then the dimensions in the
+            # background for some seconds after a recompute
+            if st[1] < 6 and st[2] < 120:
+                QtCore.QTimer.singleShot(500, poll)
+                return
+            self.settling.pop(name, None)
+            try:
+                if dimrefs.update_views(d):
+                    # details moved or marks redrawn: wait for that redraw too
+                    self.settle_then_check(name)
+                    return
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit views: %s\n" % e)
+            try:
+                fixed = dimrefs.repair(d)
+                if fixed:
+                    App.Console.PrintMessage(
+                        "DrawingKit: %d dimension(s) lost their edges when the model changed "
+                        "and were put back: %s\n" % (len(fixed), ", ".join(fixed)))
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit dimensions: %s\n" % e)
+        QtCore.QTimer.singleShot(500, poll)
+
     def slotChangedObject(self, obj, prop):
+        if prop == "References2D":
+            try:
+                from . import dimrefs
+                if not dimrefs.BUSY[0] and obj.isDerivedFrom("TechDraw::DrawViewDimension"):
+                    dimrefs.forget(obj)
+            except Exception:
+                pass
+            return
         if prop not in ("X", "Y"):
             return
         try:

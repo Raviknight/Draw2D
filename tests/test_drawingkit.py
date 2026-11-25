@@ -598,6 +598,20 @@ class TestCenterMarks(DocTest):
         right = self.group.getItemByLabel("Right")
         self.assertEqual(core.add_center_marks(right), 1)   # hole seen from the side
 
+    def test_marks_replaced_after_reopening(self):
+        # TechDraw gives cosmetic lines new tags when the file is opened again
+        top = self.group.getItemByLabel("Top")
+        core.add_center_marks(top)
+        n = len(top.CosmeticEdges)
+        setattr(top, core.MARKS_PROP, ["stale-1", "stale-2"])
+        core.add_center_marks(top)
+        self.assertEqual(len(top.CosmeticEdges), n)         # found by position
+        # a drawing from before positions were kept: found by style and count
+        setattr(top, core.MARKS_PROP, ["stale-1", "stale-2"])
+        setattr(top, core.MARKS_GEOM_PROP, [])
+        core.add_center_marks(top)
+        self.assertEqual(len(top.CosmeticEdges), n)
+
     def test_fillets_get_no_marks(self):
         import Part
         box = Part.makeBox(50, 40, 20)
@@ -1278,6 +1292,8 @@ class TestDimensionRefs(DocTest):
 
     def setUp(self):
         super().setUp()
+        from DrawingKitTools import dimrefs
+        dimrefs.forget_document(self.doc.Name)  # as the observer does on closing
         self.page = core.create_page(self.doc, "A3", "Landscape")
         self.g = core.add_standard_views(self.page, [self.box], front=FRONT)
         self.doc.recompute()
@@ -1353,6 +1369,89 @@ class TestDimensionRefs(DocTest):
         self.dim.References2D = [(self.v, [self.low, self.low])]
         self.dim.SavedGeometry = [saved[0], far]
         self.assertIsNone(dimrefs.check(self.dim))
+
+    def sabotage(self, subs):
+        from DrawingKitTools import dimrefs
+        dimrefs.BUSY[0] = True                  # as TechDraw would leave it
+        try:
+            self.dim.References2D = [(self.v, subs)]
+        finally:
+            dimrefs.BUSY[0] = False
+
+    def test_edge_of_a_resized_feature_is_followed(self):
+        from DrawingKitTools import dimrefs
+        dimrefs.remember(self.dim)
+        self.box.Height = 60                    # both edges move 5 mm apart
+        self.doc.recompute()
+        self.sabotage([self.low, self.low])
+        self.assertEqual(dimrefs.repair(self.doc), [self.dim.Label])
+        self.assertAlmostEqual(self.dim.getRawValue(), 60.0, places=6)
+
+    def test_view_shift_is_measured(self):
+        from DrawingKitTools import dimrefs
+        a = dimrefs.anchor(self.v)
+        self.box.Length = 500                   # view centred 50 mm further right
+        self.doc.recompute()
+        b = dimrefs.anchor(self.v)
+        self.assertAlmostEqual(b[0] - a[0], -50.0, places=3)
+        self.assertAlmostEqual(b[1] - a[1], 0.0, places=3)
+
+    def test_shifted_edge_found_exactly(self):
+        from DrawingKitTools import dimrefs
+        want = ("L", [(0.0, 0.0), (10.0, 0.0)], 10.0)
+        self.assertEqual(dimrefs._shifted(want, 2.0, 1.0), ("L", [(2.0, 1.0), (12.0, 1.0)], 10.0))
+        dimrefs.remember(self.dim)
+        self.box.Length = 500
+        self.doc.recompute()
+        self.sabotage([self.high, self.high])
+        dimrefs.repair(self.doc)
+        self.assertAlmostEqual(self.dim.getRawValue(), 50.0, places=6)
+
+    def test_user_repointing_is_kept(self):
+        from DrawingKitTools import dimrefs
+        dimrefs.remember(self.dim)
+        self.dim.References2D = [(self.v, [self.low, self.low])]   # the user's choice
+        dimrefs.forget(self.dim)                # what the document observer does
+        self.dim.SavedGeometry = []             # TechDraw would note the new edges
+        self.assertIsNone(dimrefs.check(self.dim))
+
+    def test_detail_keeps_looking_at_the_same_spot(self):
+        from DrawingKitTools import dimrefs
+        cx, cy = core.view_center(self.v)
+        s = core.view_scale(self.v)
+        det = core.add_detail(self.page, self.v, (cx - 150 * s, cy), 10.0, (60, 60))
+        self.doc.recompute()
+        self.assertFalse(dimrefs.update_views(self.doc))     # first look: nothing to do
+        x0 = det.AnchorPoint.x                  # model x = 50 from the box's left end
+        self.box.Length = 500                   # the box grows to the right
+        self.doc.recompute()
+        self.assertTrue(dimrefs.update_views(self.doc))
+        self.assertAlmostEqual(det.AnchorPoint.x, x0 - 50.0, places=3)
+        self.assertFalse(dimrefs.update_views(self.doc))     # and stays
+
+    def test_centre_marks_redrawn_when_the_part_changes(self):
+        from DrawingKitTools import dimrefs
+        import Part
+        part = self.doc.addObject("Part::Feature", "Plate")
+        part.Shape = Part.makeBox(100, 60, 10).cut(
+            Part.makeCylinder(5, 10, App.Vector(30, 30, 0)))
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = [v for v in g.Views if "Top" in v.Type][0]
+        self.assertGreater(core.add_center_marks(top), 0)
+        dimrefs.update_views(self.doc)
+        before = list(getattr(top, core.MARKS_PROP))
+        part.Shape = Part.makeBox(140, 60, 10).cut(
+            Part.makeCylinder(5, 10, App.Vector(30, 30, 0)))
+        self.doc.recompute()
+        self.assertTrue(dimrefs.update_views(self.doc))
+        self.assertNotEqual(list(getattr(top, core.MARKS_PROP)), before)
+
+    def test_line_far_off_its_stretch_is_not_taken(self):
+        from DrawingKitTools import dimrefs
+        want = ("L", [(-1000.0, 9000.0), (-990.0, 9000.0)], 10.0)
+        self.assertIsNone(dimrefs.moved_to(self.v, want))
 
 
 class TestAuxiliaryView(DocTest):

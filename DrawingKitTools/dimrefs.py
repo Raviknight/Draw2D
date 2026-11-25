@@ -123,62 +123,295 @@ def find(view, want):
     return "Edge%d" % min(near)[1] if near else None
 
 
-def check(dim):
-    """New References2D for dim if some of its references no longer point at
-    their saved edges and all of those can be found again; else None."""
+def moved_to(view, want):
+    """The edge that is most likely want after its feature changed size: a
+    straight edge parallel to it covering most of the same stretch (and
+    covered by it), the nearest one; or a circle round the same centre, the
+    nearest in size.  None if there is none."""
+    if want[0] == "C":
+        best = None
+        for i, s in _all(view, "Edge"):
+            try:
+                got = describe(s)
+            except Exception:
+                continue
+            if got[0] == "C" and _close(want[2], got[2]):
+                d = abs(got[3] - want[3])
+                if best is None or d < best[0]:
+                    best = (d, i)
+        return "Edge%d" % best[1] if best else None
+    if want[0] != "L":
+        return None
+    (ax, ay), (bx, by) = want[1]
+    L = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+    if L < TOL:
+        return None
+    ux, uy = (bx - ax) / L, (by - ay) / L
+    best = None
+    for i, s in _all(view, "Edge"):
+        try:
+            got = describe(s)
+        except Exception:
+            continue
+        if got[0] != "L":
+            continue
+        (cx, cy), (dx, dy) = got[1]
+        M = ((dx - cx) ** 2 + (dy - cy) ** 2) ** 0.5
+        if M < TOL or abs(((dx - cx) * uy - (dy - cy) * ux) / M) > 1e-3:
+            continue                                    # not parallel
+        t0, t1 = sorted(((cx - ax) * ux + (cy - ay) * uy, (dx - ax) * ux + (dy - ay) * uy))
+        run = min(t1, L) - max(t0, 0.0)
+        if run < 0.8 * L or run < 0.8 * M:
+            continue                                    # a different stretch
+        off = abs((cx - ax) * uy - (cy - ay) * ux)
+        if off > L:
+            continue
+        if best is None or off < best[0]:
+            best = (off, i)
+    return "Edge%d" % best[1] if best else None
+
+
+def _shifted(want, dx, dy):
+    if not dx and not dy:
+        return want
+    mv = lambda p: (p[0] + dx, p[1] + dy)              # noqa: E731
+    if want[0] == "V":
+        return ("V", mv(want[1]))
+    if want[0] == "C":
+        return ("C", [mv(p) for p in want[1]], mv(want[2]), want[3])
+    return (want[0], [mv(p) for p in want[1]], want[2])
+
+
+# What each dimension pointed at the last time it was known to be right, in
+# this session: {(document, dimension): {"want": [description per reference],
+# "anchor": {view: where the model origin was drawn}}}.  Without an entry
+# TechDraw's own saved copy is used.
+_KNOWN = {}
+BUSY = [False]          # True while DrawingKit itself changes references
+
+
+def anchor(view):
+    """Where the model's origin lands in the view's own coordinates. TechDraw
+    centres a view on the part, so when the part changes size everything in
+    the view can move; this says by how much."""
+    try:
+        from . import core
+        d, right, up = core.view_axes(view)
+        v = App.Vector(0, 0, 0) - core.shape_centre(core.source_shape(view.Source), d)
+        return v.dot(right), v.dot(up)
+    except Exception:
+        return None
+
+
+def _key(dim):
+    return (dim.Document.Name, dim.Name)
+
+
+def forget(dim):
+    """The user pointed dim somewhere else: its old edges no longer count."""
+    try:
+        _KNOWN.pop(_key(dim), None)
+    except Exception:
+        pass
+
+
+def forget_document(name):
+    """A document closed: a file opened again later starts afresh."""
+    for k in [k for k in _KNOWN if k[0] == name]:
+        _KNOWN.pop(k, None)
+    for k in [k for k in _VIEWS if k[0] == name]:
+        _VIEWS.pop(k, None)
+
+
+def _refs(dim):
     try:
         if not dim.isDerivedFrom("TechDraw::DrawViewDimension"):
             return None
         if getattr(dim, "References3D", None):
             return None             # TechDraw keeps these from the model itself
-        refs = [(v, list(subs) if isinstance(subs, (list, tuple)) else [subs])
+        return [(v, list(subs) if isinstance(subs, (list, tuple)) else [subs])
                 for v, subs in dim.References2D]
-        saved = list(dim.SavedGeometry)
     except Exception:
         return None
+
+
+def _wanted(dim, flat):
+    """[(description, (dx, dy))] for each reference: what it should point at
+    and how far the view has moved since that was known."""
+    known = _KNOWN.get(_key(dim))
+    if known and len(known["want"]) == len(flat):
+        out = []
+        for (v, _), w in zip(flat, known["want"]):
+            was, now = known["anchor"].get(v.Name), anchor(v)
+            shift = (now[0] - was[0], now[1] - was[1]) if was and now else (0.0, 0.0)
+            out.append((w, shift))
+        return out
+    try:
+        saved = list(dim.SavedGeometry)
+        if len(saved) != len(flat):
+            return None
+        return [(describe(g, flip=True), (0.0, 0.0)) for g in saved]
+    except Exception:
+        return None
+
+
+def check(dim):
+    """New References2D for dim if some of its references no longer point at
+    what they pointed at when last known right (TechDraw's saved copy, or
+    what DrawingKit saw earlier in this session); else None."""
+    refs = _refs(dim)
+    if not refs:
+        return None
     flat = [(v, s) for v, subs in refs for s in subs]
-    if not flat or len(saved) != len(flat):
+    wanted = _wanted(dim, flat)
+    if wanted is None:
         return None
     moved, k = False, 0
     out = []
     for v, subs in refs:
         new = []
         for s in subs:
-            g = saved[k]
+            want, (dx, dy) = wanted[k]
             k += 1
-            try:
-                want = describe(g, flip=True)
-            except Exception:
-                return None
             cur = _shape(v, s)
             try:
-                if cur is not None and same(want, describe(cur)):
-                    new.append(s)
-                    continue
+                here = describe(cur) if cur is not None else None
             except Exception:
-                pass
-            found = find(v, want)
+                here = None
+            found = None
+            for w in ((_shifted(want, dx, dy), want) if (dx or dy) else (want,)):
+                if same(w, here):
+                    found = s
+                    break
+                found = find(v, w)
+                if found:
+                    break
             if found is None:
-                return None         # leave it as it is rather than half fix it
+                found = moved_to(v, _shifted(want, dx, dy))
+            if found is None:
+                found = s           # nothing like it: leave it where TechDraw put it
             moved = moved or found != s
             new.append(found)
         out.append((v, new))
     return out if moved else None
 
 
+def remember(dim):
+    """Note what dim points at now, as right."""
+    refs = _refs(dim)
+    if not refs:
+        return
+    want, anchors = [], {}
+    for v, subs in refs:
+        a = anchor(v)
+        if a is not None:
+            anchors[v.Name] = a
+        for s in subs:
+            cur = _shape(v, s)
+            if cur is None:
+                return              # points past the view's last edge: not right
+            try:
+                want.append(describe(cur))
+            except Exception:
+                return
+    _KNOWN[_key(dim)] = {"want": want, "anchor": anchors}
+
+
 def repair(doc):
-    """Re-point the dimensions FreeCAD left on the wrong edges.  Returns the
-    labels of the dimensions changed."""
+    """Re-point the dimensions FreeCAD left on the wrong edges, then note
+    every dimension as right.  Returns the labels of the dimensions changed."""
     fixed = []
-    for d in list(doc.Objects):
-        new = check(d)
-        if new is None:
-            continue
-        try:
-            d.References2D = new
-            fixed.append(d.Label)
-        except Exception as e:
-            App.Console.PrintWarning("DrawingKit: could not re-attach %s: %s\n" % (d.Label, e))
-    if fixed:
-        doc.recompute()
+    dims = [d for d in doc.Objects if d.isDerivedFrom("TechDraw::DrawViewDimension")]
+    BUSY[0] = True
+    try:
+        for d in dims:
+            new = check(d)
+            if new is None:
+                continue
+            try:
+                d.References2D = new
+                fixed.append(d.Label)
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit: could not re-attach %s: %s\n" % (d.Label, e))
+        if fixed:
+            doc.recompute()
+    finally:
+        BUSY[0] = False
+    for d in dims:
+        remember(d)
     return fixed
+
+
+# Per view, as last seen: {(document, view): (anchor, model signature)}
+_VIEWS = {}
+
+
+def _model_sig(view):
+    try:
+        from . import core
+        s = core.source_shape(view.Source)
+        b = s.BoundBox
+        return (round(s.Volume, 6), round(b.XMin, 6), round(b.YMin, 6), round(b.ZMin, 6),
+                round(b.XMax, 6), round(b.YMax, 6), round(b.ZMax, 6))
+    except Exception:
+        return None
+
+
+def update_views(doc):
+    """After the model changed: detail views keep looking at the same spot
+    on the part (their anchor is held in the base view's coordinates, which
+    move when TechDraw centres the changed part), and DrawingKit's centre
+    marks are drawn again on the changed part.  Returns True if anything
+    changed (the views then need drawing again before dimensions are
+    checked)."""
+    from . import core
+    parts = [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawViewPart")]
+    seen = {}
+    for v in parts:
+        seen[v.Name] = (anchor(v), _model_sig(v))
+    changed = False
+    for v in parts:
+        old = _VIEWS.get((doc.Name, v.Name))
+        if old is None:
+            continue
+        (a0, s0), (a1, s1) = old, seen[v.Name]
+        if v.isDerivedFrom("TechDraw::DrawViewDetail"):
+            base = getattr(v, "BaseView", None)
+            b_old = _VIEWS.get((doc.Name, base.Name)) if base is not None else None
+            b_new = seen.get(base.Name) if base is not None else None
+            if b_old and b_new and b_old[0] and b_new[0]:
+                dx, dy = b_new[0][0] - b_old[0][0], b_new[0][1] - b_old[0][1]
+                if abs(dx) > TOL or abs(dy) > TOL:
+                    p = v.AnchorPoint
+                    v.AnchorPoint = App.Vector(p.x + dx, p.y + dy, p.z)
+                    changed = True
+        if s0 != s1 and getattr(v, core.MARKS_PROP, None):
+            try:
+                core.add_center_marks(v)
+                v.touch()           # else the old marks stay among its edges
+                changed = True
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit centre marks: %s\n" % e)
+    for k in [k for k in _VIEWS if k[0] == doc.Name]:
+        _VIEWS.pop(k, None)
+    for name, val in seen.items():
+        _VIEWS[(doc.Name, name)] = val
+    if changed:
+        doc.recompute()
+    return changed
+
+
+def snapshot(doc):
+    """Something that changes while TechDraw is still redrawing the views
+    and their dimensions after an edit."""
+    out = []
+    for o in doc.Objects:
+        try:
+            if o.isDerivedFrom("TechDraw::DrawViewDimension"):
+                out.append(round(o.getRawValue(), 6))
+            elif o.isDerivedFrom("TechDraw::DrawViewPart"):
+                e = o.getEdgeByIndex(0)
+                out.append((round(e.Length, 6), round(e.Vertexes[0].Point.x, 6)))
+        except Exception:
+            out.append(None)
+    return tuple(out)
