@@ -8,7 +8,7 @@ import FreeCAD as App
 
 from . import core
 
-TABLES = ("holetable", "revtable", "bom", "toltable")
+TABLES = ("holetable", "revtable", "bom", "toltable", "table")
 
 
 def _view_segments(view, n=24):

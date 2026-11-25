@@ -121,7 +121,7 @@ def _annotated_boxes(page, named=False):
                 owner, b = o.References2D[0][0], clearance.dimension_label_box(o)
             elif o.isDerivedFrom("TechDraw::DrawViewSymbol"):
                 owner = getattr(o, annot.LINK, None)
-                if getattr(o, annot.KIND, "") in ("bom", "holetable", "revtable", "toltable"):
+                if getattr(o, annot.KIND, "") in ("bom", "holetable", "revtable", "toltable", "table"):
                     continue
                 b = clearance.symbol_box(o)
         except Exception:
@@ -197,6 +197,53 @@ def add_hole_table(page, view, place=None):
     table = annot._new(page, "holetable", "Hole table %s" % view.Label, p,
                        "free", None, place, (0, 0))
     return table, tags
+
+
+# ---------------------------------------------------------------------------
+# A table of your own (spline data, hexalobe data, a gauge list...)
+# ---------------------------------------------------------------------------
+def parse_rows(text):
+    """Rows typed or pasted: one per line, cells split by tabs (from a
+    spreadsheet), '|' or ';'. Short rows are padded."""
+    lines = [l for l in (text or "").replace("\r", "").split("\n") if l.strip()]
+    rows = []
+    for l in lines:
+        sep = "\t" if "\t" in l else ("|" if "|" in l else (";" if ";" in l else None))
+        cells = [c.strip() for c in (l.split(sep) if sep else [l])]
+        if sep == "|" and l.strip().startswith("|"):
+            cells = cells[1:]
+        if sep == "|" and l.strip().endswith("|"):
+            cells = cells[:-1]
+        rows.append(cells)
+    n = max((len(r) for r in rows), default=0)
+    return [r + [""] * (n - len(r)) for r in rows]
+
+
+def column_widths(headers, rows, font=FONT):
+    """Each column wide enough for its longest text (mm at 3.5 mm text)."""
+    from . import fonts
+    wf = fonts.width_factor()
+    out = []
+    for c in range(len(headers)):
+        longest = max([len(str(headers[c]))] + [len(str(r[c])) for r in rows if c < len(r)])
+        out.append(round(max(12.0, longest * font * wf * 1.05 + 4.0), 1))
+    return out
+
+
+def add_table(page, headers, rows, title="", place=None, tsize=None):
+    """A table of your own: ``headers`` and ``rows`` (lists of cell texts),
+    with an optional title row. The cells can be edited afterwards like
+    any DrawingKit table. Placed in a free spot unless ``place`` is given."""
+    if not headers:
+        raise ValueError("A table needs at least a header row")
+    rows = [list(r) + [""] * (len(headers) - len(r)) for r in rows]
+    p = {"title": title or "", "headers": list(headers), "rows": rows,
+         "widths": column_widths(headers, rows), "editable": True,
+         "tsize": float(tsize or annot.default_size())}
+    W, Ht = table_size(p)
+    if place is None:
+        place = free_table_spot(page, W, Ht)
+    return annot._new(page, "table", title or "Table", p, "free", None, place, (0, 0))
 
 
 # ---------------------------------------------------------------------------

@@ -986,6 +986,10 @@ class DetailView:
                 lambda: core.add_detail(page, state["base"], points[0],
                                         dist(points[0], points[1]), points[2]))
             doc.recompute()
+            try:
+                interact.place_detail_letter(det)     # its letter clear of the lines
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit: detail letter: %s\n" % e)
             say("%s added at %s" % (det.Label, core.scale_text(det.Scale)))
 
         interact.PagePicker(page, "DrawingKit: click the centre of the detail, then its edge, "
@@ -1316,7 +1320,8 @@ class DatumFlag:
                 "ToolTip": "Click the datum edge or surface line, then where the letter box "
                            "goes (Enter for straight out). To make a diameter or a slot's "
                            "centre plane the datum (axis/centre-plane datum), select its "
-                           "dimension first. Follows the view; lettered A, B, C..."}
+                           "dimension first; to hang it from the feature's tolerance frame "
+                           "(ASME), select the frame first. Follows the view; lettered A, B, C..."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
@@ -1325,7 +1330,9 @@ class DatumFlag:
         from . import annot
         dims = [o for o in Gui.Selection.getSelection()
                 if o.isDerivedFrom("TechDraw::DrawViewDimension")]
-        page = parent_page(dims[0]) if dims else target_page()
+        frames = [o for o in Gui.Selection.getSelection()
+                  if getattr(o, annot.KIND, "") == "frame"]
+        page = parent_page(frames[0]) if frames else (parent_page(dims[0]) if dims else target_page())
         if page is None:
             warn("Open the page (or select a view on it) first.")
             return
@@ -1334,6 +1341,12 @@ class DatumFlag:
         if not letter or not letter.strip():
             return
         doc = page.Document
+        if frames:
+            sym = run_in_transaction(doc, "DrawingKit datum",
+                                     lambda: annot.add_datum(page, 0, 0, letter, frame=frames[0]))
+            doc.recompute()
+            say("%s hangs from %s; it moves with the frame" % (sym.Label, frames[0].Label))
+            return
         if dims:
             sym = run_in_transaction(doc, "DrawingKit datum",
                                      lambda: annot.add_datum(page, 0, 0, letter, dimension=dims[0]))
@@ -3258,6 +3271,46 @@ class TextStyle:
         say("Text updated on %d item(s)" % len(objs))
 
 
+class Table:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_Table.svg"),
+                "MenuText": "Table",
+                "ToolTip": "A table of your own (data for a spline, a gear, a gauge...): type "
+                           "or paste the rows, the first one being the headings, cells split "
+                           "by tabs (from a spreadsheet), '|' or ';'. Placed in a free spot; "
+                           "drag it where you want it and edit any cell later."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import tables
+        page = target_page()
+        if page is None:
+            warn("Select the page (or a view on it) first.")
+            return
+        pop = ui.Popover("New table on %s" % page.Label)
+        title = ui.field("", 260, "Title (optional), e.g. SPLINE DATA")
+        body = QtWidgets.QPlainTextEdit()
+        body.setPlaceholderText("TEETH | PITCH | PRESSURE ANGLE\n16 | 32/64 | 30°")
+        body.setMinimumSize(320, 140)
+        pop.add_row(title, stretch=True)
+        pop.add_row(body, stretch=True)
+        if not pop.run():
+            return
+        rows = tables.parse_rows(body.toPlainText())
+        if not rows:
+            warn("Type the headings and at least one row.")
+            return
+        doc = page.Document
+        t = run_in_transaction(doc, "DrawingKit table",
+                               lambda: tables.add_table(page, rows[0], rows[1:],
+                                                        title.text().strip()))
+        doc.recompute()
+        say("%s: %d column(s), %d row(s); drag it into place, edit cells in its properties"
+            % (t.Label, len(rows[0]), len(rows) - 1))
+
+
 class LineWeights:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_LineWeights.svg"),
@@ -3312,6 +3365,7 @@ class LineWeights:
 COMMANDS = [
     ("DrawingKit_NewSheet", NewSheet()),
     ("DrawingKit_LineWeights", LineWeights()),
+    ("DrawingKit_Table", Table()),
     ("DrawingKit_Standard", DrawingStandard()),
     ("DrawingKit_StandardViews", StandardViews()),
     ("DrawingKit_ProjectedView", ProjectedView()),
@@ -3375,7 +3429,7 @@ COMMAND_GROUPS = [
                                "DrawingKit_ToleranceFrame", "DrawingKit_Flag", "DrawingKit_Note",
                                "DrawingKit_TextStyle", "DrawingKit_LineWeights"]),
     ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
-                           "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
+                           "DrawingKit_HoleTable", "DrawingKit_Table", "DrawingKit_FillTitleBlock",
                            "DrawingKit_EditTitleBlock", "DrawingKit_DesignTitleBlock",
                            "DrawingKit_Revision", "DrawingKit_Export"]),
 ]
@@ -3470,6 +3524,9 @@ class AlignmentObserver:
             if annot.is_annotation(obj):
                 annot.dragged(obj)          # box moved; anchor stays on the feature
                 return
+            if obj.isDerivedFrom("TechDraw::DrawViewDimension"):
+                from . import standards
+                standards.fit_text_style(obj)   # ASME text outside: no line through it
             core.enforce_alignment(obj)
             # annotations hanging on this view (or its group, or a dimension) follow
             moved = [obj]

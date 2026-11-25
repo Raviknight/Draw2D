@@ -1080,6 +1080,24 @@ class TestAnnotations(DocTest):
         self.assertIn("J", texts)
         self.assertIn("K", texts)
 
+    def test_datum_hangs_from_a_frame(self):
+        p = {"char": "flatness", "tol": "0.05", "datums": ["", "", ""], "tsize": 3.5}
+        fr = self.annot.add_frame(self.page, (200, 150), p)
+        d = self.annot.add_datum(self.page, 0, 0, "A", frame=fr)
+        self.assertEqual(getattr(d, self.annot.ANCHOR_KIND), "frame")
+        fb, db = self.annot.body_box(fr), self.annot.body_box(d)
+        self.assertLess(db[3], fb[1])                              # under the frame
+        self.assertAlmostEqual((db[0] + db[2]) / 2, (fb[0] + fb[2]) / 2, places=6)
+        (ax, ay), sdir = self.annot.anchor_page(d)
+        self.assertAlmostEqual(ay, fb[1], places=6)                # triangle on its edge
+        self.assertEqual(sdir, (0, -1))
+        # the frame grows (bigger text) or moves: the datum follows
+        self.annot.set_text_style(fr, 5.0)
+        fb2, db2 = self.annot.body_box(fr), self.annot.body_box(d)
+        self.assertNotEqual(fb, fb2)
+        self.assertLess(db2[3], fb2[1])
+        self.assertAlmostEqual(self.annot.anchor_page(d)[0][1], fb2[1], places=6)
+
     def test_leader_drawn_apart_from_the_frame(self):
         from DrawingKitTools import clearance
         x0, y0, x1, y1 = core.view_box(self.front)
@@ -2979,7 +2997,11 @@ class TestTextLayer(DocTest):
 
     def test_pdf_strings(self):
         from DrawingKitTools import textlayer
-        self.assertEqual(textlayer._pdf_string("⌀8 ±0.1 (a)"), "(\xd88 \xb10.1 \\(a\\))")
+        # ⌀ has no place in Windows-1252: a spare code the ToUnicode map names
+        self.assertEqual(textlayer._pdf_string("⌀8 ±0.1 (a)"), "(\\0018 \xb10.1 \\(a\\))")
+        self.assertEqual(textlayer._pdf_string("Ø8"), "(\xd88)")
+        self.assertIn(b"<01> <2300>", textlayer.to_unicode_cmap())         # ⌀
+        self.assertIn(b"<02> <2316>", textlayer.to_unicode_cmap())         # ⌖
 
 
 class TestBalloonLeaders(unittest.TestCase):
@@ -3149,6 +3171,63 @@ class TestForgeLayoutFixes(DocTest):
             lineweights.set_weights(*(before or (None, None)))
         self.assertAlmostEqual(lineweights.symbol_factor(), 1.0 if before is None
                                else before[1] / 0.35)
+
+    def test_gdt_symbols_are_in_the_pdf_text(self):
+        import tempfile
+        from DrawingKitTools import annot, textlayer
+        page = core.create_page(self.doc, "A3", "Landscape")
+        p = {"char": "position", "tol": "0.05", "dia": True, "mod": "MMC",
+             "datums": ["A", "B", ""], "tsize": 3.5}
+        fr = annot.add_frame(page, (200, 150), p)
+        chars = [g[0] for g in annot._params(fr)["glyphs"]]
+        self.assertIn("⌖", chars)
+        self.assertIn("⌀", chars)
+        path = os.path.join(tempfile.mkdtemp(), "layer.pdf")
+        with open(path, "wb") as f:
+            f.write(qt_like_pdf("x"))
+        self.assertGreater(textlayer.add_text_layer(page, path), 0)
+        with open(path, "rb") as f:
+            got = " ".join(textlayer.existing_texts(f.read()))
+        for want in ("⌖", "⌀", "0.05", "A", "B"):
+            self.assertIn(want, got)
+
+    def test_text_outside_the_extension_lines(self):
+        from DrawingKitTools import smartdim, standards
+        part = plate_two_holes(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part])
+        self.doc.recompute()
+        v = g.Anchor
+        ents = [e for e in smartdim.entities(v) if e.kind == "line"]
+        top = smartdim.pick(v, (0, 25), ents, tol=1.0)
+        bottom = smartdim.pick(v, (0, -25), ents, tol=1.0)
+        dim = smartdim.add_dimension(page, v, [top, bottom], (55, 0))
+        self.doc.recompute()
+        self.assertFalse(standards.text_outside(dim))        # between: 0 is mid-plate
+        s = core.view_scale(v)
+        dim.Y = 40 * s                                      # above the plate's top edge
+        self.assertTrue(standards.text_outside(dim))
+        self.assertFalse(standards.fit_text_style(dim))     # no GUI here: nothing to do
+
+    def test_table_of_your_own(self):
+        from DrawingKitTools import annot, tables, textlayer
+        rows = tables.parse_rows("TEETH\tPITCH\tCLASS\n16\t32/64\t5, SIDE FIT\n\n"
+                                 "| A | B |\n")
+        self.assertEqual(rows[0], ["TEETH", "PITCH", "CLASS"])
+        self.assertEqual(rows[1], ["16", "32/64", "5, SIDE FIT"])
+        self.assertEqual(rows[2], ["A", "B", ""])                 # padded
+        page = core.create_page(self.doc, "A3", "Landscape")
+        t = tables.add_table(page, rows[0], rows[1:2], "SPLINE DATA")
+        self.assertEqual(getattr(t, annot.KIND), "table")
+        self.assertEqual(t.Label, "SPLINE DATA")
+        self.assertIn("5, SIDE FIT", list(t.EditableTexts))
+        self.assertEqual(len(core.table_boxes(page)), 1)          # views keep clear of it
+        # the widest text fits its column
+        p = annot._params(t)
+        self.assertGreater(p["widths"][2], p["widths"][1])
+        # its words are in the PDF text layer like any table's
+        words = " ".join(x["text"] for x in textlayer.page_texts(page))
+        self.assertIn("SPLINE DATA", words)
 
     def test_sheet_check_finds_text_on_part_lines(self):
         from DrawingKitTools import sheetcheck, smartdim

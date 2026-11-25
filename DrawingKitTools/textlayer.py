@@ -154,6 +154,22 @@ def _symbol_texts(sym):
     return out
 
 
+def _symbol_glyphs(sym):
+    """The symbols a DrawingKit annotation draws with lines (⌖ ⌀ Ⓜ ...),
+    as texts at their places, so the PDF's text has them too."""
+    from . import annot
+    try:
+        glyphs = annot._params(sym).get("glyphs") or []
+    except Exception:
+        return []
+    out = []
+    for ch, x, y, size in glyphs:
+        out.append({"text": ch, "x": x, "y": y - size * 0.35, "size": size, "anchor": "middle",
+                    "angle": 0.0, "source": getattr(sym, annot.KIND, "") or "symbol",
+                    "field": "symbol", "object": sym.Name})
+    return out
+
+
 def _drop_zeros(txt):
     """'8.00' -> '8', '12.50' -> '12.5' in every number of a text."""
     return re.sub(r"(\d+)\.(\d*?)0+(?!\d)", lambda m: m.group(1) + ("." + m.group(2) if m.group(2) else ""),
@@ -352,7 +368,7 @@ def page_texts(page):
                             "size": _dim_size(v), "anchor": "middle", "angle": 0.0,
                             "source": "balloon", "object": v.Name})
             elif v.isDerivedFrom("TechDraw::DrawViewSymbol"):
-                out += _symbol_texts(v)
+                out += _symbol_texts(v) + _symbol_glyphs(v)
             elif v.isDerivedFrom("TechDraw::DrawViewAnnotation"):
                 size = float(v.TextSize)
                 for i, ln in enumerate(list(v.Text)):
@@ -847,15 +863,51 @@ def characteristics_data(page, pdf_path):
 # ---------------------------------------------------------------------------
 # The invisible text layer: an incremental update of TechDraw's PDF
 # ---------------------------------------------------------------------------
-_CHARS = {"⌀": "Ø", "∅": "Ø", "−": "-", "–": "-", "—": "-", "×": "x", "∠": "<",
-          "″": '"', "′": "'", "√": "V"}
+_CHARS = {"−": "-", "×": "x", "″": '"', "′": "'"}
+# Drawing symbols Windows-1252 has no room for: written with the spare
+# control codes 1-31, which the layer font's ToUnicode map turns back into
+# these characters when the PDF's text is copied, searched or extracted
+# (the layer is invisible, so the codes' glyphs never show)
+EXTRA = ["⌀", "⌖", "⏥", "⏤", "○", "⌭", "⟂", "∥", "∠", "⌒", "⌓", "◎", "⌯", "↗", "⌰",
+         "Ⓜ", "Ⓛ", "Ⓟ", "Ⓕ", "Ⓣ", "Ⓤ", "Ⓔ", "Ⓢ", "⌴", "⌵", "↧", "√", "∅", "⊥", "⏊"]
+_EXTRA_CODE = {c: i + 1 for i, c in enumerate(EXTRA)}
 
 
 def _pdf_string(text):
-    t = "".join(_CHARS.get(c, c) for c in text)
-    b = t.encode("cp1252", errors="replace")
-    return "(" + b.decode("latin-1").replace("\\", "\\\\").replace("(", "\\(") \
-        .replace(")", "\\)") + ")"
+    out = []
+    for c in text:
+        if c in _EXTRA_CODE:
+            out.append("\\%03o" % _EXTRA_CODE[c])
+            continue
+        c = _CHARS.get(c, c)
+        b = c.encode("cp1252", errors="replace").decode("latin-1")
+        out.append(b.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)"))
+    return "(" + "".join(out) + ")"
+
+
+def to_unicode_cmap():
+    """ToUnicode CMap for the layer font: Windows-1252 as it is, plus the
+    drawing symbols on codes 1-31."""
+    pairs = [(i + 1, c) for i, c in enumerate(EXTRA)]
+    for code in range(32, 256):
+        try:
+            ch = bytes([code]).decode("cp1252")
+        except UnicodeDecodeError:
+            continue
+        if code != 127:
+            pairs.append((code, ch))
+    lines = ["/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap",
+             "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
+             "/CMapName /DrawingKit-Layer def", "/CMapType 2 def",
+             "1 begincodespacerange", "<00> <FF>", "endcodespacerange"]
+    for i in range(0, len(pairs), 100):
+        block = pairs[i:i + 100]
+        lines.append("%d beginbfchar" % len(block))
+        for code, ch in block:
+            lines.append("<%02X> <%s>" % (code, ch.encode("utf-16-be").hex().upper()))
+        lines.append("endbfchar")
+    lines += ["endcmap", "CMapName currentdict /CMap defineresource pop", "end", "end"]
+    return ("\n".join(lines) + "\n").encode("ascii")
 
 
 # Helvetica's average width per em for the characters of drawing text, to
@@ -941,6 +993,19 @@ def _cmap(data):
     return out
 
 
+_ESC = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f"}
+
+
+def _unescape(s):
+    """A PDF literal string's bytes: \\( \\) \\\\ \\n ... and \\ddd octal."""
+    def sub(m):
+        e = m.group(1)
+        if e[:1].isdigit():
+            return bytes([int(e, 8) & 0xFF])
+        return _ESC.get(e, e)
+    return re.sub(rb"\\([0-7]{1,3}|.)", sub, s, flags=re.S)
+
+
 def existing_texts(raw):
     """Texts the PDF already holds as real text (TechDraw writes a few, such
     as dimension values with ⌀), one string per BT ... ET block."""
@@ -980,7 +1045,7 @@ def existing_texts(raw):
                     code = int(h[i:i + step], 16)
                     txt.append(cmap.get(code, ""))
             else:
-                s = tok.group(3).decode("latin-1")
+                s = _unescape(tok.group(3)).decode("latin-1")
                 txt.append("".join(cmap.get(ord(c), c) for c in s) if cmap else s)
         t = "".join(txt).strip()
         if t:
@@ -988,8 +1053,12 @@ def existing_texts(raw):
     return out
 
 
+# for telling whether a text is already in the PDF: look-alikes count as one
+_SAME = dict(_CHARS, **{"⌀": "Ø", "∅": "Ø", "–": "-", "—": "-"})
+
+
 def _norm(t):
-    t = "".join(_CHARS.get(c, c) for c in t)
+    t = "".join(_SAME.get(c, c) for c in t)
     return re.sub(r"\s+", "", t).upper()
 
 
@@ -1021,8 +1090,11 @@ def add_text_layer(page, pdf_path, debug=False):
     except Exception:
         real = []
     if real:
+        # a word already there as real text isn't written twice; a single
+        # letter (a datum's 'C') only when the PDF has it on its own
         texts = [t for t in texts
-                 if len(_norm(t["text"])) < 2 or not any(_norm(t["text"]) in r for r in real)]
+                 if not (any(_norm(t["text"]) == r for r in real) if len(_norm(t["text"])) < 2
+                         else any(_norm(t["text"]) in r for r in real))]
         if not texts:
             return 0
     m = re.search(rb"startxref\s+(\d+)\s+%%EOF\s*$", raw)
@@ -1055,6 +1127,8 @@ def add_text_layer(page, pdf_path, debug=False):
     if res is None:
         return 0
     font_no, stream_no, save_no, restore_no = n_size, n_size + 1, n_size + 2, n_size + 3
+    cmap_no = n_size + 4
+    cmap = to_unicode_cmap()
     new = {}
     # TechDraw's drawing leaves its own scaling in force at the end of its
     # content; bracket it with q ... Q so the layer starts from the page's
@@ -1063,7 +1137,8 @@ def add_text_layer(page, pdf_path, debug=False):
     new[restore_no] = b"<< /Length 2 >>\nstream\nQ\n\nendstream"
     # the font: Helvetica, built into every PDF reader (no embedding)
     new[font_no] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica " \
-                   b"/Encoding /WinAnsiEncoding >>"
+                   b"/Encoding /WinAnsiEncoding /ToUnicode %d 0 R >>" % cmap_no
+    new[cmap_no] = b"<< /Length %d >>\nstream\n" % len(cmap) + cmap + b"endstream"
     body = _content(texts, debug)
     new[stream_no] = b"<< /Length %d >>\nstream\n" % len(body) + body + b"endstream"
     # resources: the same, plus our font
@@ -1117,7 +1192,7 @@ def add_text_layer(page, pdf_path, debug=False):
     trailer = re.findall(rb"trailer\s*<<(.*?)>>\s*startxref", raw, re.S)
     info = re.search(rb"/Info\s+\d+\s+0\s+R", trailer[-1]) if trailer else None
     ids = re.search(rb"/ID\s*\[[^\]]*\]", trailer[-1]) if trailer else None
-    out += b"trailer\n<< /Size %d /Root %s 0 R /Prev %d" % (restore_no + 1, root.group(1), prev)
+    out += b"trailer\n<< /Size %d /Root %s 0 R /Prev %d" % (cmap_no + 1, root.group(1), prev)
     if info:
         out += b" " + info.group(0)
     if ids:

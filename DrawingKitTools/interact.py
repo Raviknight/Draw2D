@@ -410,3 +410,84 @@ def start_watching():
     if mdi is not None:
         mdi.subWindowActivated.connect(_on_subwindow)
     install_drag_everywhere()
+
+
+# ---------------------------------------------------------------------------
+# Detail view letters on their base view
+# ---------------------------------------------------------------------------
+ADJUSTS = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]
+
+
+def _letter_box(scene, letter, near, reach):
+    """Page box of the detail letter TechDraw drew nearest ``near``."""
+    best = None
+    for it in scene.items():
+        try:
+            if it.type() == 13 or not isinstance(it, QtWidgets.QGraphicsTextItem):
+                continue
+            if it.toPlainText() != letter:
+                continue
+            # the capitals themselves, not the text item's padded box
+            fm = QtGui.QFontMetricsF(it.font())
+            m = it.document().documentMargin()
+            cap = fm.capHeight() if hasattr(fm, "capHeight") else fm.ascent() * 0.72
+            adv = fm.horizontalAdvance(letter) if hasattr(fm, "horizontalAdvance") \
+                else fm.width(letter)
+            r = it.mapRectToScene(QtCore.QRectF(m, m + fm.ascent() - cap, adv, cap))
+        except Exception:
+            continue
+        x0, y1 = to_page(r.topLeft())
+        x1, y0 = to_page(r.bottomRight())
+        d = abs((x0 + x1) / 2 - near[0]) + abs((y0 + y1) / 2 - near[1])
+        if d < reach and (best is None or d < best[0]):
+            best = (d, (x0, y0, x1, y1))
+    return best[1] if best else None
+
+
+def place_detail_letter(det):
+    """Turn the detail's mark on its base view (TechDraw's Highlight adjust)
+    until the letter is clear of the view's lines; it stays put if it is
+    clear already or no turn helps. Returns the angle used, or None."""
+    from . import sheetcheck
+    base = getattr(det, "BaseView", None)
+    vo = getattr(base, "ViewObject", None)
+    if base is None or vo is None or not hasattr(vo, "HighlightAdjust"):
+        return None
+    try:
+        page = det.findParentPage()
+    except Exception:
+        return None
+    scene = page_scene(page)
+    if scene is None:
+        return None
+    cx, cy = core.view_center(base)
+    s = core.view_scale(base)
+    a = det.AnchorPoint
+    centre = (cx + a.x * s, cy + a.y * s)
+    reach = float(det.Radius) * s * 4.0 + 15.0
+    segs = sheetcheck._view_segments(base)
+
+    def crossings():
+        Gui.updateGui()
+        box = _letter_box(scene, det.Reference, centre, reach)
+        if box is None:
+            return None
+        inner = sheetcheck._shrink(box, 0.2)
+        return sum(1 for sg in segs if sheetcheck._crosses(sg, inner))
+
+    start = float(vo.HighlightAdjust)
+    best = (crossings(), 0.0, start)
+    if best[0] is None or best[0] == 0:
+        return start
+    for adj in sorted(ADJUSTS, key=lambda x: min(abs(x - start), 360 - abs(x - start))):
+        vo.HighlightAdjust = adj
+        n = crossings()
+        if n == 0:
+            return adj
+        turn = min(abs(adj - start), 360 - abs(adj - start))
+        if n is not None and (n, turn) < best[:2]:
+            best = (n, turn, adj)
+    # nowhere clear (a crowded spot): the turn that crosses fewest lines
+    vo.HighlightAdjust = best[2]
+    Gui.updateGui()
+    return best[2]

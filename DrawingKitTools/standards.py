@@ -64,6 +64,20 @@ def explicit():
 # ---------------------------------------------------------------------------
 # What follows the standard
 # ---------------------------------------------------------------------------
+def diameter_sign():
+    """The diameter sign: TechDraw's own preference (Preferences > TechDraw >
+    Dimensions > Diameter symbol), '⌀' unless set (e.g. to 'Ø')."""
+    try:
+        s = App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/Dimensions") \
+            .GetString("DiameterSymbol", "⌀").strip()
+    except Exception:
+        s = ""
+    return s or "⌀"
+
+
+DIAMETER_SIGNS = ("⌀", "Ø", "∅")
+
+
 def section_caption(letter, std=None, scale_txt=None):
     """'SECTION A-A' (ASME) or 'A-A' (ISO); with ``scale_txt`` (a section
     drawn at its own scale) 'SECTION A-A SCALE 2 : 1' or 'A-A (2 : 1)'."""
@@ -146,6 +160,59 @@ def style_dimension(dim, referencing=False):
     return True
 
 
+AUTO_STYLE = "DrawingKitAutoReferencing"
+
+
+def text_outside(dim):
+    """True if a straight dimension's text sits beyond its extension lines
+    (along the dimension line), False if between them, None if unknown."""
+    if dim.Type not in ("Distance", "DistanceX", "DistanceY") or not dim.References2D:
+        return None
+    from . import annot, core
+    try:
+        p0, p1, (ux, uy) = annot.dimension_ends(dim)
+    except Exception:
+        return None
+    view = dim.References2D[0][0]
+    cx, cy = core.view_center(view)
+    lx, ly = cx + float(dim.X), cy + float(dim.Y)
+    t0, t1 = p0[0] * ux + p0[1] * uy, p1[0] * ux + p1[1] * uy
+    t = lx * ux + ly * uy
+    lo, hi = min(t0, t1), max(t0, t1)
+    return t < lo - 0.5 or t > hi + 0.5
+
+
+def fit_text_style(dim):
+    """ASME Inlined runs the dimension line through text placed outside
+    the extension lines; such a dimension is drawn ASME Referencing (the
+    text on its own short line) instead, and back to Inlined when its text
+    is between the extension lines again. Styles set by hand are left
+    alone. GUI only. Returns True if the style changed."""
+    vo = getattr(dim, "ViewObject", None)
+    if vo is None or "StandardAndStyle" not in vo.PropertiesList:
+        return False
+    style = str(vo.StandardAndStyle)
+    auto = AUTO_STYLE in dim.PropertiesList and getattr(dim, AUTO_STYLE)
+    if style not in ("ASME Inlined", "ASME Referencing") or (style == "ASME Referencing" and not auto):
+        return False
+    out = text_outside(dim)
+    if out is None:
+        return False
+    if out and style == "ASME Inlined":
+        vo.StandardAndStyle = "ASME Referencing"
+        if AUTO_STYLE not in dim.PropertiesList:
+            dim.addProperty("App::PropertyBool", AUTO_STYLE, "DrawingKit",
+                            "Drawn ASME Referencing by DrawingKit while its text is outside")
+            dim.setEditorMode(AUTO_STYLE, 2)
+        setattr(dim, AUTO_STYLE, True)
+        return True
+    if not out and style == "ASME Referencing" and auto:
+        vo.StandardAndStyle = "ASME Inlined"
+        setattr(dim, AUTO_STYLE, False)
+        return True
+    return False
+
+
 def apply_to_page(page):
     """Bring an existing sheet's DrawingKit-made items into line with the
     current standard: section/detail captions, weld lines and the dimension
@@ -161,7 +228,12 @@ def apply_to_page(page):
                     v.Caption = cap
                     n += 1
             elif v.isDerivedFrom("TechDraw::DrawViewSection"):
-                cap = section_caption(v.SectionSymbol, std)
+                own = None
+                if v.ScaleType == "Custom":          # drawn at its own scale: say so
+                    group = core.page_content(page)[0]
+                    if group is None or abs(core.view_scale(v) - core.view_scale(group)) > 1e-9:
+                        own = core.scale_text(core.view_scale(v))
+                cap = section_caption(v.SectionSymbol, std, own)
                 if v.Caption != cap:
                     v.Caption = cap
                     n += 1

@@ -743,7 +743,7 @@ def auto_balloons(page, view):
             except Exception:
                 pass
     for v in page.Views:          # tables and title block
-        if getattr(v, annot.KIND, "") in ("bom", "holetable", "revtable", "toltable"):
+        if getattr(v, annot.KIND, "") in ("bom", "holetable", "revtable", "toltable", "table"):
             from . import tables
             w, h = tables.table_size(annot._params(v))
             avoid.append((float(v.X) - w / 2, float(v.Y) - h / 2, float(v.X) + w / 2, float(v.Y) + h / 2))

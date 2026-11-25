@@ -34,6 +34,17 @@ CHARACTERISTICS = [
 ]
 MODIFIERS = {"": "", "MMC": "M", "LMC": "L", "RFS": "S"}   # RFS: regardless of feature size (ASME)
 
+# Unicode for the characteristic symbols (ISO 1101 / ASME Y14.5), written
+# into the PDF's text so a frame reads '⌖ ⌀0.05 Ⓜ A B' when copied
+UNICODE = {"position": "⌖", "flatness": "⏥", "straightness": "⏤", "circularity": "○",
+           "cylindricity": "⌭", "perpendicularity": "⟂", "parallelism": "∥",
+           "angularity": "∠", "profile_line": "⌒", "profile_surface": "⌓",
+           "concentricity": "◎", "symmetry": "⌯", "circular_runout": "↗",
+           "total_runout": "⌰"}
+# the modifier letters in their circles
+CIRCLED = {"M": "Ⓜ", "L": "Ⓛ", "P": "Ⓟ", "F": "Ⓕ", "T": "Ⓣ", "U": "Ⓤ", "E": "Ⓔ",
+           "S": "Ⓢ"}
+
 
 def _esc(t):
     return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

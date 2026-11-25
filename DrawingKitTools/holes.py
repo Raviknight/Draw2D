@@ -14,7 +14,12 @@ from . import core
 
 TOL = 1e-4
 DEPTH_SYMBOL = "↧"   # ↧  (ISO 129 / ASME depth symbol)
-DIAMETER = "⌀"       # ⌀
+DIAMETER = "⌀"       # default; diameter_sign() follows TechDraw's preference
+
+
+def diameter_sign():
+    from . import standards
+    return standards.diameter_sign()
 
 
 COUNTERBORE = "⌴"   # ⌴  ASME Y14.5 / ISO 129-1
@@ -324,21 +329,21 @@ def callout_text(group, decimals=2):
             spec = "%s%s THRU" % (count, name)
         else:
             spec = "%s%s%s %s %s %s %s %s" % (
-                count, DIAMETER, value_spec(decimals), DEPTH_SYMBOL, _n(h.depth, decimals),
+                count, diameter_sign(), value_spec(decimals), DEPTH_SYMBOL, _n(h.depth, decimals),
                 name, DEPTH_SYMBOL, _n(tdepth if tdepth is not None else h.depth, decimals))
     else:
-        spec = "%s%s%s" % (count, DIAMETER, value_spec(decimals))
+        spec = "%s%s%s" % (count, diameter_sign(), value_spec(decimals))
         if h.through:
             spec += " THRU"
         else:
             spec += " %s %s" % (DEPTH_SYMBOL, _n(h.depth, decimals))
     if h.cbore:
         dia, depth = h.cbore
-        spec += " %s %s%s %s %s" % (SPOTFACE if h.spotface else COUNTERBORE, DIAMETER,
+        spec += " %s %s%s %s %s" % (SPOTFACE if h.spotface else COUNTERBORE, diameter_sign(),
                                     _n(dia, decimals), DEPTH_SYMBOL, _n(depth, decimals))
     if h.csink:
         dia, ang = h.csink
-        spec += " %s %s%s X %g°" % (COUNTERSINK, DIAMETER, _n(dia, decimals), round(ang, 1))
+        spec += " %s %s%s X %g°" % (COUNTERSINK, diameter_sign(), _n(dia, decimals), round(ang, 1))
     return spec
 
 

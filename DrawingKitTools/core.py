@@ -416,7 +416,7 @@ def move_tables_clear(page):
     except Exception:
         pass
     for v in page.Views:
-        if getattr(v, "DrawingKitAnnot", "") not in ("bom", "holetable", "revtable", "toltable"):
+        if getattr(v, "DrawingKitAnnot", "") not in ("bom", "holetable", "revtable", "toltable", "table"):
             continue
         try:
             w, h = tables.table_size(annot._params(v))
@@ -496,7 +496,7 @@ def table_boxes(page, pad=3.0):
     except Exception:
         return out
     for v in page.Views:
-        if getattr(v, "DrawingKitAnnot", "") in ("bom", "holetable", "revtable", "toltable"):
+        if getattr(v, "DrawingKitAnnot", "") in ("bom", "holetable", "revtable", "toltable", "table"):
             try:
                 w, h = tables.table_size(annot._params(v))
             except Exception:

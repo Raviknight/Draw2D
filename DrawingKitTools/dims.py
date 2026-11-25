@@ -85,8 +85,9 @@ def set_dimension(dim, before="", after="", decimals=2, tol="none", upper=0.0, l
         dp = int(decimals)
         hi, lo = _limits(dim, nominal, upper, lower, dp)
         prefix = before.strip()
-        if dim.Type == "Diameter" and "⌀" not in prefix:
-            prefix = (prefix + " ⌀").strip()
+        from . import standards
+        if dim.Type == "Diameter" and not any(s in prefix for s in standards.DIAMETER_SIGNS):
+            prefix = (prefix + " " + standards.diameter_sign()).strip()
         elif dim.Type == "Radius" and not prefix.endswith("R"):
             prefix = (prefix + " R").strip()
         dim.TheoreticalExact = False

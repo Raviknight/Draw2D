@@ -226,6 +226,14 @@ def anchor_page(sym):
         view = link.References2D[0][0]
         cx, cy = core.view_center(view)
         return (cx + float(link.X), cy + float(link.Y)), (0, -1)
+    if kind == "frame" and link is not None:
+        # on the frame's bottom edge (or top, with the box above), mid-way
+        b = body_box(link)
+        off = getattr(sym, OFFSET, App.Vector())
+        x = (b[0] + b[2]) / 2.0
+        if off.y >= 0:
+            return (x, b[3]), (0, 1)
+        return (x, b[1]), (0, -1)
     if kind == "dim" and link is not None:
         p0, p1, (ux, uy) = dimension_ends(link)
         if int(round(a.x)) == 0:
@@ -244,6 +252,13 @@ class Sketch:
         self.k = k                       # text size / 3.5 mm
         self.font = font or default_font()
         self.body = None                 # the part that must not clash (no leader)
+        self.glyphs = []                 # symbols drawn as lines: (char, x, y, size)
+
+    def glyph(self, char, x, y, size):
+        """Note a symbol drawn with lines (⌖, ⌀, Ⓜ...) at page point (x, y),
+        its middle, so the PDF's text layer can carry the character."""
+        if char:
+            self.glyphs.append((char, x, y, size))
 
     @property
     def xs(self):
@@ -661,6 +676,7 @@ def circled(sk, c, r, letter):
     if strokes is None:
         sk.text(c[0], c[1], letter, size=2.6 * r / (1.8 * sk.k))
         return
+    sk.glyph(gdt.CIRCLED.get(letter, letter), c[0], c[1], r * 2.0)
     gw, gh = r * 0.8, r * 1.05
     for s in strokes:
         pts = [(c[0] + x * gw, c[1] + y * gh) for x, y in s]
@@ -684,10 +700,13 @@ def _symbol(sk, name, x0, ytop):
     """Characteristic symbol in the frame's first H x H cell."""
     h = H * sk.k
     sk.raw(x0, ytop, h, h, gdt.symbol_paths(name, 0, 0, h))
+    sk.glyph(gdt.UNICODE.get(name, ""), x0 + h / 2.0, ytop - h / 2.0, h * 0.6)
 
 
 def _dia(sk, x, cy, d=2.6):
     r = d / 2.0
+    from . import standards
+    sk.glyph(standards.diameter_sign(), x + r, cy, d * 1.2)
     sk.circle((x + r, cy), r)
     sk.line((x - 0.3, cy - r - 0.4), (x + d + 0.3, cy + r + 0.4))
 
@@ -889,7 +908,7 @@ def render(sym):
         elif kind in ("ordinate", "surface", "weld"):
             from . import drafting
             fields = drafting.draw(kind, sk, sym, (ax, ay), sdir, box, p, values)
-        elif kind in ("holetable", "revtable", "bom", "toltable"):
+        elif kind in ("holetable", "revtable", "bom", "toltable", "table"):
             from . import tables
             tables.draw_table(sk, box, p, values)
         else:
@@ -908,6 +927,10 @@ def render(sym):
         for m in re.finditer(r'freecad:editable="([^"]+)"', svg):
             order.append(m.group(1))
         p["fields"] = order
+        if sk.glyphs:
+            p["glyphs"] = [[c, round(x, 3), round(y, 3), round(s, 3)] for c, x, y, s in sk.glyphs]
+        else:
+            p.pop("glyphs", None)
         setattr(sym, PARAMS, json.dumps(p))
         sym.Symbol = svg
         if values:
@@ -916,6 +939,12 @@ def render(sym):
                 sym.EditableTexts = texts
         sym.X, sym.Y = centre
         setattr(sym, CENTRE, App.Vector(centre[0], centre[1], 0))
+        if kind == "frame":
+            # datums hanging from this frame follow it
+            for a in list(sym.InList):
+                if is_annotation(a) and getattr(a, ANCHOR_KIND, "") == "frame" \
+                        and core.same(getattr(a, LINK, None), sym):
+                    render(a)
     finally:
         _busy.discard(key)
     return sym
@@ -1030,7 +1059,7 @@ def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=Non
         "datum": "Datum", "frame": "ToleranceFrame", "target": "DatumTarget", "tag": "HoleTag",
         "holetable": "HoleTable", "revtable": "RevisionTable", "note": "Note",
         "ordinate": "Ordinate", "surface": "SurfaceFinish", "weld": "Weld",
-        "bom": "PartsList", "hatch": "PartHatch", "toltable": "GeneralTolerances",
+        "bom": "PartsList", "hatch": "PartHatch", "toltable": "GeneralTolerances", "table": "Table",
         "flag": "SpecialCharacteristic"}[kind])
     page.addView(sym)
     sym.ScaleType = "Custom"
@@ -1184,11 +1213,23 @@ def nearest_edge(view, local, max_dist=None):
     return best[1], best[2]
 
 
-def add_datum(page, x, y, letter=None, box=None, dimension=None, dim_end=1):
-    """Datum flag on the feature at page (x, y), or on a dimension's end.
+def add_datum(page, x, y, letter=None, box=None, dimension=None, dim_end=1, frame=None):
+    """Datum flag on the feature at page (x, y), on a dimension's end, or
+    (``frame``) hanging from a feature control frame (ASME Y14.5: the
+    datum feature symbol attached to the frame of that feature).
 
     ``box``: page point for the letter box (default: straight out)."""
     letter = (letter or next_datum_letter(page.Document)).strip().upper()
+    if frame is not None:
+        k = float(_params(frame).get("tsize", default_size())) / 3.5
+        b = body_box(frame)
+        below = box is None or box[1] < (b[1] + b[3]) / 2.0
+        ax = (b[0] + b[2]) / 2.0
+        ay = b[1] if below else b[3]
+        reach = (gdt.DATUM_TRI * 0.87 + gdt.DATUM_STEM) * k + H * k / 2.0
+        off = (0.0, -reach if below else reach) if box is None else (box[0] - ax, box[1] - ay)
+        return _new(page, "datum", "Datum %s" % letter, {"letter": letter}, "frame", frame,
+                    (0, 0), off)
     if dimension is not None:
         sym_tmp = None
         p0, p1, (ux, uy) = dimension_ends(dimension)
@@ -1492,7 +1533,7 @@ def set_text_style(obj, size=None, font=None):
             p["font"] = font
         setattr(obj, PARAMS, json.dumps(p))
         render(obj)
-        if getattr(obj, KIND, "") in ("holetable", "revtable", "bom", "toltable"):
+        if getattr(obj, KIND, "") in ("holetable", "revtable", "bom", "toltable", "table"):
             from . import tables
             tables.keep_in_frame(obj)          # grown with the text: still on the sheet
         return True

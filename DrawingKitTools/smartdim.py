@@ -466,8 +466,9 @@ def add_dimension(page, view, picks, mouse_local, label_page=None):
     standards.style_dimension(dim)
     if t in ("Distance", "DistanceX", "DistanceY") and diameter_across(view, ents) is not None:
         spec = dim.FormatSpec or "%.2w"
-        if "⌀" not in spec and "Ø" not in spec:
-            dim.FormatSpec = "⌀" + spec          # across a cylinder: a diameter
+        if not any(s in spec for s in standards.DIAMETER_SIGNS):
+            dim.FormatSpec = standards.diameter_sign() + spec   # across a cylinder: a diameter
+    standards.fit_text_style(dim)      # ASME, text beyond the extension lines
     if t in ("Diameter", "Radius"):
         # text outside the circle: horizontal, on a leader with a shoulder
         # (TechDraw's own style would tilt it along the leader)
