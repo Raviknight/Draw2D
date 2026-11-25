@@ -1317,6 +1317,9 @@ def set_text_style(obj, size=None, font=None):
             p["font"] = font
         setattr(obj, PARAMS, json.dumps(p))
         render(obj)
+        if getattr(obj, KIND, "") in ("holetable", "revtable", "bom", "toltable"):
+            from . import tables
+            tables.keep_in_frame(obj)          # grown with the text: still on the sheet
         return True
     if obj.isDerivedFrom("TechDraw::DrawViewDimension") or obj.isDerivedFrom("TechDraw::DrawViewBalloon"):
         vo = getattr(obj, "ViewObject", None)

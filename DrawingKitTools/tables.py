@@ -224,6 +224,37 @@ def revision_table(page):
     return None
 
 
+def _page_of(obj):
+    for o in getattr(obj, "InList", []) or []:
+        if o.isDerivedFrom("TechDraw::DrawPage"):
+            return o
+    return None
+
+
+def keep_in_frame(table):
+    """After a table changed size (bigger text, a new row): the revision
+    table hangs from the frame's top-right corner again; any other table is
+    moved back inside the frame if it now sticks out."""
+    page = _page_of(table)
+    if page is None:
+        return
+    try:
+        frame, _ = core.drawing_area(page.Template.Template, *core.page_size(page))
+        W, Ht = table_size(annot._params(table))
+    except Exception:
+        return
+    x0, y0, x1, y1 = frame
+    a = getattr(table, annot.ANCHOR)
+    if getattr(table, annot.KIND, "") == "revtable":
+        cx, cy = x1 - W / 2.0, y1 - Ht / 2.0
+    else:
+        cx = min(max(a.x, x0 + W / 2.0), x1 - W / 2.0)
+        cy = min(max(a.y, y0 + Ht / 2.0), y1 - Ht / 2.0)
+    if abs(cx - a.x) > 1e-6 or abs(cy - a.y) > 1e-6:
+        setattr(table, annot.ANCHOR, App.Vector(cx, cy, 0))
+        annot.render(table)
+
+
 def next_revision(rows):
     used = [r[0] for r in rows]
     return core.next_free_letter(used)

@@ -2302,6 +2302,27 @@ class TestTitleBlockDefaults(DocTest):
         self.assertEqual(texts["general_tolerances"], "ASME Y14.5-2018")
         self.assertIn("Y14.36", texts["surface_note"])
 
+    def test_ansi_zones_and_text_sizes(self):
+        from DrawingKitTools import templates, textlayer
+        W, H = templates.page_size("ANSI B", "Landscape")
+        xs, cols, ys, rows = templates.zone_grid(W, H, 20.0, 10.0, W - 10.0, H - 10.0)
+        # ASME Y14.1: 8 x 4 equal zones, 8 at the left, D at the top
+        self.assertEqual(cols, ["8", "7", "6", "5", "4", "3", "2", "1"])
+        self.assertEqual(rows, ["D", "C", "B", "A"])
+        self.assertAlmostEqual(xs[1] - xs[0], xs[-1] - xs[-2], places=6)
+        page = core.create_page(self.doc, "ANSI B", "Landscape")
+        self.tb.set_template_variant(page, style_="ansi")
+        self.assertEqual(textlayer.zone(page, 25.0, H - 15.0), "D8")
+        self.assertEqual(textlayer.zone(page, W - 15.0, 15.0), "A1")
+        # ISO sheets keep 1, 2, 3 from the left and A, B, C from the top
+        xs, cols, ys, rows = templates.zone_grid(420.0, 297.0, 20.0, 10.0, 410.0, 287.0)
+        self.assertEqual((cols[0], rows[0]), ("1", "A"))
+        # no title block text under 2.65 mm (7.5 pt)
+        svg = templates.make_svg("ANSI B", "Landscape", False, style="ansi")
+        sizes = [float(s) for s in re.findall(r"font-size:([\d.]+)px", svg)]
+        self.assertGreaterEqual(min(sizes), 2.65 - 1e-9)
+        self.assertIn('freecad:editable="surface_note_2"', svg)
+
     def test_tolerance_table_by_size(self):
         import json
         from DrawingKitTools import tables
@@ -3023,6 +3044,34 @@ class TestForgeLayoutFixes(DocTest):
         t = tables.revision_table(page)
         w = float(re.search(r'width="([\d.]+)mm"', t.Symbol).group(1))
         self.assertAlmostEqual(w - 2.0, x1 - x0, delta=0.5)        # drawn as big as planned
+        # bigger text: the table grows but still hangs inside the corner
+        from DrawingKitTools import annot, sheetcheck
+        annot.set_text_style(t, 5.0)
+        (x0, y0, x1, y1), = core.table_boxes(page, pad=0.0)
+        self.assertLessEqual(x1, frame[2] + 0.01)
+        self.assertLessEqual(y1, frame[3] + 0.01)
+        self.assertEqual(sheetcheck.problems(page), [])
+
+    def test_sheet_check_finds_text_on_part_lines(self):
+        from DrawingKitTools import sheetcheck, smartdim
+        part = plate_two_holes(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part])
+        self.doc.recompute()
+        v = g.Anchor
+        ents = [e for e in smartdim.entities(v) if e.kind == "line"]
+        top = smartdim.pick(v, (0, 25), ents, tol=1.0)
+        bottom = smartdim.pick(v, (0, -25), ents, tol=1.0)
+        dim = smartdim.add_dimension(page, v, [top, bottom], (55, 0))
+        self.doc.recompute()
+        self.assertEqual(sheetcheck.problems(page), [])          # outside the plate
+        # text dragged onto the plate's top edge
+        cx, cy = core.view_center(v)
+        dim.Y = 25 * core.view_scale(v)
+        dim.X = 0.0
+        self.doc.recompute()
+        found = sheetcheck.problems(page)
+        self.assertEqual([o.Name for o, _w in found], [dim.Name])
 
     def test_datum_on_a_line_to_line_distance(self):
         from DrawingKitTools import annot, smartdim

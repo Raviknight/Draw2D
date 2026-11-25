@@ -363,16 +363,13 @@ def zone(page, x, y):
     except Exception:
         return ""
     fx0, fy0, fx1, fy1 = 20.0, 10.0, W - 10.0, H - 10.0
-    cx, cy = (fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0
-    xs = templates._zones(fx0, fx1, cx)
-    ys = templates._zones(fy0, fy1, cy)
-    yd = H - y                                    # zones count from the top
+    xs, cols, ys, rows = templates.zone_grid(W, H, fx0, fy0, fx1, fy1)
+    yd = H - y                                    # the grid's rows run from the top
     col = next((i for i, (a, b) in enumerate(zip(xs, xs[1:])) if a <= x <= b), None)
     row = next((i for i, (a, b) in enumerate(zip(ys, ys[1:])) if a <= yd <= b), None)
     if col is None or row is None:
         return ""
-    letters = templates._zone_labels(len(ys) - 1, True)
-    return "%s%d" % (letters[row], col + 1)
+    return "%s%s" % (rows[row], cols[col])
 
 
 # ---------------------------------------------------------------------------

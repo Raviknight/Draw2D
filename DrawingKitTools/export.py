@@ -202,6 +202,11 @@ def export_pages(pages, path, fmt, characteristics=None):
     layer, the document properties and, unless turned off, the
     characteristics list inside it and beside it."""
     fmt = fmt.lower()
+    try:
+        from . import sheetcheck
+        sheetcheck.report(pages)        # texts on part lines, tables off the frame
+    except Exception as e:
+        _warn("sheet check failed: %s" % e)
     if fmt == "pdf":
         return _export_pdfs(pages, path, characteristics)
     paths = sheet_paths(path, pages)

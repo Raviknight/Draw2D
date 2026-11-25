@@ -159,6 +159,38 @@ def _zone_labels(n, letters):
     return [str(i + 1) for i in range(n)]
 
 
+# ASME Y14.1 zones on ANSI sheets (landscape): (columns, rows), equal zones
+ANSI_ZONES = {"ANSI A": (4, 4), "ANSI B": (8, 4), "ANSI C": (8, 4),
+              "ANSI D": (8, 4), "ANSI E": (8, 8)}
+
+
+def ansi_size(W, H):
+    """'ANSI B' for a page of that size (either way round), else None."""
+    for name, (w, h) in SIZES.items():
+        if name.startswith("ANSI") and {round(w, 1), round(h, 1)} == {round(W, 1), round(H, 1)}:
+            return name
+    return None
+
+
+def zone_grid(W, H, fx0, fy0, fx1, fy1):
+    """The frame's zones: (column cuts left to right, their labels, row cuts
+    top to bottom, their labels). ISO sheets: 50 mm zones out from the
+    centring marks, 1, 2, 3... from the left and A, B, C... from the top.
+    ANSI sheets (ASME Y14.1): equal zones, numbered from the right and
+    lettered from the bottom."""
+    ansi = ansi_size(W, H)
+    if ansi is None:
+        xs = _zones(fx0, fx1, (fx0 + fx1) / 2.0)
+        ys = _zones(fy0, fy1, (fy0 + fy1) / 2.0)
+        return (xs, _zone_labels(len(xs) - 1, False), ys, _zone_labels(len(ys) - 1, True))
+    cols, rows = ANSI_ZONES[ansi]
+    if H > W:
+        cols, rows = rows, cols
+    xs = [fx0 + (fx1 - fx0) * i / cols for i in range(cols + 1)]
+    ys = [fy0 + (fy1 - fy0) * i / rows for i in range(rows + 1)]
+    return (xs, _zone_labels(cols, False)[::-1], ys, _zone_labels(rows, True)[::-1])
+
+
 def _zones(start, end, centre, step=50.0):
     """Zone boundaries: every `step` mm out from the centring mark."""
     cuts = {round(centre, 3)}
@@ -216,7 +248,10 @@ def projection_symbol(cx, cy, first_angle, h=7.0):
 # ANSI (ASME Y14.1 style) title block: a tolerance block on the left, the
 # company / title / numbers block on the right
 # ---------------------------------------------------------------------------
-ANSI_TOL_W = 66.0
+ANSI_TOL_W = 78.0
+# no title block text under 7.5 pt (2.65 mm): captions, address, tolerance
+# lines and names stay readable on a B sheet printed to size
+ANSI_SMALL = 2.65
 ANSI_MAIN_W = 134.0
 ANSI_W = ANSI_TOL_W + ANSI_MAIN_W
 ANSI_ROWS = [12.0, 12.0, 9.0, 9.0, 9.0]          # company, title, numbers, material, people
@@ -230,11 +265,11 @@ ANSI_CELLS = [
     (2, 90, 134, "SHEET", "sheet_number", "1 OF 1", None, 3.5, "middle"),
     (3, 0, 70, "MATERIAL", "part_material", "", None, 3.0, "start"),
     (3, 70, 134, "FINISH", "finish", "", None, 3.0, "start"),
-    (4, 0, 27, "DRAWN", "creator", "", "author", 2.5, "start"),
-    (4, 27, 54, "CHECKED", "checked_by", "", None, 2.5, "start"),
-    (4, 54, 81, "APPROVED", "approval_person", "", None, 2.5, "start"),
-    (4, 81, 108, "DATE", "date_of_issue", "", "date", 2.5, "start"),
-    (4, 108, 134, "SCALE", "scale", "1 : 1", "scale", 2.5, "middle"),
+    (4, 0, 27, "DRAWN", "creator", "", "author", ANSI_SMALL, "start"),
+    (4, 27, 54, "CHECKED", "checked_by", "", None, ANSI_SMALL, "start"),
+    (4, 54, 81, "APPROVED", "approval_person", "", None, ANSI_SMALL, "start"),
+    (4, 81, 108, "DATE", "date_of_issue", "", "date", ANSI_SMALL, "start"),
+    (4, 108, 134, "SCALE", "scale", "1 : 1", "scale", ANSI_SMALL, "middle"),
 ]
 # tolerance block lines: (static text, field or None, default); fields are
 # shared with the ISO tolerance row so one set of defaults serves both
@@ -243,11 +278,12 @@ ANSI_TOL_LINES = [
     [(0, "UNLESS OTHERWISE SPECIFIED:", None, "")],
     [(0, "DIMENSIONS ARE IN", "units", "INCHES")],
     [(0, "TOLERANCES:", None, "")],
-    [(2, ".X", "tol_1", ""), (32, ".XX", "tol_2", "")],
-    [(2, ".XXX", "tol_3", ""), (32, ".XXXX", "tol_4", "")],
+    [(2, ".X", "tol_1", ""), (38, ".XX", "tol_2", "")],
+    [(2, ".XXX", "tol_3", ""), (38, ".XXXX", "tol_4", "")],
     [(2, "ANGLES", "tol_angle", "")],
     [(0, "INTERPRET PER", "general_tolerances", "ASME Y14.5-2018")],
     [(0, "", "surface_note", "")],
+    [(0, "", "surface_note_2", "")],      # a full Y14.36 note runs onto a second line
     [(0, "", "edge_note", "")],
 ]
 # ... and when general tolerances are given by a size table on the sheet
@@ -257,6 +293,7 @@ ANSI_TOL_LINES_TABLE = [
     [(0, "TOLERANCES: SEE TABLE", None, "")],
     [(0, "INTERPRET PER", "general_tolerances", "ASME Y14.5-2018")],
     [(0, "", "surface_note", "")],
+    [(0, "", "surface_note_2", "")],
     [(0, "", "edge_note", "")],
 ]
 ANSI_FIELDS = (["legal_owner_1", "company_address", "title", "title_2", "sheet_size"]
@@ -300,19 +337,20 @@ def _ansi_block(a, fx1, fy1, size, first_angle, tol_mode="places"):
     lines.append("M %g,%g V %g" % (mx - 18.0, yb, fy1))
     a('<path d="%s"/>' % " ".join(lines))
     a('</g>')
-    a('<g id="title_block_labels" style="font-size:1.8px;font-family:%s;'
-      'fill:#000000;stroke:none">' % _ff())
-    a('<text x="%g" y="%g">TITLE</text>' % (mx + 1.0, ys[1] + 2.4))
+    a('<g id="title_block_labels" style="font-size:%gpx;font-family:%s;'
+      'fill:#000000;stroke:none">' % (ANSI_SMALL, _ff()))
+    lab_y = 2.9                              # caption baseline below the cell's top
+    a('<text x="%g" y="%g">TITLE</text>' % (mx + 1.0, ys[1] + lab_y))
     for row, c0, c1, label, *_ in ANSI_CELLS:
-        a('<text x="%g" y="%g">%s</text>' % (mx + c0 + 1.0, ys[row] + 2.4, _esc(label)))
-    a('<text x="%g" y="%g">SIZE</text>' % (mx - 17.0, yb + 2.4))
+        a('<text x="%g" y="%g">%s</text>' % (mx + c0 + 1.0, ys[row] + lab_y, _esc(label)))
+    a('<text x="%g" y="%g">SIZE</text>' % (mx - 17.0, yb + lab_y))
     a('<text x="%g" y="%g" style="text-anchor:middle">%s ANGLE PROJECTION</text>'
-      % (x0 + (ANSI_TOL_W - 18.0) / 2.0, fy1 - 1.2, "FIRST" if first_angle else "THIRD"))
+      % (x0 + (ANSI_TOL_W - 18.0) / 2.0, fy1 - 1.0, "FIRST" if first_angle else "THIRD"))
     a('</g>')
     a('<g id="title_block_data_fields" style="font-family:%s;fill:#000000;stroke:none">' % _ff())
     cx = mx + ANSI_MAIN_W / 2.0
     edit(cx, ys[0] + 6.2, "legal_owner_1", "", 4.5, "middle", "organization", bold=True)
-    edit(cx, ys[0] + 10.3, "company_address", "", 2.2, "middle")
+    edit(cx, ys[0] + 10.5, "company_address", "", ANSI_SMALL, "middle")
     edit(cx, ys[1] + 6.4, "title", "", 4.5, "middle", "title", bold=True)
     edit(cx, ys[1] + 10.6, "title_2", "", 3.2, "middle")
     for row, c0, c1, label, name, default, auto, font, align in ANSI_CELLS:
@@ -321,20 +359,21 @@ def _ansi_block(a, fx1, fy1, size, first_angle, tol_mode="places"):
              bold=name in ("drawing_number", "revision_index"))
     edit(mx - 9.0, fy1 - 3.0, "sheet_size", sheet_letter(size), 6.0, "middle", bold=True)
     # tolerance lines
-    ty = y0 + 3.8
+    ty = y0 + 3.7
+    fs = ANSI_SMALL
     for line in (ANSI_TOL_LINES_TABLE if tol_mode == "table" else ANSI_TOL_LINES):
         for dx, static, field, default in line:
             tx = x0 + 1.5 + dx
             if static:
                 weight = ";font-weight:bold" if field is None else ""
-                a('<text x="%g" y="%g" style="font-size:2.3px%s">%s</text>'
-                  % (tx, ty, weight, _esc(static)))
+                a('<text x="%g" y="%g" style="font-size:%gpx%s">%s</text>'
+                  % (tx, ty, fs, weight, _esc(static)))
             if field:
-                off = {"": 0.0, ".X": 8.0, ".XX": 8.0, ".XXX": 8.0, ".XXXX": 8.0,
-                       "ANGLES": 10.0 * _wf() / 0.52}.get(
-                    static, len(static) * 2.3 * _wf() * 0.95 + 1.0)
-                edit(tx + off, ty, field, default, 2.3)
-        ty += 3.6
+                off = {"": 0.0, ".X": 9.5, ".XX": 9.5, ".XXX": 9.5, ".XXXX": 9.5,
+                       "ANGLES": 11.5 * _wf() / 0.52}.get(
+                    static, len(static) * fs * _wf() * 0.95 + 1.0)
+                edit(tx + off, ty, field, default, fs)
+        ty += 3.3
     a('</g>')
     a(projection_symbol(x0 + (ANSI_TOL_W - 18.0) / 2.0, yb + 5.6, first_angle, h=6.0))
 
@@ -386,8 +425,7 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
       % (cx, gy0 - 5 + 5, fy0 + 5, cx, gy1, bottom_in,
          gx0, cy, fx0 + 5, gx1, cy, right_in))
     # zone ticks and labels
-    xs = _zones(fx0, fx1, cx)
-    ys = _zones(fy0, fy1, cy)
+    xs, col_labels, ys, row_labels = zone_grid(W, H, fx0, fy0, fx1, fy1)
     ticks = []
     for x in xs[1:-1]:
         ticks.append("M %g,%g V %g M %g,%g V %g" % (x, gy0, fy0, x, fy1, gy1))
@@ -398,12 +436,12 @@ def make_svg(size, orientation, first_angle=True, tol_row=False, style="iso", to
     a('<g id="drawingkit_zones" style="font-size:3.5px;font-family:%s;text-anchor:middle;'
       'fill:#000000;stroke:none">' % _ff())
     for i, (x0, x1) in enumerate(zip(xs, xs[1:])):
-        lab = _zone_labels(len(xs) - 1, False)[i]
+        lab = col_labels[i]
         xm = (x0 + x1) / 2.0
         a('<text x="%g" y="%g">%s</text><text x="%g" y="%g">%s</text>'
           % (xm, gy0 + 3.8, lab, xm, gy1 - 1.2, lab))
     for i, (y0, y1) in enumerate(zip(ys, ys[1:])):
-        lab = _zone_labels(len(ys) - 1, True)[i]
+        lab = row_labels[i]
         ym = (y0 + y1) / 2.0 + 1.2
         a('<text x="%g" y="%g">%s</text><text x="%g" y="%g">%s</text>'
           % ((gx0 + fx0) / 2.0, ym, lab, (fx1 + gx1) / 2.0, ym, lab))
