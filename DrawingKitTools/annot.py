@@ -230,7 +230,9 @@ def anchor_page(sym):
         # on the frame's bottom edge (or top, with the box above), mid-way
         b = body_box(link)
         off = getattr(sym, OFFSET, App.Vector())
-        x = (b[0] + b[2]) / 2.0
+        # a.x: along the edge from its middle, kept on the frame if it shrinks
+        half = max(0.0, (b[2] - b[0]) / 2.0 - 1.5)
+        x = (b[0] + b[2]) / 2.0 + max(-half, min(half, a.x))
         if off.y >= 0:
             return (x, b[3]), (0, 1)
         return (x, b[1]), (0, -1)
@@ -245,6 +247,9 @@ def anchor_page(sym):
 # ---------------------------------------------------------------------------
 # Drawing (page coordinates, Y up) -> SVG
 # ---------------------------------------------------------------------------
+SVG_MARK = "<!--DrawingKit 2-->"     # drawn with the tight 0.5 mm margin
+
+
 class Sketch:
     def __init__(self, k=1.0, font=None):
         self.items = []
@@ -327,13 +332,14 @@ class Sketch:
         self._add(("text", x, y, txt, size, anchor, editable, rot), pts)
 
     def svg(self):
-        m = 1.0
+        m = 0.5          # just past the line widths: the box catches the mouse
         x0, x1 = min(self.xs) - m, max(self.xs) + m
         y0, y1 = min(self.ys) - m, max(self.ys) + m
         W, Hh = x1 - x0, y1 - y0
         X = lambda x: x - x0
         Y = lambda y: y1 - y
         out = ['<svg %s width="%.3fmm" height="%.3fmm" viewBox="0 0 %.3f %.3f">' % (gdt.NS, W, Hh, W, Hh),
+               SVG_MARK,
                '<g style="fill:none;stroke:#000000;stroke-linecap:round;stroke-linejoin:round">']
         from . import lineweights
         f = lineweights.symbol_factor()      # the sheet's thin line (Line weights tool)
@@ -1047,10 +1053,11 @@ def tidy_leaders(doc):
             elif is_annotation(o):
                 if getattr(o, KIND, "") == "hatch":
                     under_everything(o)
-                elif LEADER not in o.PropertiesList:
-                    render(o)
+                if LEADER not in o.PropertiesList or SVG_MARK not in (o.Symbol or ""):
+                    render(o)              # drawn by an older DrawingKit
         except Exception as e:
             App.Console.PrintWarning("DrawingKit leaders: %s: %s\n" % (o.Name, e))
+    adopt_datums(doc)
 
 
 def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=None):
@@ -1154,6 +1161,84 @@ def keep_clear(sym, page, explicit=False, views=True):
     return shift
 
 
+def _on_frame_edge(b, x, y, margin=1.0):
+    """'bottom' or 'top' if page point (x, y) is on that edge of the frame
+    box b (x0, y0, x1, y1), else None."""
+    if not b or not (b[0] - margin <= x <= b[2] + margin):
+        return None
+    if abs(y - b[1]) <= margin:
+        return "bottom"
+    if abs(y - b[3]) <= margin:
+        return "top"
+    return None
+
+
+def frame_at(page, x, y, margin=1.0):
+    """The tolerance frame on the page whose top or bottom edge is at page
+    point (x, y), or None."""
+    for v in page.Views:
+        try:
+            if getattr(v, KIND, "") != "frame":
+                continue
+            if (v.Document.Name, v.Name) not in _bodies:
+                render(v)                  # opened from a file: learn its real outline
+            if _on_frame_edge(body_box(v), x, y, margin):
+                return v
+        except Exception:
+            continue
+    return None
+
+
+def hang_from_frame(datum, frame):
+    """Attach a datum feature symbol to a tolerance frame (ASME Y14.5): it
+    keeps its place but from now on moves with the frame."""
+    (ax, ay), _ = anchor_page(datum)
+    off = getattr(datum, OFFSET, App.Vector())
+    bx, by = ax + off.x, ay + off.y
+    b = body_box(frame)
+    below = by < (b[1] + b[3]) / 2.0
+    mid = (b[0] + b[2]) / 2.0
+    half = max(0.0, (b[2] - b[0]) / 2.0 - 1.5)
+    dx = max(-half, min(half, (ax if _on_frame_edge(b, ax, ay) else bx) - mid))
+    ny = b[1] if below else b[3]
+    setattr(datum, ANCHOR_KIND, "frame")
+    setattr(datum, LINK, frame)
+    setattr(datum, ANCHOR, App.Vector(dx, 0, 0))
+    oy = by - ny
+    if below and oy > -1.0 or not below and oy < 1.0:   # the box must be past the edge
+        k = float(_params(datum).get("tsize", default_size())) / 3.5
+        reach = (gdt.DATUM_TRI * 0.87 + gdt.DATUM_STEM) * k + H * k / 2.0
+        oy = -reach if below else reach
+    setattr(datum, OFFSET, App.Vector(bx - (mid + dx), oy, 0))
+    p = _params(datum)
+    if p.pop("dir", None) is not None or p.pop("side", None) is not None:
+        setattr(datum, PARAMS, json.dumps(p))
+    render(datum)
+    return datum
+
+
+def adopt_datums(doc):
+    """Datums placed loose on the page with their triangle on a frame's edge
+    (made before datums could hang from frames) are attached to that frame.
+    Returns the datums attached."""
+    done = []
+    for d in list(doc.Objects):
+        try:
+            if getattr(d, KIND, "") != "datum" or getattr(d, ANCHOR_KIND, "") != "free":
+                continue
+            page = d.findParentPage() if hasattr(d, "findParentPage") else None
+            if page is None:
+                continue
+            (ax, ay), _ = anchor_page(d)
+            fr = frame_at(page, ax, ay)
+            if fr is not None:
+                hang_from_frame(d, fr)
+                done.append(d)
+        except Exception as e:
+            App.Console.PrintWarning("DrawingKit datum: %s: %s\n" % (d.Name, e))
+    return done
+
+
 def attach_point(page, x, y, margin=3.0):
     """('view', view, local) for the view under a page point, else free."""
     best = None
@@ -1220,16 +1305,20 @@ def add_datum(page, x, y, letter=None, box=None, dimension=None, dim_end=1, fram
 
     ``box``: page point for the letter box (default: straight out)."""
     letter = (letter or next_datum_letter(page.Document)).strip().upper()
+    if frame is None and dimension is None:
+        frame = frame_at(page, x, y)      # clicked on a frame's edge: hang from it
     if frame is not None:
         k = float(_params(frame).get("tsize", default_size())) / 3.5
         b = body_box(frame)
-        below = box is None or box[1] < (b[1] + b[3]) / 2.0
-        ax = (b[0] + b[2]) / 2.0
+        on = _on_frame_edge(b, x, y)
+        below = (box[1] < (b[1] + b[3]) / 2.0) if box is not None else (on != "top")
+        dx = x - (b[0] + b[2]) / 2.0 if on else 0.0
+        ax = (b[0] + b[2]) / 2.0 + dx
         ay = b[1] if below else b[3]
         reach = (gdt.DATUM_TRI * 0.87 + gdt.DATUM_STEM) * k + H * k / 2.0
         off = (0.0, -reach if below else reach) if box is None else (box[0] - ax, box[1] - ay)
         return _new(page, "datum", "Datum %s" % letter, {"letter": letter}, "frame", frame,
-                    (0, 0), off)
+                    (dx, 0), off)
     if dimension is not None:
         sym_tmp = None
         p0, p1, (ux, uy) = dimension_ends(dimension)

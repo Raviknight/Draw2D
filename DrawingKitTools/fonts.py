@@ -130,6 +130,44 @@ def dimension_font(dim):
         return drawing_font()
 
 
+TD_LABELS = "User parameter:BaseApp/Preferences/Mod/TechDraw/Labels"
+
+
+def caption_style():
+    """(size mm, font) TechDraw draws view captions with ('SECTION A-A',
+    'DETAIL B SCALE 2 : 1', view labels): its Labels preference, one for
+    every sheet."""
+    p = App.ParamGet(TD_LABELS)
+    size = p.GetFloat("LabelSize", 8.0) or 8.0
+    return size, p.GetString("LabelFont", "osifont") or "osifont"
+
+
+def set_caption_style(size=None, font=None):
+    """Set TechDraw's caption size and font (Preferences > TechDraw >
+    Annotation: Label size / Label font) and redraw the captions on the
+    open documents' sheets. Returns how many views were redrawn."""
+    p = App.ParamGet(TD_LABELS)
+    if size:
+        p.SetFloat("LabelSize", float(size))
+    if font:
+        p.SetString("LabelFont", font)
+    n = 0
+    for doc in App.listDocuments().values():
+        for v in doc.Objects:
+            try:
+                if not v.isDerivedFrom("TechDraw::DrawView") or "Caption" not in v.PropertiesList:
+                    continue
+                if not v.Caption and not getattr(getattr(v, "ViewObject", None), "KeepLabel", False):
+                    continue
+                c = v.Caption                 # a change to it draws the caption again
+                v.Caption = c + " "
+                v.Caption = c
+                n += 1
+            except Exception:
+                continue
+    return n
+
+
 def style_dimension(obj):
     """New DrawingKit dimensions and balloons: the drawing font (and the
     sheet's thin line, if Line weights was used)."""

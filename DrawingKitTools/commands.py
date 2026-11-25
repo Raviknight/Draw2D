@@ -1321,7 +1321,9 @@ class DatumFlag:
                            "goes (Enter for straight out). To make a diameter or a slot's "
                            "centre plane the datum (axis/centre-plane datum), select its "
                            "dimension first; to hang it from the feature's tolerance frame "
-                           "(ASME), select the frame first. Follows the view; lettered A, B, C..."}
+                           "(ASME), select the frame first or click on the frame's edge; to "
+                           "attach an existing datum, select it and the frame. Follows the "
+                           "view; lettered A, B, C..."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
@@ -1335,6 +1337,17 @@ class DatumFlag:
         page = parent_page(frames[0]) if frames else (parent_page(dims[0]) if dims else target_page())
         if page is None:
             warn("Open the page (or select a view on it) first.")
+            return
+        datums = [o for o in Gui.Selection.getSelection() if getattr(o, annot.KIND, "") == "datum"]
+        if frames and datums:
+            # an existing datum and a frame: hang the datum from the frame
+            doc = page.Document
+            run_in_transaction(doc, "DrawingKit datum on frame",
+                               lambda: [annot.hang_from_frame(d, frames[0]) for d in datums])
+            doc.recompute()
+            say("%s now hang%s from %s and move%s with it" % (
+                ", ".join(d.Label for d in datums), "" if len(datums) > 1 else "s",
+                frames[0].Label, "" if len(datums) > 1 else "s"))
             return
         letter = annot.next_datum_letter(page.Document)
         letter = ui.ask_text("Datum", "Letter", letter, 34)
@@ -3235,28 +3248,49 @@ class TextStyle:
                            "datums, tolerance frames and tables (symbols grow with their "
                            "text). With nothing selected it sets the size and font for new "
                            "DrawingKit notes, symbols and dimensions, and the title block font "
-                           "of new sheets (DejaVu Sans until you pick one)."}
+                           "of new sheets (DejaVu Sans until you pick one), and the size of "
+                           "view captions such as SECTION A-A (or select a view for just "
+                           "that). Captions share one size on every sheet."}
 
     def IsActive(self):
         return App.ActiveDocument is not None
 
     def Activated(self):
-        from . import annot
-        objs = [o for o in Gui.Selection.getSelection() if annot.text_style(o) is not None]
-        if Gui.Selection.getSelection() and not objs:
-            warn("The selection has no text. Select dimensions, notes or DrawingKit symbols "
-                 "(or nothing, to set the defaults).")
+        from . import annot, fonts
+        sel = Gui.Selection.getSelection()
+        objs = [o for o in sel if annot.text_style(o) is not None]
+        views = [o for o in sel if o.isDerivedFrom("TechDraw::DrawViewPart")
+                 or o.isDerivedFrom("TechDraw::DrawProjGroup")]
+        if sel and not objs and not views:
+            warn("The selection has no text. Select dimensions, notes or DrawingKit symbols, "
+                 "a view for the size of its caption (or nothing, to set the defaults).")
             return
+        cap_row = None
         if objs:
             size, font = annot.text_style(objs[0])
             title = "Text of %d item%s" % (len(objs), "" if len(objs) == 1 else "s")
+        elif views:
+            title = "View captions (SECTION A-A, DETAIL B...), on every sheet"
         else:
             size, font = annot.default_size(), annot.default_font()
             title = "Default text for new notes, symbols, dimensions and title blocks"
         pop = ui.Popover(title)
-        row = ui.TextStyleRow(size, font)
-        pop.add_row(*row.widgets(), stretch=True)
+        row = None
+        if not (views and not objs):
+            row = ui.TextStyleRow(size, font)
+            pop.add_row(*row.widgets(), stretch=True)
+        if not objs:
+            cap_row = ui.TextStyleRow(*fonts.caption_style())
+            pop.add_row(*(["Captions"] if row else []) + cap_row.widgets(), stretch=True)
         if not pop.run():
+            return
+        if cap_row is not None:
+            csize, cfont = cap_row.value()
+            if (csize, cfont) != fonts.caption_style():
+                fonts.set_caption_style(csize, cfont)
+                say("View captions: %g mm %s (TechDraw's label preference, every sheet)"
+                    % fonts.caption_style())
+        if row is None:
             return
         size, font = row.value()
         if not objs:
@@ -3463,9 +3497,16 @@ class AlignmentObserver:
                 pass
         QtCore.QTimer.singleShot(0, drop)
 
-    def slotFinishRestoreDocument(self, doc):
-        """An opened drawing: leaders and hatches under the views (older
-        files get their symbols' leaders split off once)."""
+    def slotCreatedDocument(self, doc):
+        """A document made or opened. Python observers get no 'restored'
+        call, and an opened file is read straight after this one: look at
+        it once the event loop runs again."""
+        self.tidy_opened(doc)
+
+    def tidy_opened(self, doc):
+        """An opened drawing: leaders and hatches under the views, symbols
+        drawn by an older DrawingKit drawn again (their leaders split off,
+        tight boxes), loose datums on a frame's edge attached to it."""
         name = doc.Name
         tries = [0]
 

@@ -1098,6 +1098,49 @@ class TestAnnotations(DocTest):
         self.assertLess(db2[3], fb2[1])
         self.assertAlmostEqual(self.annot.anchor_page(d)[0][1], fb2[1], places=6)
 
+    def test_datum_clicked_on_a_frame_edge_hangs_from_it(self):
+        p = {"char": "position", "tol": "0.1", "datums": ["A", "", ""], "tsize": 3.5}
+        fr = self.annot.add_frame(self.page, (60, 250), p)
+        fb = self.annot.body_box(fr)
+        x = fb[0] + 4.0
+        d = self.annot.add_datum(self.page, x, fb[1] + 0.3, "D", box=(x, fb[1] - 9))
+        self.assertEqual(getattr(d, self.annot.ANCHOR_KIND), "frame")
+        self.assertAlmostEqual(self.annot.anchor_page(d)[0][0], x, places=6)   # where clicked
+
+    def test_loose_datum_on_a_frame_is_adopted(self):
+        p = {"char": "position", "tol": "0.1", "datums": ["A", "", ""], "tsize": 3.5}
+        fr = self.annot.add_frame(self.page, (60, 250), p)
+        fb = self.annot.body_box(fr)
+        x = fb[0] + 5.0
+        # as made before datums could hang from frames: loose on the page
+        d = self.annot._new(self.page, "datum", "Datum D", {"letter": "D", "dir": [0, -1]},
+                            "free", None, (x, fb[1] + 0.35), (0, -8.5))
+        b0 = self.annot.body_box(d)
+        self.assertEqual(self.annot.adopt_datums(self.doc), [d])
+        self.assertEqual(getattr(d, self.annot.ANCHOR_KIND), "frame")
+        b1 = self.annot.body_box(d)
+        self.assertAlmostEqual(b0[0], b1[0], places=3)             # kept its place
+        self.assertAlmostEqual(b0[1], b1[1], delta=0.4)
+        off = getattr(fr, self.annot.OFFSET)
+        setattr(fr, self.annot.OFFSET, App.Vector(off.x + 10, off.y + 5, 0))
+        self.annot.render(fr)
+        b2 = self.annot.body_box(d)
+        self.assertAlmostEqual(b2[0] - b1[0], 10, places=3)        # moves with the frame
+        self.assertAlmostEqual(b2[1] - b1[1], 5, places=3)
+        # a datum elsewhere stays loose
+        e = self.annot._new(self.page, "datum", "Datum E", {"letter": "E", "dir": [0, -1]},
+                            "free", None, (fb[0] + 5, fb[1] - 30), (0, -8.5))
+        self.assertEqual(self.annot.adopt_datums(self.doc), [])
+        self.assertEqual(getattr(e, self.annot.ANCHOR_KIND), "free")
+
+    def test_symbol_svg_margin_is_tight(self):
+        p = {"char": "flatness", "tol": "0.05", "datums": ["", "", ""], "tsize": 3.5}
+        fr = self.annot.add_frame(self.page, (200, 150), p)
+        self.assertIn(self.annot.SVG_MARK, fr.Symbol)
+        w = float(re.search(r'width="([\d.]+)mm"', fr.Symbol).group(1))
+        fb = self.annot.body_box(fr)
+        self.assertAlmostEqual(w, fb[2] - fb[0] + 1.0, delta=0.05)   # 0.5 mm each side
+
     def test_leader_drawn_apart_from_the_frame(self):
         from DrawingKitTools import clearance
         x0, y0, x1, y1 = core.view_box(self.front)
@@ -1188,8 +1231,8 @@ class TestAnnotations(DocTest):
         w1, h1 = self._svg_size(fr)
         self.assertTrue(self.annot.set_text_style(fr, size=7.0, font="Arial"))
         w2, h2 = self._svg_size(fr)
-        self.assertAlmostEqual((w2 - 2) / (w1 - 2), 2.0, delta=0.05)   # 1 mm margins
-        self.assertAlmostEqual((h2 - 2) / (h1 - 2), 2.0, delta=0.05)
+        self.assertAlmostEqual((w2 - 1) / (w1 - 1), 2.0, delta=0.05)   # 0.5 mm margins
+        self.assertAlmostEqual((h2 - 1) / (h1 - 1), 2.0, delta=0.05)
         self.assertIn("Arial", fr.Symbol)
         self.assertEqual(list(fr.EditableTexts), ["0.05"])
 
@@ -3143,7 +3186,7 @@ class TestForgeLayoutFixes(DocTest):
         import re
         t = tables.revision_table(page)
         w = float(re.search(r'width="([\d.]+)mm"', t.Symbol).group(1))
-        self.assertAlmostEqual(w - 2.0, x1 - x0, delta=0.5)        # drawn as big as planned
+        self.assertAlmostEqual(w - 1.0, x1 - x0, delta=0.5)        # drawn as big as planned
         # bigger text: the table grows but still hangs inside the corner
         from DrawingKitTools import annot, sheetcheck
         annot.set_text_style(t, 5.0)

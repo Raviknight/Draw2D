@@ -386,8 +386,102 @@ def install_drag(page):
     f = DragAnywhere(page, gview)
     gview.viewport().installEventFilter(f)
     _installed[key] = f
+    try:
+        f.boxes = ClickBoxes(page, gview.scene())
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit click boxes: %s\n" % e)
     gview.viewport().destroyed.connect(lambda *_: _installed.pop(key, None))
     return True
+
+
+# ---------------------------------------------------------------------------
+# Tight click boxes for DrawingKit's symbols
+# ---------------------------------------------------------------------------
+# TechDraw gives every view a hover/selection frame 2 mm outside its drawing,
+# with the object's name under it, and that whole area catches the mouse: a
+# datum named "Datum D" caught clicks 25 mm wide. For DrawingKit's symbols
+# the frame is kept to the drawing itself (its SVG's 0.5 mm margin) and the
+# name is left out.
+CLICK_INSET = 0.0          # mm in from the SVG's edge
+
+
+def trim_click_box(item):
+    """Fit one symbol's frame to its drawing. True if anything changed."""
+    kids = item.childItems()
+    rects = [k for k in kids if isinstance(k, QtWidgets.QGraphicsRectItem)]
+    groups = [k for k in kids if isinstance(k, QtWidgets.QGraphicsItemGroup)]
+    texts = [k for k in kids if isinstance(k, QtWidgets.QGraphicsTextItem)]
+    if len(rects) != 1 or not groups:
+        return False
+    disp = groups[0]
+    area = disp.mapRectToItem(item, disp.boundingRect())
+    if area.isEmpty():
+        return False
+    d = CLICK_INSET * rez()
+    if area.width() > 2 * d + 1 and area.height() > 2 * d + 1:
+        area = area.adjusted(d, d, -d, -d)
+    changed = False
+    border = rects[0]
+    want = border.mapRectFromItem(item, area)
+    r = border.rect()
+    if max(abs(r.left() - want.left()), abs(r.top() - want.top()),
+           abs(r.right() - want.right()), abs(r.bottom() - want.bottom())) > 0.5:
+        border.setRect(want)
+        changed = True
+    c = area.center()
+    for t in texts:
+        if t.toPlainText():
+            t.setPlainText("")
+            changed = True
+        f = t.font()
+        if f.pixelSize() != 1:
+            f.setPixelSize(1)
+            t.setFont(f)
+            t.document().setDocumentMargin(0)
+            changed = True
+        br = t.boundingRect()
+        pos = QtCore.QPointF(c.x() - br.width() / 2.0, c.y() - br.height() / 2.0)
+        if (t.pos() - pos).manhattanLength() > 0.5:
+            t.setPos(pos)
+            changed = True
+    return changed
+
+
+class ClickBoxes:
+    """Keeps the page's DrawingKit symbols' frames tight: TechDraw draws
+    them again on every redraw, hover and selection, so they are fitted
+    again after each change to the scene."""
+
+    # TechDraw deletes and makes its items behind Python's back: none is kept
+    # between passes (a kept one may be gone), they are looked up each time.
+
+    def __init__(self, page, scene):
+        self.page, self.scene = page, scene
+        self.timer = QtCore.QTimer()
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(30)            # one pass for a burst of changes
+        self.timer.timeout.connect(self.trim_all)
+        scene.changed.connect(self.on_changed)
+
+    def on_changed(self, *_):
+        if not self.timer.isActive():
+            self.timer.start()
+
+    def trim_all(self):
+        from . import annot
+        try:
+            names = {o.Name for o in self.page.Views
+                     if annot.KIND in o.PropertiesList or annot.LEADER_OF in o.PropertiesList}
+        except Exception:
+            return
+        if not names:
+            return
+        for it in self.scene.items():
+            try:
+                if it.data(0) == "QGIV" and it.data(1) in names and it.parentItem() is None:
+                    trim_click_box(it)
+            except Exception:
+                continue
 
 
 def install_drag_everywhere():
