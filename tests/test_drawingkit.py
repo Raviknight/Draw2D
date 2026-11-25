@@ -1448,6 +1448,79 @@ class TestDimensionRefs(DocTest):
         self.assertTrue(dimrefs.update_views(self.doc))
         self.assertNotEqual(list(getattr(top, core.MARKS_PROP)), before)
 
+    def test_cut_keeps_its_distance_from_the_end_face(self):
+        from DrawingKitTools import cutfollow
+        cutfollow.forget_document(self.doc.Name)
+        sec = core.add_section(self.page, self.v, direction="Right",
+                               origin=App.Vector(350, 150, 25))
+        self.doc.recompute()
+        self.assertEqual(cutfollow.update(self.doc), [])     # first look
+        self.assertEqual(cutfollow.anchor_of(sec)["kind"], "face")
+        self.box.Length = 500                   # the end face moves 100 mm
+        self.doc.recompute()
+        self.assertEqual(len(cutfollow.update(self.doc)), 1)
+        self.assertAlmostEqual(sec.SectionOrigin.x, 450.0, places=6)
+        self.assertEqual(cutfollow.update(self.doc), [])     # and stays
+
+    def test_cut_through_a_hole_follows_the_hole(self):
+        from DrawingKitTools import cutfollow
+        import Part
+        cutfollow.forget_document(self.doc.Name)
+
+        def plate(length, hole_x):
+            return Part.makeBox(length, 60, 10).cut(
+                Part.makeCylinder(4, 10, App.Vector(hole_x, 30, 0)))
+        part = self.doc.addObject("Part::Feature", "Plate")
+        part.Shape = plate(100, 30)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        sec = core.add_section(page, g.Anchor, direction="Right", origin=App.Vector(30, 30, 5))
+        self.doc.recompute()
+        cutfollow.update(self.doc)
+        self.assertEqual(cutfollow.anchor_of(sec)["kind"], "axis")
+        part.Shape = plate(140, 45)             # hole moved; ends moved further
+        self.doc.recompute()
+        cutfollow.update(self.doc)
+        self.assertAlmostEqual(sec.SectionOrigin.x, 45.0, places=6)
+
+    def test_cut_through_a_slot_stays_in_its_middle(self):
+        from DrawingKitTools import cutfollow
+        import Part
+        cutfollow.forget_document(self.doc.Name)
+
+        def plate(length, a, b):
+            slot = Part.makeBox(b - a, 8, 10, App.Vector(a, 26, 0)).fuse(
+                [Part.makeCylinder(4, 10, App.Vector(a, 30, 0)),
+                 Part.makeCylinder(4, 10, App.Vector(b, 30, 0))])
+            return Part.makeBox(length, 60, 10).cut(slot)
+        part = self.doc.addObject("Part::Feature", "Plate")
+        part.Shape = plate(100, 40, 60)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        sec = core.add_section(page, g.Anchor, direction="Right", origin=App.Vector(50, 30, 5))
+        self.doc.recompute()
+        cutfollow.update(self.doc)
+        self.assertEqual(cutfollow.anchor_of(sec)["kind"], "mid")
+        part.Shape = plate(140, 70, 96)         # slot moved and longer
+        self.doc.recompute()
+        cutfollow.update(self.doc)
+        self.assertAlmostEqual(sec.SectionOrigin.x, 83.0, places=6)
+
+    def test_cut_driven_by_an_expression_is_left_alone(self):
+        from DrawingKitTools import cutfollow
+        cutfollow.forget_document(self.doc.Name)
+        sec = core.add_section(self.page, self.v, direction="Right",
+                               origin=App.Vector(350, 150, 25))
+        sec.setExpression(".SectionOrigin.x", "Box.Length - 60 mm")
+        self.doc.recompute()
+        cutfollow.update(self.doc)
+        self.box.Length = 500
+        self.doc.recompute()
+        self.assertEqual(cutfollow.update(self.doc), [])
+        self.assertAlmostEqual(sec.SectionOrigin.x, 440.0, places=6)
+
     def test_line_far_off_its_stretch_is_not_taken(self):
         from DrawingKitTools import dimrefs
         want = ("L", [(-1000.0, 9000.0), (-990.0, 9000.0)], 10.0)

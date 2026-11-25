@@ -3542,7 +3542,9 @@ class AlignmentObserver:
                 dims = any(o.isDerivedFrom("TechDraw::DrawViewDimension") for o in d.Objects)
                 notes = any(annot.is_annotation(o) or annot.LEADER_OF in o.PropertiesList
                             for o in d.Objects)
-                if not dims and not notes:
+                cuts = any(o.isDerivedFrom("TechDraw::DrawViewSection")
+                           or o.isDerivedFrom("TechDraw::DrawViewDetail") for o in d.Objects)
+                if not dims and not notes and not cuts:
                     return
                 is_ready = ready(d)
                 if not is_ready and tries[0] < 60:
@@ -3579,7 +3581,9 @@ class AlignmentObserver:
             return
         try:
             name = doc.Name
-            if not any(o.isDerivedFrom("TechDraw::DrawViewDimension") for o in doc.Objects):
+            if not any(o.isDerivedFrom("TechDraw::DrawViewDimension")
+                       or o.isDerivedFrom("TechDraw::DrawViewSection")
+                       or o.isDerivedFrom("TechDraw::DrawViewDetail") for o in doc.Objects):
                 return
         except Exception:
             return

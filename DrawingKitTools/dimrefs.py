@@ -221,6 +221,11 @@ def forget_document(name):
         _KNOWN.pop(k, None)
     for k in [k for k in _VIEWS if k[0] == name]:
         _VIEWS.pop(k, None)
+    try:
+        from . import cutfollow
+        cutfollow.forget_document(name)
+    except Exception:
+        pass
 
 
 def _refs(dim):
@@ -360,8 +365,9 @@ def _model_sig(view):
 def update_views(doc):
     """After the model changed: detail views keep looking at the same spot
     on the part (their anchor is held in the base view's coordinates, which
-    move when TechDraw centres the changed part), and DrawingKit's centre
-    marks are drawn again on the changed part.  Returns True if anything
+    move when TechDraw centres the changed part), section cuts stay on their
+    feature (see cutfollow), and DrawingKit's centre marks are drawn again
+    on the changed part.  Returns True if anything
     changed (the views then need drawing again before dimensions are
     checked)."""
     from . import core
@@ -392,6 +398,12 @@ def update_views(doc):
                 changed = True
             except Exception as e:
                 App.Console.PrintWarning("DrawingKit centre marks: %s\n" % e)
+    try:
+        from . import cutfollow
+        if cutfollow.update(doc):
+            changed = True
+    except Exception as e:
+        App.Console.PrintWarning("DrawingKit sections: %s\n" % e)
     for k in [k for k in _VIEWS if k[0] == doc.Name]:
         _VIEWS.pop(k, None)
     for name, val in seen.items():
