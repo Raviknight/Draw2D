@@ -71,6 +71,8 @@ Settings open in small pop-ups next to the mouse that show only what's needed (E
 
 New frames, datums, targets, surface and weld symbols keep clear of dimension texts, view captions, balloons, tables and each other: left to their default place they also stay off the views; a spot you click is only nudged off text. A frame put under a dimension moves out together with that dimension's text when it would land on a view.
 
+**Dimensions after reopening.** FreeCAD numbers a view's edges afresh each time it works the view out, and a part from PartDesign can come back with them numbered differently when the file is opened again. TechDraw re-points most dimensions itself but misses some (an edge that now comes as a spline or in two pieces), which then measure the wrong edges, often 0.000. When a drawing opens, DrawingKit checks every dimension against the copy of its edges TechDraw saved with it and puts back the ones that moved; the Report view lists them. Save the file afterwards to keep the fix.
+
 Datums, frames, targets, tags and tables are TechDraw symbols drawn by DrawingKit: drag them like views, and edit their texts (datum letters, tolerance values, table cells) in their *Editable Texts* property.
 
 **Moving views.** Drag a view by any of its lines or faces (TechDraw on its own only lets you grab the small name label). Projected views stay lined up, as in Onshape: side views slide left-right, top/bottom views slide up-down, the isometric moves freely, and dragging the front view moves them all. Views made with *Projected view by pointing* follow their parent the same way. A quick click still selects edges and faces as usual; hold Alt to drag the TechDraw way. To stop the locking on a group, set its **DrawingKitAligned** property to false.

@@ -3504,7 +3504,8 @@ class AlignmentObserver:
         self.tidy_opened(doc)
 
     def tidy_opened(self, doc):
-        """An opened drawing: leaders and hatches under the views, symbols
+        """An opened drawing: dimensions FreeCAD moved to other edges put
+        back (see dimrefs), leaders and hatches under the views, symbols
         drawn by an older DrawingKit drawn again (their leaders split off,
         tight boxes), loose datums on a frame's edge attached to it."""
         name = doc.Name
@@ -3522,21 +3523,39 @@ class AlignmentObserver:
 
         def tidy():
             try:
-                from . import annot
+                from . import annot, dimrefs
                 d = App.getDocument(name)
             except Exception:
                 return
             try:
-                if d is None or not any(annot.is_annotation(o) or annot.LEADER_OF in o.PropertiesList
-                                        for o in d.Objects):
+                if d is None:
                     return
-                if not ready(d) and tries[0] < 60:
+                dims = any(o.isDerivedFrom("TechDraw::DrawViewDimension") for o in d.Objects)
+                notes = any(annot.is_annotation(o) or annot.LEADER_OF in o.PropertiesList
+                            for o in d.Objects)
+                if not dims and not notes:
+                    return
+                is_ready = ready(d)
+                if not is_ready and tries[0] < 60:
                     tries[0] += 1
                     QtCore.QTimer.singleShot(500, tidy)
                     return
-                annot.tidy_leaders(d)
-            except Exception as e:
-                App.Console.PrintWarning("DrawingKit leaders: %s\n" % e)
+            except Exception:
+                return
+            if dims and is_ready:
+                try:
+                    fixed = dimrefs.repair(d)
+                    if fixed:
+                        App.Console.PrintMessage(
+                            "DrawingKit: %d dimension(s) had moved to other edges when the "
+                            "file opened and were put back: %s\n" % (len(fixed), ", ".join(fixed)))
+                except Exception as e:
+                    App.Console.PrintWarning("DrawingKit dimensions: %s\n" % e)
+            if notes:
+                try:
+                    annot.tidy_leaders(d)
+                except Exception as e:
+                    App.Console.PrintWarning("DrawingKit leaders: %s\n" % e)
         QtCore.QTimer.singleShot(500, tidy)
 
     def slotChangedObject(self, obj, prop):

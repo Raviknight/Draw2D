@@ -1273,6 +1273,88 @@ def math_dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
 
+class TestDimensionRefs(DocTest):
+    """Dimensions FreeCAD left on the wrong edges after reopening go back."""
+
+    def setUp(self):
+        super().setUp()
+        self.page = core.create_page(self.doc, "A3", "Landscape")
+        self.g = core.add_standard_views(self.page, [self.box], front=FRONT)
+        self.doc.recompute()
+        self.v = self.g.Anchor
+        flat = []
+        i = 0
+        while i < 200:
+            try:
+                e = self.v.getEdgeByIndex(i)
+            except Exception:
+                break
+            if len(e.Vertexes) == 2 and abs(e.Vertexes[0].Point.y - e.Vertexes[1].Point.y) < 1e-6:
+                flat.append((e.Vertexes[0].Point.y, i))
+            i += 1
+        self.low, self.high = "Edge%d" % min(flat)[1], "Edge%d" % max(flat)[1]
+        self.n_edges = i
+        self.dim = self.doc.addObject("TechDraw::DrawViewDimension", "Dimension")
+        self.dim.Type = "DistanceY"
+        self.dim.References2D = [(self.v, [self.low, self.high])]
+        self.page.addView(self.dim)
+        self.doc.recompute()
+        self.value = self.dim.getRawValue()
+
+    def renumbered(self, subs):
+        """As after reopening: the references now name other edges, the
+        saved copies still describe the right ones."""
+        saved = list(self.dim.SavedGeometry)
+        self.dim.References2D = [(self.v, subs)]
+        self.dim.SavedGeometry = saved
+
+    def test_value_and_saved_copies(self):
+        self.assertAlmostEqual(self.value, 50.0, places=6)
+        self.assertEqual(len(self.dim.SavedGeometry), 2)
+
+    def test_matching_references_are_left_alone(self):
+        from DrawingKitTools import dimrefs
+        self.assertIsNone(dimrefs.check(self.dim))
+        self.assertEqual(dimrefs.repair(self.doc), [])
+
+    def test_moved_reference_goes_back(self):
+        from DrawingKitTools import dimrefs
+        self.renumbered([self.low, self.low])
+        self.assertEqual(dimrefs.repair(self.doc), [self.dim.Label])
+        self.assertEqual(list(self.dim.References2D[0][1]), [self.low, self.high])
+        self.assertAlmostEqual(self.dim.getRawValue(), self.value, places=6)
+
+    def test_reference_past_the_last_edge_goes_back(self):
+        from DrawingKitTools import dimrefs
+        self.renumbered([self.low, "Edge%d" % (self.n_edges + 5)])
+        self.assertEqual(dimrefs.repair(self.doc), [self.dim.Label])
+        self.assertEqual(list(self.dim.References2D[0][1]), [self.low, self.high])
+
+    def test_split_edge_is_found_along_its_line(self):
+        from DrawingKitTools import dimrefs
+        e = self.v.getEdgeByIndex(int(self.high[4:]))
+        want = dimrefs.describe(e)
+        (ax, ay), (bx, by) = want[1]
+        half = ("L", [(ax, ay), ((ax + bx) / 2, ay)], abs(bx - ax) / 2)
+        self.assertGreater(dimrefs._overlap(want, half), 1.0)
+        # the whole edge is found from a description of half of it
+        self.assertEqual(dimrefs.find(self.v, half), self.high)
+
+    def test_saved_copy_is_flipped(self):
+        from DrawingKitTools import dimrefs
+        saved = dimrefs.describe(self.dim.SavedGeometry[1], flip=True)
+        self.assertTrue(dimrefs.same(saved, dimrefs.describe(self.v.getEdgeByIndex(int(self.high[4:])))))
+
+    def test_nothing_matching_leaves_it_alone(self):
+        from DrawingKitTools import dimrefs
+        import Part
+        far = Part.makeLine(App.Vector(1e4, 1e4, 0), App.Vector(1e4 + 1, 1e4, 0))
+        saved = list(self.dim.SavedGeometry)
+        self.dim.References2D = [(self.v, [self.low, self.low])]
+        self.dim.SavedGeometry = [saved[0], far]
+        self.assertIsNone(dimrefs.check(self.dim))
+
+
 class TestAuxiliaryView(DocTest):
     def test_looks_square_on_at_the_slanted_face(self):
         import Part
