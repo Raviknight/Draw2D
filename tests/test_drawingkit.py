@@ -331,6 +331,33 @@ class TestSectionsAndFit(DocTest):
         sec = core.add_section(self.page, self.front)
         self.assertEqual(sec.SectionSymbol, "B")
 
+    def test_letters_skip_datum_letters(self):
+        from DrawingKitTools import annot
+        x0, y0, x1, y1 = core.view_box(self.front)
+        annot.add_datum(self.page, (x0 + x1) / 2, y1)            # datum A
+        sec = core.add_section(self.page, self.front)
+        self.assertEqual(sec.SectionSymbol, "B")
+        self.assertEqual(annot.next_datum_letter(self.doc), "C")
+
+    def test_section_at_its_own_scale(self):
+        from DrawingKitTools import standards
+        sec = core.add_section(self.page, self.front)
+        self.doc.recompute()
+        page_scale = core.view_scale(self.group)
+        core.set_view_scale(sec, page_scale * 2)
+        self.assertAlmostEqual(core.view_scale(sec), page_scale * 2, places=9)
+        self.assertEqual(sec.Caption, standards.section_caption(
+            "A", None, core.scale_text(page_scale * 2)))
+        # the page changes scale: the section keeps its zoom over it
+        new = core.step_page_scale(self.page, -1)
+        self.assertAlmostEqual(core.view_scale(sec), new * 2, places=9)
+        # back to the page's scale: the caption drops the scale
+        core.set_view_scale(sec, new)
+        self.assertEqual(sec.Caption, standards.section_caption("A"))
+        # a projection group's view follows the page
+        with self.assertRaises(ValueError):
+            core.set_view_scale(self.front, 1.0)
+
     def test_fit_page_after_section_keeps_everything_inside(self):
         core.add_section(self.page, self.front)
         self.page.Scale = 5.0  # deliberately wrong
@@ -582,6 +609,23 @@ class TestCenterMarks(DocTest):
         g = core.add_standard_views(page, [obj], front=FRONT)
         self.doc.recompute()
         self.assertEqual(core.center_features(g.getItemByLabel("Top")), ([], []))
+
+    def test_lobe_gets_no_mark_slot_end_does(self):
+        import Part
+        box = Part.makeBox(50, 40, 20)
+        # a 240-degree scallop in the edge (a lobe), and a slot with round ends
+        lobe = Part.makeCylinder(6, 20, App.Vector(3, 20, 0))
+        slot = Part.makeBox(16, 8, 20, App.Vector(25, 16, 0)).fuse(
+            [Part.makeCylinder(4, 20, App.Vector(25, 20, 0)),
+             Part.makeCylinder(4, 20, App.Vector(41, 20, 0))]).removeSplitter()
+        obj = self.doc.addObject("Part::Feature", "Lobed")
+        obj.Shape = box.cut(lobe).cut(slot)
+        page = core.create_page(self.doc, "A4", "Landscape")
+        g = core.add_standard_views(page, [obj], front=FRONT)
+        self.doc.recompute()
+        marks, _lines = core.center_features(g.getItemByLabel("Top"))
+        xs = sorted(round(m[0] + 25, 3) for m in marks)       # back to model x
+        self.assertEqual(xs, [25.0, 41.0])                     # slot ends only
 
 
 class TestCutSections(DocTest):
@@ -1014,7 +1058,7 @@ class TestAnnotations(DocTest):
     def test_circled_letters_are_centred(self):
         sk = self.annot.Sketch()
         for letter in "MLPFTUES":
-            sk.items, sk.xs, sk.ys = [], [], []
+            sk.items, sk.extents = [], []
             self.annot.circled(sk, (10.0, 20.0), 1.8, letter)
             lines = [it for it in sk.items if it[0] == "line"]
             self.assertTrue(lines, letter)
@@ -1028,10 +1072,42 @@ class TestAnnotations(DocTest):
         p = {"char": "profile_surface", "tol": "0.1", "datums": ["A", "", ""],
              "all_around": True, "between": ["J", "K"], "tsize": 3.5}
         fr = self.annot.add_frame(self.page, (x1 + 30, y1 + 10), p, anchor=(x1, (y0 + y1) / 2))
-        self.assertIn("<circle", fr.Symbol)        # the all-around circle
+        # the all-around circle sits at the leader's bend: drawn with the leader
+        lead = self.annot.leader_of(fr)
+        self.assertIsNotNone(lead)
+        self.assertIn("<circle", lead.Symbol)
         texts = list(fr.EditableTexts)
         self.assertIn("J", texts)
         self.assertIn("K", texts)
+
+    def test_leader_drawn_apart_from_the_frame(self):
+        from DrawingKitTools import clearance
+        x0, y0, x1, y1 = core.view_box(self.front)
+        p = {"char": "flatness", "tol": "0.05", "datums": ["", "", ""], "tsize": 3.5}
+        fr = self.annot.add_frame(self.page, (x1 + 40, y1 + 30), p, anchor=(x1, (y0 + y1) / 2))
+        lead = self.annot.leader_of(fr)
+        self.assertIsNotNone(lead)
+        self.assertTrue(lead.LockPosition)
+        self.assertEqual(lead.Label, "%s (leader)" % fr.Label)
+        # the frame's own box is just the frame: it no longer reaches the view
+        box = clearance.symbol_box(fr)
+        self.assertGreater(box[0], x1)
+        self.assertGreater(box[1], (y0 + y1) / 2)
+        # the leader goes from the frame to the feature
+        lb = clearance.symbol_box(lead)
+        self.assertLess(lb[0], x1 + 1.5)
+        # moved close to the view, no leader is needed: the leader goes
+        n = len(self.doc.Objects)
+        self.annot.set_text_style(fr, 3.5)
+        self.assertEqual(len(self.doc.Objects), n)            # redrawn, not doubled
+        # a free frame has no leader
+        free = self.annot.add_frame(self.page, (60, 60), p)
+        self.assertIsNone(self.annot.leader_of(free))
+        # a symbol drawn before leaders were split off gets one when tidied
+        fr.removeProperty(self.annot.LEADER)
+        self.annot._remove(lead)
+        self.annot.tidy_leaders(self.doc)
+        self.assertIsNotNone(self.annot.leader_of(fr))
 
     def test_frame_under_a_dimension_moves_with_it(self):
         from DrawingKitTools import holes
@@ -2850,12 +2926,14 @@ class TestTextLayer(DocTest):
         # inches (getText() would give '0.63 in')
         dims.set_dimension(d, decimals=3, tol="symmetric", upper=0.001, lower=0.001)
         self.doc.recompute()
-        keep = textlayer.values_unit
-        textlayer.values_unit = lambda: "in"
+        keep = textlayer._length_factor
+        textlayer._length_factor = lambda dim: 25.4
         try:
             r = textlayer.dimension_record(d)
         finally:
-            textlayer.values_unit = keep
+            textlayer._length_factor = keep
+        # with the sheet on screen getText() has the tolerance too: cut off
+        self.assertEqual(re.split(r"\s*±|\s+[+-]\s*\.?\d", "10.00 ± 0.10", maxsplit=1)[0], "10.00")
         inch = float(d.getRawValue()) / 25.4
         self.assertEqual(r["value_text"], "%.3f" % inch)
         self.assertAlmostEqual(r["value"], inch, places=6)
@@ -3051,6 +3129,26 @@ class TestForgeLayoutFixes(DocTest):
         self.assertLessEqual(x1, frame[2] + 0.01)
         self.assertLessEqual(y1, frame[3] + 0.01)
         self.assertEqual(sheetcheck.problems(page), [])
+
+    def test_line_weights_for_the_sheet(self):
+        from DrawingKitTools import annot, lineweights
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [self.box])
+        self.doc.recompute()
+        x0, y0, x1, y1 = core.view_box(g.Anchor)
+        datum = annot.add_datum(page, (x0 + x1) / 2, y1)
+        self.assertIn("stroke-width:0.35", datum.Symbol)
+        before = lineweights.weights()
+        try:
+            lineweights.apply_page(page, 0.6, 0.3)
+            self.assertEqual(lineweights.weights(), (0.6, 0.3))
+            self.assertIn("stroke-width:0.3;", datum.Symbol.replace('"', ";"))
+            self.assertNotIn("stroke-width:0.35", datum.Symbol)
+            self.assertAlmostEqual(lineweights.centre_line(), 0.3)
+        finally:
+            lineweights.set_weights(*(before or (None, None)))
+        self.assertAlmostEqual(lineweights.symbol_factor(), 1.0 if before is None
+                               else before[1] / 0.35)
 
     def test_sheet_check_finds_text_on_part_lines(self):
         from DrawingKitTools import sheetcheck, smartdim

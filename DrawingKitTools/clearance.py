@@ -48,7 +48,8 @@ def dimension_label_box(dim):
     cx, cy = core.view_center(view)
     x, y = cx + float(dim.X), cy + float(dim.Y)
     fs = _dim_font(dim)
-    w = len(dimension_text(dim)) * fs * 0.58 + 1.0
+    from . import fonts
+    w = fonts.dimension_text_width(dimension_text(dim), fs, fonts.dimension_font(dim)) + 1.0
     h = fs * 1.3
     vertical = dim.Type == "DistanceY"
     vo = getattr(dim, "ViewObject", None)

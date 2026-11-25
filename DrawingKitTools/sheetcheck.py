@@ -71,11 +71,21 @@ def _dim_box(dim):
         text = textlayer.dimension_text(dim)
     except Exception:
         return box
+    from . import fonts
     short = clearance.dimension_text(dim)
     if len(text) > len(short):
         # the label box counts the value only: widen it for the tolerance
         fs = clearance._dim_font(dim)
-        extra = (len(text) - len(short)) * fs * 0.58 / 2.0
+        font = fonts.dimension_font(dim)
+        rec = textlayer.dimension_record(dim)
+        if "±" in text or not (rec.get("upper") and rec.get("lower")):
+            tol = fonts.dimension_text_width(text, fs, font) \
+                - fonts.dimension_text_width(short, fs, font)
+        else:
+            # stacked: one tolerance over the other, in smaller text
+            tol = max(fonts.dimension_text_width(rec["upper"], fs * 0.8, font),
+                      fonts.dimension_text_width(rec["lower"], fs * 0.8, font)) + 0.5
+        extra = tol / 2.0
         if box[2] - box[0] >= box[3] - box[1]:
             box = (box[0] - extra, box[1], box[2] + extra, box[3])
         else:

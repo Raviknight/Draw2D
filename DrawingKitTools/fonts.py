@@ -108,6 +108,20 @@ def width_factor(font=None):
     return 0.64
 
 
+NARROW = set(".,:;'|!il ")
+
+
+def dimension_text_width(text, size, font=None):
+    """Width (mm) of a dimension's text as TechDraw draws it. TechDraw sizes
+    dimension text by its capitals (ISO 3098: 'size' is the cap height), so
+    the font is about 1.37 times bigger than 'size'; TechDraw also spaces a
+    ± out (' ± ')."""
+    text = (text or "").replace(" ±", "±").replace("± ", "±").replace("±", " ± ")
+    em = size / 0.73
+    wide = width_factor(font)
+    return sum((wide / 2.0 if c in NARROW else wide) for c in text) * em
+
+
 def dimension_font(dim):
     vo = getattr(dim, "ViewObject", None)
     try:
@@ -117,10 +131,16 @@ def dimension_font(dim):
 
 
 def style_dimension(obj):
-    """New DrawingKit dimensions and balloons: the drawing font."""
+    """New DrawingKit dimensions and balloons: the drawing font (and the
+    sheet's thin line, if Line weights was used)."""
     vo = getattr(obj, "ViewObject", None)
     if vo is not None and hasattr(vo, "Font"):
         try:
             vo.Font = drawing_font()
         except Exception:
             pass
+    try:
+        from . import lineweights
+        lineweights.style(obj)
+    except Exception:
+        pass

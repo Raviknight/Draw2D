@@ -192,6 +192,9 @@ def printed_text(dim):
     except Exception:
         printed = ""
     printed = (printed or "").replace(" mm", "").replace("mm", "").strip()
+    # with the drawing on screen getText() carries the tolerance as well
+    # ('10.00 ± 0.10', '25.00 +0.10 -0.05'): the value only
+    printed = re.split(r"\s*±|\s+[+-]\s*\.?\d", printed, maxsplit=1)[0].strip()
     if not printed and value is not None:
         printed = _fmt(spec, value)
     if "w" in spec:
@@ -267,6 +270,16 @@ def _length_factor(dim):
     """Millimetres per printed unit for a dimension's value: 25.4 when
     FreeCAD shows lengths in inches, 1 for millimetres and angles."""
     if "Angle" in str(getattr(dim, "Type", "")):
+        return 1.0
+    # what TechDraw shows: the drawing's own unit system can differ from
+    # the preference ('0.63 in', '0.63"')
+    try:
+        shown = (dim.getText() or "").strip()
+    except Exception:
+        shown = ""
+    if re.search(r'(\bin|")\s*$', shown) or re.search(r'\d\s*(in\b|")', shown):
+        return 25.4
+    if re.search(r"\bmm\b", shown):
         return 1.0
     return 25.4 if values_unit() == "in" else 1.0
 

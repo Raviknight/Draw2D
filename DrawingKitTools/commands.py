@@ -181,6 +181,13 @@ _WATCHERS = set()
 
 
 def watch_redraw(page):
+    try:
+        from . import lineweights           # new views take the sheet's line weights
+        if lineweights.weights():
+            for v in core.part_views(page):
+                lineweights.style(v)
+    except Exception:
+        pass
     for w in list(_WATCHERS):
         if core.same(w.page, page):
             w.stop()
@@ -383,8 +390,10 @@ class FitToPage:
 
 
 def selected_detail():
+    """The selected view with a scale of its own (a detail, a section or a
+    view outside the projection group), if any."""
     for obj in Gui.Selection.getSelection():
-        if obj.isDerivedFrom("TechDraw::DrawViewDetail"):
+        if core.has_own_scale(obj):
             return obj
     return None
 
@@ -420,7 +429,8 @@ class ScaleStep:
                 "MenuText": "Scale up" if up else "Scale down",
                 "ToolTip": ("One standard scale %s (e.g. %s) for the whole page, laid "
                             "out again like Fit to page; detail views keep their zoom. "
-                            "With a detail view selected, only that detail changes."
+                            "With a detail, section or auxiliary view selected, only "
+                            "that view changes."
                             % (("bigger", "1:2 -> 1:1 -> 2:1") if up else
                                ("smaller", "2:1 -> 1:1 -> 1:2")))}
 
@@ -438,7 +448,7 @@ class ScaleStep:
 
 class SetScaleDialog(ui.Popover):
     def __init__(self, current, detail=False, parent=None):
-        super().__init__("Scale of the detail" if detail else "Page scale", parent)
+        super().__init__("Scale of the view" if detail else "Page scale", parent)
         self.value = ui.field(current, 70, "1:3", "Any scale: 1:3, 3:4, 2.5:1, 0.8 or 150%")
         self.add_row("Scale", self.value, stretch=True)
         self.fill = None
@@ -456,7 +466,7 @@ class SetScale:
                 "MenuText": "Set scale...",
                 "ToolTip": "Type any scale, standard or not (1:3, 3:4, 0.8, 150%), "
                            "or fill the sheet (title block says NTS). Applies to the "
-                           "page, or to the selected detail view."}
+                           "page, or to the selected detail, section or auxiliary view."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
@@ -3248,8 +3258,60 @@ class TextStyle:
         say("Text updated on %d item(s)" % len(objs))
 
 
+class LineWeights:
+    def GetResources(self):
+        return {"Pixmap": icon("DrawingKit_LineWeights.svg"),
+                "MenuText": "Line weights",
+                "ToolTip": "Thick and thin lines for the whole sheet (ISO 128 / ASME Y14.2): "
+                           "thick for visible outlines; thin for hidden and centre lines, "
+                           "dimensions, leaders and DrawingKit's symbols. New views and "
+                           "dimensions keep to it."}
+
+    def IsActive(self):
+        return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
+
+    def Activated(self):
+        from . import lineweights
+        page = target_page()
+        if page is None:
+            warn("Select the page (or a view on it) first.")
+            return
+        now = lineweights.weights() or lineweights.PRESETS[0][1:]
+        pop = ui.Popover("Line weights for %s" % page.Label)
+        items = [(i, name) for i, (name, _a, _b) in enumerate(lineweights.PRESETS)]
+        preset = ui.combo(items)
+        thick = ui.field("%g" % now[0], 46, "0.5", "Visible outlines (mm)")
+        thin = ui.field("%g" % now[1], 46, "0.25", "Hidden and centre lines, dimensions, "
+                                                   "leaders, symbols (mm)")
+
+        def pick(_i=None):
+            _name, a, b = lineweights.PRESETS[preset.currentData()]
+            thick.setText("%g" % a)
+            thin.setText("%g" % b)
+        preset.currentIndexChanged.connect(pick)
+        pop.add_row(preset, stretch=True)
+        pop.add_row("Thick", thick, "Thin", thin, "mm")
+        if not pop.run():
+            return
+        try:
+            a, b = float(thick.text().replace(",", ".")), float(thin.text().replace(",", "."))
+        except ValueError:
+            warn("Type the line widths in mm, e.g. 0.5 and 0.25.")
+            return
+        if not (0.05 <= b <= a <= 3.0):
+            warn("The thin line must be thinner than the thick one (0.05 to 3 mm).")
+            return
+        doc = page.Document
+        n = run_in_transaction(doc, "DrawingKit line weights",
+                               lambda: lineweights.apply_page(page, a, b))
+        doc.recompute()
+        say("Line weights %g / %g mm on %d item(s); new views and dimensions follow"
+            % (a, b, n))
+
+
 COMMANDS = [
     ("DrawingKit_NewSheet", NewSheet()),
+    ("DrawingKit_LineWeights", LineWeights()),
     ("DrawingKit_Standard", DrawingStandard()),
     ("DrawingKit_StandardViews", StandardViews()),
     ("DrawingKit_ProjectedView", ProjectedView()),
@@ -3311,7 +3373,7 @@ COMMAND_GROUPS = [
     ("DrawingKit annotation", ["DrawingKit_SurfaceFinish", "DrawingKit_Weld",
                                "DrawingKit_Datum", "DrawingKit_DatumTarget",
                                "DrawingKit_ToleranceFrame", "DrawingKit_Flag", "DrawingKit_Note",
-                               "DrawingKit_TextStyle"]),
+                               "DrawingKit_TextStyle", "DrawingKit_LineWeights"]),
     ("DrawingKit tables", ["DrawingKit_PartsList", "DrawingKit_Balloon",
                            "DrawingKit_HoleTable", "DrawingKit_FillTitleBlock",
                            "DrawingKit_EditTitleBlock", "DrawingKit_DesignTitleBlock",
@@ -3324,6 +3386,63 @@ class AlignmentObserver:
 
     def __init__(self):
         self.pending = set()
+
+    def slotDeletedObject(self, obj):
+        """A symbol deleted: its leader goes too (after the deletion is done)."""
+        try:
+            name = getattr(obj, "DrawingKitLeader", "") if "DrawingKitLeader" in obj.PropertiesList else ""
+        except Exception:
+            return
+        if not name:
+            return
+        docname, owner = obj.Document.Name, obj.Name
+
+        def drop():
+            try:
+                from . import annot
+                doc = App.getDocument(docname)
+                lead = doc.getObject(name) if doc else None
+                if lead is not None and getattr(lead, annot.LEADER_OF, "") == owner \
+                        and doc.getObject(owner) is None:
+                    annot._remove(lead)
+            except Exception:
+                pass
+        QtCore.QTimer.singleShot(0, drop)
+
+    def slotFinishRestoreDocument(self, doc):
+        """An opened drawing: leaders and hatches under the views (older
+        files get their symbols' leaders split off once)."""
+        name = doc.Name
+        tries = [0]
+
+        def ready(d):
+            # TechDraw works out the views' lines in the background after opening
+            for o in d.Objects:
+                if o.isDerivedFrom("TechDraw::DrawViewPart"):
+                    try:
+                        o.getVertexByIndex(0)
+                    except Exception:
+                        return False
+            return True
+
+        def tidy():
+            try:
+                from . import annot
+                d = App.getDocument(name)
+            except Exception:
+                return
+            try:
+                if d is None or not any(annot.is_annotation(o) or annot.LEADER_OF in o.PropertiesList
+                                        for o in d.Objects):
+                    return
+                if not ready(d) and tries[0] < 60:
+                    tries[0] += 1
+                    QtCore.QTimer.singleShot(500, tidy)
+                    return
+                annot.tidy_leaders(d)
+            except Exception as e:
+                App.Console.PrintWarning("DrawingKit leaders: %s\n" % e)
+        QtCore.QTimer.singleShot(500, tidy)
 
     def slotChangedObject(self, obj, prop):
         if prop not in ("X", "Y"):

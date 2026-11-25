@@ -74,7 +74,7 @@ def next_free_letter(used):
             return letter
 
 
-def used_letters(doc):
+def view_letters(doc):
     """Letters already used by section and detail views in the document."""
     used = []
     for obj in doc.Objects:
@@ -82,6 +82,18 @@ def used_letters(doc):
             used.append(obj.SectionSymbol)
         elif obj.isDerivedFrom("TechDraw::DrawViewDetail"):
             used.append(obj.Reference)
+    return used
+
+
+def used_letters(doc):
+    """Letters a new section or detail view must not take: other views'
+    and the datums' (a section A-A beside datum A reads as the datum)."""
+    used = view_letters(doc)
+    try:
+        from . import annot
+        used += annot.used_datum_letters(doc)
+    except Exception:
+        pass
     return used
 
 
@@ -1080,11 +1092,58 @@ def step_page_scale(page, step):
     return scale
 
 
+def has_own_scale(view):
+    """Views that can be drawn at a scale of their own: details, sections
+    and views outside the projection group (auxiliary, separate views).
+    A projection group's views share the group's scale."""
+    return (view.isDerivedFrom("TechDraw::DrawViewPart")
+            and not view.isDerivedFrom("TechDraw::DrawProjGroupItem"))
+
+
+def set_section_scale(view, scale):
+    """A section or separate view at its own scale; a section's caption
+    gains (or loses) the scale when it differs from the page's."""
+    from . import standards
+    page = None
+    try:
+        page = view.findParentPage()
+    except Exception:
+        pass
+    if view.isDerivedFrom("TechDraw::DrawViewSection"):
+        try:
+            letter = view.SectionSymbol
+            group = page_content(page)[0] if page is not None else None
+            page_scale = view_scale(group) if group is not None else float(page.Scale)
+            known = {standards.section_caption(letter, std) for std in ("ASME", "ISO")}
+            known |= {standards.section_caption(letter, std, scale_text(view_scale(view)))
+                      for std in ("ASME", "ISO")}
+            if view.Caption in known or not view.Caption:
+                own = abs(scale - page_scale) > 1e-9
+                view.Caption = standards.section_caption(
+                    letter, None, scale_text(scale) if own else None)
+        except Exception:
+            pass
+    anchors = dimension_anchors(page, [view]) if page is not None else {}
+    view.ScaleType = "Custom"
+    view.Scale = scale
+    view.touch()
+    if page is not None:
+        follow_scale(page, anchors)
+
+
+def _set_own_scale(view, scale):
+    if view.isDerivedFrom("TechDraw::DrawViewDetail"):
+        set_detail_scale(view, scale)
+    else:
+        set_section_scale(view, scale)
+
+
 def step_view_scale(view, step):
     """One standard scale up or down for a view that has its own scale (a
-    detail view). Returns the new scale; ValueError if it can't."""
-    if not view.isDerivedFrom("TechDraw::DrawViewDetail"):
-        raise ValueError("%s follows the page scale: with no detail view "
+    detail, a section, a separate view). Returns the new scale; ValueError
+    if it can't."""
+    if not has_own_scale(view):
+        raise ValueError("%s follows the page scale: with no detail or section view "
                          "selected, Scale up / down changes the whole page" % view.Label)
     old = view_scale(view)
     target = next_standard_scale(old, step)
@@ -1092,10 +1151,11 @@ def step_view_scale(view, step):
         raise ValueError("%s is already at %s, the %s standard scale"
                          % (view.Label, scale_text(old), "largest" if step > 0 else "smallest"))
     base = getattr(view, "BaseView", None)
-    if base is not None and target <= view_scale(base) + 1e-12:
+    if view.isDerivedFrom("TechDraw::DrawViewDetail") and base is not None \
+            and target <= view_scale(base) + 1e-12:
         raise ValueError("%s is at %s; a detail must be drawn larger than its "
                          "view (%s)" % (view.Label, scale_text(old), scale_text(view_scale(base))))
-    set_detail_scale(view, target)
+    _set_own_scale(view, target)
     _refresh_after_detail(view)
     return target
 
@@ -1268,15 +1328,17 @@ def fill_page(page):
 
 
 def set_view_scale(view, value):
-    """Any scale for a detail view (it must stay larger than its view)."""
-    if not view.isDerivedFrom("TechDraw::DrawViewDetail"):
-        raise ValueError("%s follows the page scale: select a detail view, or "
-                         "nothing to scale the page" % view.Label)
+    """Any scale for a detail view (it must stay larger than its view), a
+    section or a separate view."""
+    if not has_own_scale(view):
+        raise ValueError("%s follows the page scale: select a detail or section "
+                         "view, or nothing to scale the page" % view.Label)
     base = getattr(view, "BaseView", None)
-    if base is not None and value <= view_scale(base) + 1e-12:
+    if view.isDerivedFrom("TechDraw::DrawViewDetail") and base is not None \
+            and value <= view_scale(base) + 1e-12:
         raise ValueError("A detail must be drawn larger than its view (%s)"
                          % scale_text(view_scale(base)))
-    set_detail_scale(view, value)
+    _set_own_scale(view, value)
     _refresh_after_detail(view)
     return value
 
@@ -1487,12 +1549,18 @@ def apply_plan(page, group, extras, scale, positions):
 
 
 def _apply_plan(page, group, extras, scale, positions):
+    old = float(page.Scale) or 1.0
     page.Scale = scale
     set_title_block_scale(page, scale)
     for view in [group] + list(extras):
-        if view.ScaleType != "Page":
-            view.ScaleType = "Page"
-        view.Scale = scale
+        if view is not group and view.ScaleType == "Custom":
+            # a section or separate view given its own scale keeps its zoom
+            # over the page, as a detail does
+            set_section_scale(view, float(view.Scale) / old * scale)
+        else:
+            if view.ScaleType != "Page":
+                view.ScaleType = "Page"
+            view.Scale = scale
         if view.Name in positions:
             view.X, view.Y = positions[view.Name]
     if is_aligned(group):
@@ -2648,6 +2716,7 @@ def center_features(view, shape=None, with_radius=False):
     over = OVERSHOOT / s
     marks, lines, radii = {}, {}, {}
     cover = {}          # (line key, radius) -> angle covered round that axis
+    endon = {}          # (centre key, radius) -> angle of the faces seen end-on
     for face in _round_faces(shape):
         axis = App.Vector(face.Surface.Axis)
         axis.normalize()
@@ -2656,8 +2725,12 @@ def center_features(view, shape=None, with_radius=False):
         if abs(abs(axis.dot(d)) - 1.0) < 1e-6:
             lx, ly = model_to_local(view, centre, shape)
             key = (round(lx, 4), round(ly, 4))
-            marks[key] = max(marks.get(key, 0.0), radius + over)
-            radii[key] = min(radii.get(key, radius), radius)  # innermost (the hole)
+            try:
+                u0, u1 = face.ParameterRange[:2]
+            except Exception:
+                u0, u1 = 0.0, 2 * math.pi
+            ek = (key, round(radius, 4))
+            endon[ek] = endon.get(ek, 0.0) + (u1 - u0)
         elif abs(axis.dot(d)) < 1e-6:
             # extent of the face along its axis
             ts = [(App.Vector(v.Point) - centre).dot(axis) for v in face.Vertexes]
@@ -2694,6 +2767,13 @@ def center_features(view, shape=None, with_radius=False):
     # shaft or boss), not for part-round ends such as a keyway's seen side-on
     full = {ck[0] for ck, ang in cover.items() if ang >= 2 * math.pi - 1e-3}
     lines = {k: v for k, v in lines.items() if k in full}
+    # a centre mark for a hole or boss (all, or nearly all, the way round: a
+    # keyway may break into it) and a slot's half-round end; not for the
+    # lobes of a hexalobe or other profile (part round, more than half)
+    for (key, radius), ang in endon.items():
+        if ang >= 2 * math.pi * 5.0 / 6.0 - 1e-3 or abs(ang - math.pi) < 0.02:
+            marks[key] = max(marks.get(key, 0.0), radius + over)
+            radii[key] = min(radii.get(key, radius), radius)  # innermost (the hole)
     if with_radius:
         mark_list = [(k[0], k[1], half, radii[k]) for k, half in marks.items()]
     else:
@@ -2785,15 +2865,17 @@ def add_center_marks(view):
                  if any(abs(m[0] - cx) < 1e-3 and abs(m[1] - cy) < 1e-3 for cx, cy in visible)]
     segs, circles = plan_center_marks(marks, OVERSHOOT / view_scale(view))
     segs.extend(lines)
+    from . import lineweights
+    weight = lineweights.centre_line()     # the sheet's thin line
     tags = []
     for (x0, y0), (x1, y1) in segs:
         tag = view.makeCosmeticLine(App.Vector(x0, y0, 0), App.Vector(x1, y1, 0),
-                                    CENTER_LINE_STYLE, CENTER_LINE_WEIGHT)
+                                    CENTER_LINE_STYLE, weight)
         if tag:
             tags.append(tag)
     for cx, cy, R in circles:
         tag = view.makeCosmeticCircle(App.Vector(cx, cy, 0), R,
-                                      CENTER_LINE_STYLE, CENTER_LINE_WEIGHT)
+                                      CENTER_LINE_STYLE, weight)
         if tag:
             tags.append(tag)
     if MARKS_PROP not in view.PropertiesList:

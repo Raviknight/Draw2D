@@ -64,9 +64,15 @@ def explicit():
 # ---------------------------------------------------------------------------
 # What follows the standard
 # ---------------------------------------------------------------------------
-def section_caption(letter, std=None):
+def section_caption(letter, std=None, scale_txt=None):
+    """'SECTION A-A' (ASME) or 'A-A' (ISO); with ``scale_txt`` (a section
+    drawn at its own scale) 'SECTION A-A SCALE 2 : 1' or 'A-A (2 : 1)'."""
     std = std or current()
-    return ("SECTION %s-%s" if std == "ASME" else "%s-%s") % (letter, letter)
+    cap = ("SECTION %s-%s" if std == "ASME" else "%s-%s") % (letter, letter)
+    if scale_txt:
+        scale_txt = scale_txt.replace(":", " : ") if " : " not in scale_txt else scale_txt
+        cap += (" SCALE %s" if std == "ASME" else " (%s)") % scale_txt
+    return cap
 
 
 def detail_caption(letter, scale_txt, std=None):

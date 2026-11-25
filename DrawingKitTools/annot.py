@@ -144,6 +144,7 @@ def dimension_ends(dim):
         if u.Length < 1e-9:
             raise ValueError("Cannot place a datum on this dimension")
         u.normalize()
+        a, b = _referencing_line(dim, a, b, lab, s, pts)
         return (cx + a.x * s, cy + a.y * s), (cx + b.x * s, cy + b.y * s), (u.x, u.y)
     if t in ("Diameter", "Radius") and radius:
         c = pts[0]
@@ -168,9 +169,43 @@ def dimension_ends(dim):
             n = App.Vector(-d.y, d.x, 0)
             off = (lab - p0).dot(n)
             a, b = p0 + n * off, p1 + n * off
+        a, b = _referencing_line(dim, a, b, lab, s, pts)
     u = b - a
     u.normalize()
     return (cx + a.x * s, cy + a.y * s), (cx + b.x * s, cy + b.y * s), (u.x, u.y)
+
+
+def _referencing_line(dim, a, b, lab, s, pts):
+    """Where TechDraw's 'Referencing' styles really draw a straight
+    dimension line (unscaled local a, b), given the one through the label.
+    The text stands upright on a short reference line: a horizontal
+    dimension line runs just under the text; any other line meets the end
+    of the reference line nearer the measured feature."""
+    vo = getattr(dim, "ViewObject", None)
+    if vo is None or "Referencing" not in str(getattr(vo, "StandardAndStyle", "")):
+        return a, b
+    from . import clearance, fonts, textlayer
+    fs = clearance._dim_font(dim)
+    u = b - a
+    if u.Length < 1e-9:
+        return a, b
+    u.normalize()
+    if abs(u.y) < 1e-6:
+        # under the text (TechDraw's text is about 1.37 x its cap height):
+        # half its line height and a small gap
+        dy = fs * 0.86 / s
+        return App.Vector(a.x, lab.y - dy, 0), App.Vector(b.x, lab.y - dy, 0)
+    try:
+        width = fonts.dimension_text_width(textlayer.dimension_text(dim), fs,
+                                           fonts.dimension_font(dim))
+    except Exception:
+        return a, b
+    half = (width / 2.0 + fs * 0.33) / s
+    if abs(u.x) < 1e-6:
+        mid = sum(p.x for p in pts) / len(pts)
+        x = lab.x + half if abs(lab.x + half - mid) < abs(lab.x - half - mid) else lab.x - half
+        return App.Vector(x, a.y, 0), App.Vector(x, b.y, 0)
+    return a, b
 
 
 def anchor_page(sym):
@@ -205,41 +240,62 @@ def anchor_page(sym):
 class Sketch:
     def __init__(self, k=1.0, font=None):
         self.items = []
-        self.xs, self.ys = [], []
+        self.extents = []                # each item's points (for its bounds)
         self.k = k                       # text size / 3.5 mm
         self.font = font or default_font()
         self.body = None                 # the part that must not clash (no leader)
 
-    def _p(self, x, y):
-        self.xs.append(x)
-        self.ys.append(y)
+    @property
+    def xs(self):
+        return [p[0] for pts in self.extents for p in pts]
+
+    @property
+    def ys(self):
+        return [p[1] for pts in self.extents for p in pts]
+
+    def _add(self, item, pts):
+        self.items.append(item)
+        self.extents.append([tuple(p) for p in pts])
 
     def line(self, a, b, width=STROKE, dash=False):
-        self._p(*a)
-        self._p(*b)
-        self.items.append(("line", a, b, width, dash))
+        self._add(("line", a, b, width, dash), [a, b])
 
     def poly(self, pts, fill=False):
-        for p in pts:
-            self._p(*p)
-        self.items.append(("poly", pts, fill))
+        self._add(("poly", pts, fill), pts)
 
     def rect(self, x0, y0, x1, y1, width=STROKE):
-        self._p(x0, y0)
-        self._p(x1, y1)
-        self.items.append(("rect", x0, y0, x1, y1, width))
+        self._add(("rect", x0, y0, x1, y1, width), [(x0, y0), (x1, y1)])
 
     def circle(self, c, r, width=STROKE):
-        self._p(c[0] - r, c[1] - r)
-        self._p(c[0] + r, c[1] + r)
-        self.items.append(("circle", c, r, width))
+        self._add(("circle", c, r, width), [(c[0] - r, c[1] - r), (c[0] + r, c[1] + r)])
 
     def raw(self, x0, ytop, w, h, fragment):
         """SVG fragment drawn in its own y-down box w x h, top-left at
         page point (x0, ytop)."""
-        self._p(x0, ytop)
-        self._p(x0 + w, ytop - h)
-        self.items.append(("raw", x0, ytop, fragment))
+        self._add(("raw", x0, ytop, fragment), [(x0, ytop), (x0 + w, ytop - h)])
+
+    def split_leader(self, margin=0.8):
+        """Take the leader (every line, arrow or circle reaching outside the
+        body) out into a Sketch of its own, so the body's box on the sheet
+        is just the body: a symbol's box catches the mouse, and a leader
+        across the part would keep the part and its dimensions from being
+        clicked. None if there is no body or nothing outside it."""
+        if self.body is None or not self.items:
+            return None
+        x0, y0, x1, y1 = self.body
+        x0, y0, x1, y1 = x0 - margin, y0 - margin, x1 + margin, y1 + margin
+        keep, lead = [], []
+        for it, pts in zip(self.items, self.extents):
+            inside = all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in pts)
+            (keep if inside or it[0] in ("text", "raw") else lead).append((it, pts))
+        if not lead or not keep:
+            return None
+        other = Sketch(self.k, self.font)
+        for it, pts in lead:
+            other._add(it, pts)
+        self.items = [it for it, _ in keep]
+        self.extents = [pts for _, pts in keep]
+        return other
 
     def text(self, x, y, txt, size=gdt.FONT, anchor="middle", editable=None, rot=0):
         """``size`` is the size at 3.5 mm lettering; it is scaled by k.
@@ -250,12 +306,10 @@ class Sketch:
         x1 = x + w
         if rot:
             # rotated about (x, y): along the text is now up the page
-            self._p(x - size * 0.7, y + (x0 - x))
-            self._p(x + size * 0.4, y + (x1 - x))
+            pts = [(x - size * 0.7, y + (x0 - x)), (x + size * 0.4, y + (x1 - x))]
         else:
-            self._p(x0, y - size * 0.4)
-            self._p(x1, y + size * 0.7)
-        self.items.append(("text", x, y, txt, size, anchor, editable, rot))
+            pts = [(x0, y - size * 0.4), (x1, y + size * 0.7)]
+        self._add(("text", x, y, txt, size, anchor, editable, rot), pts)
 
     def svg(self):
         m = 1.0
@@ -266,31 +320,33 @@ class Sketch:
         Y = lambda y: y1 - y
         out = ['<svg %s width="%.3fmm" height="%.3fmm" viewBox="0 0 %.3f %.3f">' % (gdt.NS, W, Hh, W, Hh),
                '<g style="fill:none;stroke:#000000;stroke-linecap:round;stroke-linejoin:round">']
+        from . import lineweights
+        f = lineweights.symbol_factor()      # the sheet's thin line (Line weights tool)
         texts = []
         for it in self.items:
             k = it[0]
             if k == "line":
                 _, a, b, w, dash = it
                 out.append('<path style="stroke-width:%g%s" d="M %.3f,%.3f L %.3f,%.3f"/>'
-                           % (w, ";stroke-dasharray:3,1.5" if dash else "",
+                           % (w * f, ";stroke-dasharray:3,1.5" if dash else "",
                               X(a[0]), Y(a[1]), X(b[0]), Y(b[1])))
             elif k == "poly":
                 _, pts, fill = it
                 d = " L ".join("%.3f,%.3f" % (X(p[0]), Y(p[1])) for p in pts)
                 out.append('<path style="stroke-width:%g%s" d="M %s Z"/>'
-                           % (STROKE, ";fill:#000000" if fill else "", d))
+                           % (STROKE * f, ";fill:#000000" if fill else "", d))
             elif k == "rect":
                 _, a0, b0, a1, b1, w = it
                 out.append('<rect style="stroke-width:%g" x="%.3f" y="%.3f" width="%.3f" height="%.3f"/>'
-                           % (w, X(min(a0, a1)), Y(max(b0, b1)), abs(a1 - a0), abs(b1 - b0)))
+                           % (w * f, X(min(a0, a1)), Y(max(b0, b1)), abs(a1 - a0), abs(b1 - b0)))
             elif k == "raw":
                 _, rx, rtop, frag = it
                 out.append('<g style="stroke-width:%g" transform="translate(%.3f,%.3f)">%s</g>'
-                           % (STROKE, X(rx), Y(rtop), frag))
+                           % (STROKE * f, X(rx), Y(rtop), frag))
             elif k == "circle":
                 _, c, r, w = it
                 out.append('<circle style="stroke-width:%g" cx="%.3f" cy="%.3f" r="%.3f"/>'
-                           % (w, X(c[0]), Y(c[1]), r))
+                           % (w * f, X(c[0]), Y(c[1]), r))
             else:
                 _, x, y, txt, size, anchor, ed, rot = it
                 t = gdt._text(X(x), Y(y) + size * 0.36, txt, ed, anchor, size, self.font)
@@ -474,7 +530,7 @@ def dim_text_side(dim, label_x):
     except Exception:
         txt = "⌀10"
     from . import fonts
-    w = len(txt) * fs * (fonts.width_factor(fonts.dimension_font(dim)) + 0.03)
+    w = fonts.dimension_text_width(txt, fs, fonts.dimension_font(dim))
     # the frame's edge just past the shoulder end where the leader leaves,
     # so the leader runs clear of it
     return ("left" if p1[0] < label_x else "right"), w / 2.0 - 1.5
@@ -840,8 +896,12 @@ def render(sym):
             draw_target(sk, (ax, ay), box, values.get("target", p.get("label", "A1")),
                         values.get("size", p.get("size", "")))
             fields = ["target"] + (["size"] if values.get("size", p.get("size")) else [])
+        lead = sk.split_leader()
         svg, centre = sk.svg()
         _bodies[key] = sk.body
+        _set_leader(sym, lead)
+        if kind == "hatch":
+            under_everything(sym)       # Edit hatch picks by point; the view stays clickable
         # the SVG lists editable texts in drawing order; remember that order
         order = []
         import re
@@ -859,6 +919,109 @@ def render(sym):
     finally:
         _busy.discard(key)
     return sym
+
+
+LEADER = "DrawingKitLeader"          # on a symbol: the name of its leader object
+LEADER_OF = "DrawingKitLeaderOf"     # on a leader: the symbol it belongs to
+UNDER = -1                           # stack order below views and dimensions (0 and up)
+
+
+def under_everything(obj):
+    """Put a drawing under the views and dimensions (still above the
+    template), so it never catches a click meant for them."""
+    vo = getattr(obj, "ViewObject", None)
+    if vo is not None and hasattr(vo, "StackOrder"):
+        try:
+            if vo.StackOrder != UNDER:
+                vo.StackOrder = UNDER
+        except Exception:
+            pass
+
+
+def leader_of(sym):
+    name = getattr(sym, LEADER, "") if LEADER in sym.PropertiesList else ""
+    obj = sym.Document.getObject(name) if name else None
+    if obj is not None and getattr(obj, LEADER_OF, "") == sym.Name:
+        return obj
+    return None
+
+
+def _remove(obj):
+    try:
+        for page in [o for o in obj.InList if o.isDerivedFrom("TechDraw::DrawPage")]:
+            page.removeView(obj)
+    except Exception:
+        pass
+    try:
+        obj.Document.removeObject(obj.Name)
+    except Exception:
+        pass
+
+
+def _set_leader(sym, lead):
+    """Draw (or remove) the symbol's leader as its own locked drawing under
+    everything else."""
+    obj = leader_of(sym)
+    if LEADER not in sym.PropertiesList:
+        sym.addProperty("App::PropertyString", LEADER, "DrawingKit",
+                        "The drawing of this symbol's leader")
+        sym.setEditorMode(LEADER, 2)
+    if lead is None:
+        if obj is not None:
+            _remove(obj)
+        if getattr(sym, LEADER, ""):
+            setattr(sym, LEADER, "")
+        return
+    if obj is None:
+        page = None
+        try:
+            page = sym.findParentPage()
+        except Exception:
+            pass
+        if page is None:
+            pages = [o for o in sym.InList if o.isDerivedFrom("TechDraw::DrawPage")]
+            page = pages[0] if pages else None
+        if page is None:
+            return
+        doc = sym.Document
+        obj = doc.addObject("TechDraw::DrawViewSymbol", "Leader")
+        page.addView(obj)
+        obj.ScaleType = "Custom"
+        obj.Scale = 1.0
+        obj.addProperty("App::PropertyString", LEADER_OF, "DrawingKit", "Symbol this leader belongs to")
+        obj.setEditorMode(LEADER_OF, 2)
+        setattr(obj, LEADER_OF, sym.Name)
+        if "LockPosition" in obj.PropertiesList:
+            obj.LockPosition = True          # moved with its symbol, never on its own
+        setattr(sym, LEADER, obj.Name)
+    label = "%s (leader)" % sym.Label
+    if obj.Label != label:
+        obj.Label = label
+    svg, centre = lead.svg()
+    obj.Symbol = svg
+    obj.X, obj.Y = centre
+    under_everything(obj)
+
+
+def tidy_leaders(doc):
+    """Leaders whose symbol is gone are removed; symbols drawn before
+    leaders were split off are drawn again (once); every leader and hatch
+    goes under the views. For documents opened in the GUI."""
+    for o in list(doc.Objects):
+        try:
+            if LEADER_OF in o.PropertiesList:
+                owner = doc.getObject(getattr(o, LEADER_OF, ""))
+                if owner is None or leader_of(owner) is not o:
+                    _remove(o)
+                else:
+                    under_everything(o)
+            elif is_annotation(o):
+                if getattr(o, KIND, "") == "hatch":
+                    under_everything(o)
+                elif LEADER not in o.PropertiesList:
+                    render(o)
+        except Exception as e:
+            App.Console.PrintWarning("DrawingKit leaders: %s: %s\n" % (o.Name, e))
 
 
 def _new(page, kind, label, params, anchor_kind, link, anchor, offset, avoid=None):
@@ -941,6 +1104,16 @@ def keep_clear(sym, page, explicit=False, views=True):
     if not box:
         return None
     obs = clearance.obstacles(page, exclude=[sym], views=views and not explicit)
+    if explicit and views:
+        # a spot the user clicked may be inside a view's box (they meant it);
+        # the nudge off text must not carry it into a view it was clear of
+        for v in core.part_views(page):
+            try:
+                vb = core.view_box(v)
+            except Exception:
+                continue
+            if not clearance._hits(box, [vb], gap=0.0):
+                obs.append(vb)
     (ax, ay), _ = anchor_page(sym)
     area = clearance.drawing_area(page)
     shift = clearance.clear_spot(box, (ax, ay), obs, area, reach=12.0 if explicit else 40.0)
@@ -1214,7 +1387,9 @@ def used_datum_letters(doc):
 
 
 def next_datum_letter(doc):
-    return core.next_free_letter(used_datum_letters(doc))
+    """Next datum letter, skipping those taken by datums and by section and
+    detail views."""
+    return core.next_free_letter(used_datum_letters(doc) + core.view_letters(doc))
 
 
 def add_note(page, box, lines, anchor=None, size=None, font=None):

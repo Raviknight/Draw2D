@@ -260,4 +260,4 @@ def used_datum_letters(doc):
 
 
 def next_datum_letter(doc):
-    return core.next_free_letter(used_datum_letters(doc))
+    return core.next_free_letter(used_datum_letters(doc) + core.view_letters(doc))
