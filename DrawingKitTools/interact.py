@@ -313,9 +313,19 @@ class DragAnywhere(QtCore.QObject):
         return isinstance(item, QtWidgets.QGraphicsPathItem)
 
     def eventFilter(self, obj, event):
+        t = event.type()
+        if t == QtCore.QEvent.Paint:
+            # fit symbol frames before the page is painted, so TechDraw's wide
+            # hover frame with the name under it never shows, not even once
+            boxes = getattr(self, "boxes", None)
+            if boxes is not None:
+                try:
+                    boxes.flush()
+                except Exception:
+                    pass
+            return False
         if PagePicker.active is not None:
             return False
-        t = event.type()
         try:
             if t == QtCore.QEvent.MouseButtonPress:
                 self.press, self.dragging = None, False
@@ -455,33 +465,67 @@ class ClickBoxes:
     # TechDraw deletes and makes its items behind Python's back: none is kept
     # between passes (a kept one may be gone), they are looked up each time.
 
+    # The page's viewport filter calls flush() just before each paint, for
+    # the areas that changed since the last one (a frame drawn wide on hover
+    # is fitted before it is ever seen); the timer is a full pass after a
+    # burst of changes, in case a paint came by another way.
+
     def __init__(self, page, scene):
         self.page, self.scene = page, scene
+        self.pending = None                   # changed scene area not yet fitted
+        self.busy = False
         self.timer = QtCore.QTimer()
         self.timer.setSingleShot(True)
         self.timer.setInterval(30)            # one pass for a burst of changes
         self.timer.timeout.connect(self.trim_all)
         scene.changed.connect(self.on_changed)
 
-    def on_changed(self, *_):
+    def on_changed(self, rects=None):
+        if self.busy:
+            return
+        try:
+            for r in rects or []:
+                self.pending = QtCore.QRectF(r) if self.pending is None else self.pending.united(r)
+            if not rects:
+                self.pending = self.scene.sceneRect()
+        except Exception:
+            self.pending = self.scene.sceneRect()
         if not self.timer.isActive():
             self.timer.start()
 
-    def trim_all(self):
+    def _names(self):
         from . import annot
         try:
-            names = {o.Name for o in self.page.Views
-                     if annot.KIND in o.PropertiesList or annot.LEADER_OF in o.PropertiesList}
+            return {o.Name for o in self.page.Views
+                    if annot.KIND in o.PropertiesList or annot.LEADER_OF in o.PropertiesList}
         except Exception:
-            return
+            return set()
+
+    def _trim(self, items):
+        names = self._names()
         if not names:
             return
-        for it in self.scene.items():
-            try:
-                if it.data(0) == "QGIV" and it.data(1) in names and it.parentItem() is None:
-                    trim_click_box(it)
-            except Exception:
-                continue
+        self.busy = True
+        try:
+            for it in items:
+                try:
+                    if it.data(0) == "QGIV" and it.data(1) in names and it.parentItem() is None:
+                        trim_click_box(it)
+                except Exception:
+                    continue
+        finally:
+            self.busy = False
+
+    def flush(self):
+        """Fit the frames in the area changed since the last paint."""
+        area, self.pending = self.pending, None
+        if area is None or area.isEmpty():
+            return
+        self._trim(self.scene.items(area.adjusted(-1, -1, 1, 1)))
+
+    def trim_all(self):
+        self.pending = None
+        self._trim(self.scene.items())
 
 
 def install_drag_everywhere():
