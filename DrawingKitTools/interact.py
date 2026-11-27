@@ -313,18 +313,27 @@ class DragAnywhere(QtCore.QObject):
         return isinstance(item, QtWidgets.QGraphicsPathItem)
 
     def _own_table_at(self, pos):
-        """The table of your own under viewport point pos, if any."""
-        from . import tables
-        for item in self.gview.items(pos):
-            it = item
-            while it is not None and it.data(0) != "QGIV":
-                it = it.parentItem()
-            if it is None:
+        """The table of your own under viewport point pos, if any. Worked
+        out from the tables' places on the page, not from the scene's items:
+        walking TechDraw's items from Python (items(), parentItem()) can
+        leave PySide owning them, and they were deleted with the wrappers
+        (a double-click on the revision table took it and the sheet away)."""
+        from . import annot, tables
+        x, y = to_page(self.gview.mapToScene(pos))
+        best = None
+        for obj in self.page.Views:
+            try:
+                if not tables.is_own_table(obj):
+                    continue
+                w, h = tables.table_size(annot._params(obj))
+                cx, cy = float(obj.X), float(obj.Y)
+                if abs(x - cx) <= w / 2.0 + 1.0 and abs(y - cy) <= h / 2.0 + 1.0:
+                    area = w * h
+                    if best is None or area < best[0]:
+                        best = (area, obj)
+            except Exception:
                 continue
-            obj = self.page.Document.getObject(str(it.data(1) or ""))
-            if obj is not None and tables.is_own_table(obj):
-                return obj
-        return None
+        return best[1] if best else None
 
     def eventFilter(self, obj, event):
         t = event.type()
