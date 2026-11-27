@@ -123,22 +123,81 @@ def find(view, want):
     return "Edge%d" % min(near)[1] if near else None
 
 
+def _dist(p, q):
+    return ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5
+
+
+def context(view, pt):
+    """What meets at point pt of view: the edges ending there and the circles
+    centred on it, as ("end" | "centre", description). Lets a point be found
+    again after its feature moves."""
+    out = []
+    for _, s in _all(view, "Edge"):
+        try:
+            d = describe(s)
+        except Exception:
+            continue
+        if len(d[1]) == 2 and any(_close(p, pt) for p in d[1]):
+            out.append(("end", d))
+        elif d[0] == "C" and _close(d[2], pt):
+            out.append(("centre", d))
+        if len(out) >= 8:
+            break
+    return out
+
+
+def _moved_vertex(view, want):
+    """The point that is most likely want after its feature moved: where the
+    edges that met there meet again (or the centre of its circle)."""
+    ctx = want[2] if len(want) > 2 else ()
+    lists = []
+    for role, d in ctx:
+        s = find(view, d) or moved_to(view, d)
+        if not s:
+            continue
+        g = describe(_shape(view, s))
+        if role == "centre":
+            pts = [g[2]] if g[0] == "C" else []
+        else:
+            pts = list(g[1]) if len(g[1]) == 2 else []
+        if pts:
+            lists.append(pts)
+    if not lists:
+        return None
+    # points that two or more of its edges share; else any of their ends
+    shared = [p for i, pts in enumerate(lists) for p in pts
+              if any(any(_close(p, q) for q in other) for other in lists[i + 1:])]
+    cands = shared or [p for pts in lists for p in pts]
+    p = min(cands, key=lambda c: _dist(c, want[1]))
+    return find(view, ("V", p))
+
+
 def moved_to(view, want):
-    """The edge that is most likely want after its feature changed size: a
+    """The edge that is most likely want after its feature changed: a
     straight edge parallel to it covering most of the same stretch (and
-    covered by it), the nearest one; or a circle round the same centre, the
-    nearest in size.  None if there is none."""
+    covered by it), the nearest one; a circle round the same centre, the
+    nearest in size, else the nearest circle of the same size (a hole that
+    moved); for a point, see _moved_vertex.  None if there is none."""
+    if want[0] == "V":
+        return _moved_vertex(view, want)
     if want[0] == "C":
-        best = None
+        best, moved = None, None
         for i, s in _all(view, "Edge"):
             try:
                 got = describe(s)
             except Exception:
                 continue
-            if got[0] == "C" and _close(want[2], got[2]):
+            if got[0] != "C":
+                continue
+            if _close(want[2], got[2]):
                 d = abs(got[3] - want[3])
                 if best is None or d < best[0]:
                     best = (d, i)
+            elif abs(got[3] - want[3]) < TOL and len(got[1]) == len(want[1]):
+                d = _dist(got[2], want[2])
+                if d <= 10.0 * max(want[3], TOL) and (moved is None or d < moved[0]):
+                    moved = (d, i)
+        best = best or moved
         return "Edge%d" % best[1] if best else None
     if want[0] != "L":
         return None
@@ -176,6 +235,8 @@ def _shifted(want, dx, dy):
         return want
     mv = lambda p: (p[0] + dx, p[1] + dy)              # noqa: E731
     if want[0] == "V":
+        if len(want) > 2:
+            return ("V", mv(want[1]), [(r, _shifted(d, dx, dy)) for r, d in want[2]])
         return ("V", mv(want[1]))
     if want[0] == "C":
         return ("C", [mv(p) for p in want[1]], mv(want[2]), want[3])
@@ -316,7 +377,10 @@ def remember(dim):
             if cur is None:
                 return              # points past the view's last edge: not right
             try:
-                want.append(describe(cur))
+                d = describe(cur)
+                if d[0] == "V":
+                    d = ("V", d[1], context(v, d[1]))
+                want.append(d)
             except Exception:
                 return
     _KNOWN[_key(dim)] = {"want": want, "anchor": anchors}

@@ -1526,6 +1526,81 @@ class TestDimensionRefs(DocTest):
         want = ("L", [(-1000.0, 9000.0), (-990.0, 9000.0)], 10.0)
         self.assertIsNone(dimrefs.moved_to(self.v, want))
 
+    def _vertices(self, view):
+        from DrawingKitTools import dimrefs
+        return [(i, (s.Point.x, s.Point.y)) for i, s in dimrefs._all(view, "Vertex")]
+
+    def test_corner_point_follows_a_resized_feature(self):
+        from DrawingKitTools import dimrefs
+        pts = self._vertices(self.v)
+        xmin = min(p[0] for _, p in pts)
+        left = sorted((p[1], i) for i, p in pts if abs(p[0] - xmin) < 1e-6)
+        lo, hi = "Vertex%d" % left[0][1], "Vertex%d" % left[-1][1]
+        self.dim.References2D = [(self.v, [lo, hi])]
+        self.doc.recompute()
+        self.assertAlmostEqual(self.dim.getRawValue(), 50.0, places=6)
+        dimrefs.remember(self.dim)
+        self.assertGreater(len(dimrefs._KNOWN[dimrefs._key(self.dim)]["want"][1][2]), 1)
+        self.box.Height = 60                    # the top corner moves up
+        self.doc.recompute()
+        self.sabotage([lo, lo])
+        self.assertEqual(dimrefs.repair(self.doc), [self.dim.Label])
+        self.assertAlmostEqual(self.dim.getRawValue(), 60.0, places=6)
+
+    def test_hole_centre_point_follows_the_hole(self):
+        from DrawingKitTools import dimrefs
+        import Part
+
+        def plate(length, hole_x):
+            return Part.makeBox(length, 60, 10).cut(
+                Part.makeCylinder(4, 10, App.Vector(hole_x, 30, 0)))
+        part = self.doc.addObject("Part::Feature", "Plate")
+        part.Shape = plate(100, 30)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = [v for v in g.Views if "Top" in v.Type][0]
+        circle = [d for _, s in dimrefs._all(top, "Edge")
+                  for d in [dimrefs.describe(s)] if d[0] == "C"][0]
+        centre = dimrefs.find(top, ("V", circle[2]))
+        self.assertIsNotNone(centre)
+        pts = self._vertices(top)
+        corner = "Vertex%d" % min((p[0], p[1], i) for i, p in pts)[2]
+        dim = self.doc.addObject("TechDraw::DrawViewDimension", "Dimension")
+        dim.Type = "DistanceX"
+        dim.References2D = [(top, [corner, centre])]
+        page.addView(dim)
+        self.doc.recompute()
+        self.assertAlmostEqual(dim.getRawValue(), 30.0, places=6)
+        dimrefs.remember(dim)
+        part.Shape = plate(140, 45)             # hole moved; the part grew too
+        self.doc.recompute()
+        dimrefs.BUSY[0] = True
+        try:
+            dim.References2D = [(top, [corner, corner])]   # as if renumbered
+        finally:
+            dimrefs.BUSY[0] = False
+        self.assertIn(dim.Label, dimrefs.repair(self.doc))
+        self.assertAlmostEqual(dim.getRawValue(), 45.0, places=6)
+
+    def test_moved_hole_found_by_its_size(self):
+        from DrawingKitTools import dimrefs
+        import Part
+        part = self.doc.addObject("Part::Feature", "Plate")
+        part.Shape = Part.makeBox(100, 60, 10).cut(
+            Part.makeCylinder(4, 10, App.Vector(40, 30, 0)))
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = [v for v in g.Views if "Top" in v.Type][0]
+        circle = [d for _, s in dimrefs._all(top, "Edge")
+                  for d in [dimrefs.describe(s)] if d[0] == "C"][0]
+        (cx, cy) = circle[2]
+        near = ("C", circle[1], (cx + 3.0, cy), circle[3])   # 3 mm off: taken
+        far = ("C", circle[1], (cx + 300.0, cy), circle[3])  # far off: not
+        self.assertIsNotNone(dimrefs.moved_to(top, near))
+        self.assertIsNone(dimrefs.moved_to(top, far))
+
 
 class TestAuxiliaryView(DocTest):
     def test_looks_square_on_at_the_slanted_face(self):
