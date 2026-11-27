@@ -297,6 +297,50 @@ def _view_under(page, x, y, margin=3.0):
     return best[1] if best else None
 
 
+_SPOTS = {}
+
+
+def field_spots(page):
+    """[(field name, x, y)] page mm (y up) of the title block's editable
+    fields, where their text starts (its baseline)."""
+    from . import fieldmap, textlayer
+    tpl = page.Template
+    path = getattr(tpl, "Template", "") or ""
+    if path in _SPOTS:
+        return _SPOTS[path]
+    svg = fieldmap._svg(tpl)
+    W, H = core.page_size(page)
+    vb = textlayer._viewbox(svg) if svg else None
+    kx = ky = 1.0
+    x0 = y0 = 0.0
+    if vb:
+        (x0, y0, vw, vh), _w, _h = vb
+        kx, ky = W / vw if vw else 1.0, H / vh if vh else 1.0
+    fields, _fixed = fieldmap.svg_fields(svg) if svg else ([], [])
+    out = [(n, (x - x0) * kx, H - (y - y0) * ky) for n, x, y in fields]
+    _SPOTS[path] = out
+    return out
+
+
+def empty_field_at(page, x, y):
+    """The empty title block field nearest page point (x, y), if the point
+    is where its text would go."""
+    try:
+        vals = dict(page.Template.EditableTexts)
+    except Exception:
+        return None
+    best = None
+    for name, fx, fy in field_spots(page):
+        if (vals.get(name) or "").strip():
+            continue                     # TechDraw's own click box is on it
+        dx, dy = x - fx, y - fy
+        if -25.0 <= dx <= 40.0 and -2.0 <= dy <= 5.0:
+            d = abs(dx) * 0.3 + abs(dy - 1.5)
+            if best is None or d < best[0]:
+                best = (d, name)
+    return best[1] if best else None
+
+
 class DragAnywhere(QtCore.QObject):
     """Event filter on a page's viewport that moves views dragged by their
     lines or faces. Hold Alt to get TechDraw's normal behaviour."""
@@ -400,6 +444,7 @@ class DragAnywhere(QtCore.QObject):
                     return False
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 x, y = to_page(self.gview.mapToScene(pos))
+                self.field_press = None
                 if self._scene_item_is_geometry(pos):
                     view = _view_under(self.page, x, y)
                 else:
@@ -407,6 +452,10 @@ class DragAnywhere(QtCore.QObject):
                     # the group's front view can't be moved by TechDraw at all
                     view = self._locked_view_at(pos)
                 if view is None:
+                    if not isinstance(self.gview.itemAt(pos), QtWidgets.QGraphicsRectItem):
+                        name = empty_field_at(self.page, x, y)
+                        if name:
+                            self.field_press = (pos, name)
                     return False
                 target = self._move_target(view)
                 self.press = (pos, (x, y), view, target, (float(target.X), float(target.Y)))
@@ -427,6 +476,17 @@ class DragAnywhere(QtCore.QObject):
                 target.X, target.Y = nx, ny
                 core.enforce_alignment(target)
                 return True
+            if t == QtCore.QEvent.MouseButtonRelease and getattr(self, "field_press", None):
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                start, name = self.field_press
+                self.field_press = None
+                if (pos - start).manhattanLength() < DRAG_THRESHOLD_PX:
+                    # an empty title block field: TechDraw gives it nothing to
+                    # click, so DrawingKit opens the same kind of box
+                    from . import commands
+                    page = self.page
+                    QtCore.QTimer.singleShot(0, lambda: commands.edit_template_field(page, name))
+                return False
             if t == QtCore.QEvent.MouseButtonRelease and self.press is not None:
                 was_dragging = self.dragging
                 self.press, self.dragging = None, False

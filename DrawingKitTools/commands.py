@@ -1786,16 +1786,29 @@ class FieldMapDialog(QtWidgets.QDialog):
         return True
 
 
-def ask_field_map(page):
-    """A template DrawingKit doesn't know yet: show the fields it found for
-    it once, to check (saved, not asked again)."""
-    from . import fieldmap
-    if not fieldmap.needs_review(page):
-        return
-    FieldMapDialog(page, intro=(
-        "DrawingKit hasn't seen this title block before. Check which field each item goes "
-        "in (guessed from the fields' names and captions); this is kept for the template, so "
-        "it's asked only once.")).run()
+def edit_template_field(page, name):
+    """FreeCAD's 'Change Editable Field' box for an empty title block field
+    (TechDraw opens its own only for a field with text in it)."""
+    from . import titleblock as tb
+    labels = {k: lab for k, lab, _v in tb.fields(page)}
+    dlg = QtWidgets.QDialog(Gui.getMainWindow())
+    dlg.setWindowTitle("Change Editable Field")
+    lay = QtWidgets.QFormLayout(dlg)
+    edit = QtWidgets.QLineEdit(dict(page.Template.EditableTexts).get(name, ""))
+    edit.setMinimumWidth(260)
+    lay.addRow(labels.get(name, name) + ":", edit)
+    box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                     | QtWidgets.QDialogButtonBox.Cancel)
+    box.accepted.connect(dlg.accept)
+    box.rejected.connect(dlg.reject)
+    lay.addRow(box)
+    if not (dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()):
+        return False
+    doc = page.Document
+    run_in_transaction(doc, "Change editable field", lambda: tb.set_fields(page, {name: edit.text()}))
+    doc.recompute()
+    redraw_template(page)
+    return True
 
 
 class TitleBlockDialog(QtWidgets.QDialog):
@@ -2080,7 +2093,6 @@ class EditTitleBlock:
         if not tb.fields(page):
             warn("This page's template has no fields to edit.")
             return
-        ask_field_map(page)
         total = 0
         for _ in range(10):          # the form reopens after each layout switch
             dlg = TitleBlockDialog(page)
