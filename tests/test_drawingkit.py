@@ -3174,6 +3174,65 @@ class TestTitleBlockDesigns(DocTest):
         self.assertAlmostEqual(d["cells"][i]["x"], 120.0)
         self.assertAlmostEqual(d["cells"][i]["h"], 50.0)
 
+    def test_rows_and_columns_across_the_block(self):
+        b = self.blocks
+        # left: one tall cell; right: three rows of 10 (the middle one split)
+        d = b.new_design("T", 100, 30)
+        left, right = b.split(d, 0, "h")
+        r1, r2, r3 = b.split(d, right, "v", 3)
+        mid_a, mid_b = b.split(d, r2, "h")
+        n = len(d["cells"])
+        new = b.insert_band(d, mid_b, "row", "after", 6.0)
+        self.assertAlmostEqual(d["height"], 36.0)
+        self.assertEqual(len(new), 2)                     # cut under the split cell's line
+        self.assertEqual(sorted((round(d["cells"][j]["x"], 6), round(d["cells"][j]["w"], 6))
+                                for j in new), [(50.0, 25.0), (75.0, 25.0)])
+        self.assertTrue(all(abs(d["cells"][j]["y"] - 20.0) < 1e-9 for j in new))
+        self.assertAlmostEqual(d["cells"][left]["h"], 36.0)   # runs through: longer
+        self.assertAlmostEqual(d["cells"][r3]["y"], 26.0)      # below: moved down
+        self.assertEqual(b.problems(d), [])
+        # deleting that row puts it back
+        self.assertAlmostEqual(b.delete_band(d, new[0], "row"), 6.0)
+        self.assertEqual(len(d["cells"]), n)
+        self.assertAlmostEqual(d["height"], 30.0)
+        self.assertAlmostEqual(d["cells"][left]["h"], 30.0)
+        self.assertEqual(b.problems(d), [])
+        # a column left of the right-hand cells, as wide as the picked cell
+        new = b.insert_band(d, r1, "column", "before")
+        self.assertAlmostEqual(d["width"], 150.0)
+        self.assertEqual(len(new), 3)                     # one per row it meets
+        self.assertAlmostEqual(d["cells"][left]["w"], 50.0)    # left of it: untouched
+        self.assertEqual(b.problems(d), [])
+        # the middle row: its split cells make a band of exactly that row
+        self.assertEqual(b.band_of(d, mid_a, "row"), (10.0, 20.0))
+        b.delete_band(d, mid_a, "row")
+        self.assertAlmostEqual(d["height"], 20.0)
+        self.assertEqual(b.problems(d), [])
+        # a row that is the whole block (the left column's only cell) can't go
+        with self.assertRaises(ValueError):
+            b.delete_band(d, left, "row")
+        # deleting the left column
+        b.delete_band(d, left, "column")
+        self.assertAlmostEqual(d["width"], 100.0)
+        self.assertEqual(b.problems(d), [])
+
+    def test_asme_preset(self):
+        b, t = self.blocks, self.templates
+        d = b.clean(b.preset_asme())
+        self.assertAlmostEqual(d["width"], t.ANSI_W)
+        self.assertAlmostEqual(d["height"], t.ANSI_H)
+        self.assertEqual(b.problems(d), [])
+        names = b.field_names(d)
+        for f in ("legal_owner_1", "title", "drawing_number", "revision_index", "sheet_number",
+                  "part_material", "creator", "checked_by", "approval_person", "scale",
+                  "sheet_size", "general_tolerances", "units", "tol_1", "tol_4", "tol_angle",
+                  "surface_note", "surface_note_2", "edge_note"):
+            self.assertIn(f, names)
+        self.assertIn("projection", [c["kind"] for c in d["cells"]])
+        self.assertIn("Copy of DrawingKit ASME", dict(b.PRESETS))
+        s = b.svg(d, 0, 0, "C")
+        self.assertIn('freecad:editable="drawing_number"', s)
+
     def test_problems_found(self):
         b = self.blocks
         d = b.new_design("T", 100, 20)

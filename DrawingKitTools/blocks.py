@@ -229,6 +229,88 @@ def move_edge(d, i, side, new_pos):
     return new_pos
 
 
+# rows and columns right across the block: "row" works along y (heights),
+# "column" along x (widths)
+_AXES = {"row": ("y", "h", "x", "w", "height"), "column": ("x", "w", "y", "h", "width")}
+
+
+def insert_band(d, i, kind="row", where="after", size=None):
+    """Insert a row (or column) right across the block, next to cell i:
+    ``where`` 'after' (below / right of it) or 'before' (above / left).
+    The block grows by ``size`` mm (default: cell i's height / width). The
+    new strip is cut where the lines meeting it are; a cell the strip runs
+    through gets longer instead. Returns the new cells' indices."""
+    a, s, b, t, total = _AXES[kind]
+    c = d["cells"][i]
+    size = float(size if size else c[s])
+    if size < MIN_CELL:
+        raise ValueError("A %s must be at least %g mm" % (kind, MIN_CELL))
+    pos = c[a] + c[s] if where == "after" else c[a]
+    # the cells whose edge is on that line, on the side the new strip copies
+    edge = [o for o in d["cells"]
+            if abs((o[a] + o[s] if where == "after" else o[a]) - pos) < EPS]
+    for o in d["cells"]:
+        if o[a] >= pos - EPS:
+            o[a] += size                       # beyond the line: moved along
+        elif o[a] + o[s] > pos + EPS:
+            o[s] += size                       # across the line: stretched
+    new = []
+    for o in edge:
+        kw = {a: pos, s: size, b: o[b], t: o[t]}
+        d["cells"].append(cell(kw["x"], kw["y"], kw["w"], kw["h"]))
+        new.append(len(d["cells"]) - 1)
+    d[total] += size
+    return new
+
+
+def band_of(d, i, kind="row"):
+    """(start, end) of the row (or column) that cell i is in: the smallest
+    strip across the block, holding cell i, that no cell only partly
+    crosses (a cell running right through it doesn't count)."""
+    a, s = _AXES[kind][:2]
+    c = d["cells"][i]
+    lo, hi = c[a], c[a] + c[s]
+    grown = True
+    while grown:
+        grown = False
+        for o in d["cells"]:
+            o_lo, o_hi = o[a], o[a] + o[s]
+            if o_hi <= lo + EPS or o_lo >= hi - EPS:
+                continue                       # clear of the strip
+            if o_lo <= lo + EPS and o_hi >= hi - EPS and (o_lo < lo - EPS or o_hi > hi + EPS):
+                continue                       # runs right through it
+            if o_lo < lo - EPS or o_hi > hi + EPS:
+                lo, hi = min(lo, o_lo), max(hi, o_hi)
+                grown = True
+    return lo, hi
+
+
+def delete_band(d, i, kind="row"):
+    """Delete the row (or column) cell i is in, right across the block; the
+    block shrinks by its size, and a cell running through it gets shorter.
+    Returns the size removed."""
+    a, s, _b, _t, total = _AXES[kind]
+    lo, hi = band_of(d, i, kind)
+    size = hi - lo
+    if size >= d[total] - EPS:
+        raise ValueError("That %s is the whole block: nothing would be left" % kind)
+    through = [o for o in d["cells"] if o[a] + o[s] > hi + EPS and o[a] < lo - EPS]
+    if any(o[s] - size < MIN_CELL - EPS for o in through):
+        raise ValueError("A cell running through this %s would be too small" % kind)
+    for o in through:
+        o[s] -= size                           # runs through it: shorter
+    keep = []
+    for o in d["cells"]:
+        if o[a] >= lo - EPS and o[a] + o[s] <= hi + EPS:
+            continue                           # inside the strip: gone
+        if o[a] >= hi - EPS:
+            o[a] -= size
+        keep.append(o)
+    d["cells"] = keep
+    d[total] -= size
+    return size
+
+
 def resize(d, width=None, height=None):
     """Stretch the whole block to a new size."""
     kx = float(width) / d["width"] if width else 1.0
@@ -607,6 +689,59 @@ def preset_iso():
     return d
 
 
+def preset_asme():
+    """DrawingKit's ASME (Y14.1 style) block as a design to start from: the
+    tolerance block on the left, company, title and numbers on the right."""
+    from . import templates as T
+    small = T.ANSI_SMALL
+    d = new_design("ASME (copy)", T.ANSI_W, T.ANSI_H)
+    tw, mx, mw = T.ANSI_TOL_W, T.ANSI_TOL_W, T.ANSI_MAIN_W
+    yb = T.ANSI_H - 14.0                        # projection and size row
+    # the tolerance lines use the same fields as DrawingKit's ASME block, so
+    # the saved defaults (units, .X / .XX ..., angles, notes) fill them
+    r = 3.3
+
+    def txt(x, y, w, text, bold=False):
+        return cell(x, y, w, r, "text", text=text, size=small, bold=bold)
+
+    def fld(x, y, w, name, text="", h=r, lines=1):
+        return cell(x, y, w, h, "field", field=name, text=text, size=small, lines=lines)
+
+    half = tw / 2.0
+    C = [
+        cell(0, 0, tw, 5, "text", text="UNLESS OTHERWISE SPECIFIED:", size=small, bold=True),
+        txt(0, 5, 32, "DIMENSIONS ARE IN"), fld(32, 5, tw - 32, "units", "INCHES"),
+        txt(0, 5 + r, tw, "TOLERANCES:", bold=True),
+        txt(0, 5 + 2 * r, 11, ".X"), fld(11, 5 + 2 * r, half - 11, "tol_1"),
+        txt(half, 5 + 2 * r, 11, ".XX"), fld(half + 11, 5 + 2 * r, half - 11, "tol_2"),
+        txt(0, 5 + 3 * r, 11, ".XXX"), fld(11, 5 + 3 * r, half - 11, "tol_3"),
+        txt(half, 5 + 3 * r, 11, ".XXXX"), fld(half + 11, 5 + 3 * r, half - 11, "tol_4"),
+        txt(0, 5 + 4 * r, 14, "ANGLES"), fld(14, 5 + 4 * r, tw - 14, "tol_angle"),
+        fld(0, 5 + 5 * r, tw, "surface_note", h=2 * r, lines=2),
+        fld(0, 5 + 7 * r, tw, "edge_note", h=yb - 6 - (5 + 7 * r)),
+        cell(0, yb - 6, tw, 6, "field", label="INTERPRET PER", field="general_tolerances",
+             text="ASME Y14.5-2018", size=small, align="right"),
+        cell(0, yb, tw - 18, 14, "projection"),
+        cell(tw - 18, yb, 18, 14, "field", label="SIZE", field="sheet_size", text="{size}",
+             size=6.0, bold=True, align="centre"),
+        cell(mx, 0, mw, 7, "field", field="legal_owner_1", size=4.5, bold=True, align="centre"),
+        cell(mx, 7, mw, 5, "field", field="company_address", size=small, align="centre"),
+        cell(mx, 12, mw, 7.5, "field", label="TITLE", field="title", size=4.5, bold=True,
+             align="centre"),
+        cell(mx, 19.5, mw, 4.5, "field", field="title_2", size=3.2, align="centre"),
+    ]
+    ys = [0.0]
+    for h in T.ANSI_ROWS:
+        ys.append(ys[-1] + h)
+    for row, x0, x1, label, name, default, _auto, font, align in T.ANSI_CELLS:
+        C.append(cell(mx + x0, ys[row], x1 - x0, T.ANSI_ROWS[row], "field", label=label,
+                      field=name, text=default, size=font,
+                      bold=name in ("drawing_number", "revision_index"),
+                      align="centre" if align == "middle" else "left"))
+    d["cells"] = C
+    return d
+
+
 def preset_size_table():
     """A block with the tolerances by size in it, a logo and the people
     who drew, checked and approved the drawing."""
@@ -724,6 +859,7 @@ def preset_blank():
 
 
 PRESETS = [("Blank 180 x 40", preset_blank), ("Copy of DrawingKit ISO", preset_iso),
+           ("Copy of DrawingKit ASME", preset_asme),
            ("Tolerances by size + logo", preset_size_table),
            ("Notes + inch tolerances", preset_notes)]
 

@@ -214,6 +214,27 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             ops.addWidget(b)
         ops.addStretch(1)
         left.addLayout(ops)
+        # whole rows and columns, right across the block
+        bands = QtWidgets.QHBoxLayout()
+        for text, tip, kind, how in (
+                ("Row above", "Add a row right across the block, above the picked cell "
+                              "(as high as the cell; the block grows)", "row", "before"),
+                ("Row below", "Add a row right across the block, below the picked cell",
+                 "row", "after"),
+                ("Delete row", "Delete the row the picked cell is in, right across the block "
+                               "(the block gets lower)", "row", "delete"),
+                ("Column left", "Add a column right through the block, left of the picked "
+                                "cell (as wide as the cell; the block grows)", "column", "before"),
+                ("Column right", "Add a column right through the block, right of the picked "
+                                 "cell", "column", "after"),
+                ("Delete column", "Delete the column the picked cell is in, right through the "
+                                  "block (the block gets narrower)", "column", "delete")):
+            b = QtWidgets.QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _c=False, k=kind, h=how: self._band(k, h))
+            bands.addWidget(b)
+        bands.addStretch(1)
+        left.addLayout(bands)
         mid.addLayout(left, 1)
 
         # the picked cell
@@ -408,6 +429,27 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             self.current = res
         self.changed(remember=False)
         self.show_cell()
+
+    def _band(self, kind, how):
+        """Add or delete a whole row or column next to the picked cell."""
+        if self.current is None:
+            return
+        c = self.design["cells"][self.current]
+        here = (c["x"] + c["w"] / 2.0, c["y"] + c["h"] / 2.0)
+
+        def do():
+            if how == "delete":
+                blocks.delete_band(self.design, self.current, kind)
+                # pick the cell now where the deleted one was (or the nearest)
+                cells = self.design["cells"]
+                x = min(here[0], self.design["width"] - blocks.EPS)
+                y = min(here[1], self.design["height"] - blocks.EPS)
+                j = blocks.cell_at(self.design, x, y)
+                return j if j is not None else max(0, min(self.current, len(cells) - 1))
+            new = blocks.insert_band(self.design, self.current, kind, how)
+            return new[0] if new else self.current
+        self._op(do)
+        self._show_size()
 
     def changed(self, remember=False):
         self.canvas.refresh()
