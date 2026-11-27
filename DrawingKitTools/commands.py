@@ -3309,11 +3309,12 @@ class Table:
     def GetResources(self):
         return {"Pixmap": icon("DrawingKit_Table.svg"),
                 "MenuText": "Table",
-                "ToolTip": "A table of your own (data for a spline, a gear, a gauge...): type "
-                           "or paste the rows, the first one being the headings, cells split "
-                           "by tabs (from a spreadsheet), '|' or ';'. Placed in a free spot; "
-                           "drag it where you want it. To change it, select the table and "
-                           "run this again, or double-click it on the sheet."}
+                "ToolTip": "A table of your own (data for a spline, a gear, a gauge...): "
+                           "fill in a grid like a spreadsheet, headings in the first row; set "
+                           "the number of rows and columns or add them as you go, and paste "
+                           "cells from a spreadsheet. Placed in a free spot; drag it where "
+                           "you want it. To change it, double-click it on the sheet (or "
+                           "select it and run this again)."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
@@ -3328,50 +3329,38 @@ class Table:
         if page is None:
             warn("Select the page (or a view on it) first.")
             return
-        pop = ui.Popover("New table on %s" % page.Label)
-        title = ui.field("", 260, "Title (optional), e.g. SPLINE DATA")
-        body = QtWidgets.QPlainTextEdit()
-        body.setPlaceholderText("TEETH | PITCH | PRESSURE ANGLE\n16 | 32/64 | 30°")
-        body.setMinimumSize(320, 140)
-        pop.add_row(title, stretch=True)
-        pop.add_row(body, stretch=True)
-        if not pop.run():
+        dlg = ui.TableEditor("New table on %s" % page.Label,
+                             headers=["", "", ""], rows=[["", "", ""], ["", "", ""]])
+        if not dlg.run():
             return
-        rows = tables.parse_rows(body.toPlainText())
-        if not rows:
-            warn("Type the headings and at least one row.")
+        title, headers, rows = dlg.values()
+        if not any(headers) and not rows:
+            warn("The table is empty: type the headings and at least one row.")
             return
         doc = page.Document
         t = run_in_transaction(doc, "DrawingKit table",
-                               lambda: tables.add_table(page, rows[0], rows[1:],
-                                                        title.text().strip()))
+                               lambda: tables.add_table(page, headers, rows, title))
         doc.recompute()
-        say("%s: %d column(s), %d row(s); drag it into place; to change it, select it "
-            "and run Table again" % (t.Label, len(rows[0]), len(rows) - 1))
+        say("%s: %d column(s), %d row(s); drag it into place; double-click it to change it"
+            % (t.Label, len(headers), len(rows)))
 
 
 def edit_own_table(table):
-    """Edit a table of your own: its title and all its cells as text."""
+    """Edit a table of your own (or a hole table) in the grid editor."""
     from . import tables
-    title_now, _h, _r = tables.table_contents(table)
-    pop = ui.Popover("Edit %s" % table.Label)
-    title = ui.field(title_now, 260, "Title (optional), e.g. SPLINE DATA")
-    body = QtWidgets.QPlainTextEdit()
-    body.setPlainText(tables.contents_text(table))
-    body.setMinimumSize(420, 160)
-    pop.add_row(title, stretch=True)
-    pop.add_row(body, stretch=True)
-    if not pop.run():
+    title, headers, rows = tables.table_contents(table)
+    dlg = ui.TableEditor("Edit %s" % table.Label, title, headers, rows)
+    if not dlg.run():
         return False
-    rows = tables.parse_rows(body.toPlainText())
-    if not rows:
-        warn("Type the headings and at least one row.")
+    title, headers, rows = dlg.values()
+    if not any(headers) and not rows:
+        warn("The table is empty: type the headings and at least one row.")
         return False
     doc = table.Document
     run_in_transaction(doc, "DrawingKit edit table",
-                       lambda: tables.edit_table(table, rows[0], rows[1:], title.text().strip()))
+                       lambda: tables.edit_table(table, headers, rows, title))
     doc.recompute()
-    say("%s updated: %d column(s), %d row(s)" % (table.Label, len(rows[0]), len(rows) - 1))
+    say("%s updated: %d column(s), %d row(s)" % (table.Label, len(headers), len(rows)))
     return True
 
 
