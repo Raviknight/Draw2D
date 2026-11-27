@@ -422,8 +422,11 @@ def _dim_kind(dim):
 
 
 def _texts(page):
+    """The title block's texts, fields with a role (title, drawing number,
+    revision...) under the role's name whatever the template calls them."""
     try:
-        return dict(page.Template.EditableTexts)
+        from . import fieldmap
+        return fieldmap.read(page)
     except Exception:
         return {}
 
@@ -597,7 +600,10 @@ def title_block(page):
 
 def _field_spots(page):
     """{field: (x, y)} page mm of the title block's editable texts."""
-    return {t["field"]: (t["x"], t["y"]) for t in _template_texts(page) if t.get("field")}
+    from . import fieldmap
+    role = fieldmap.role_of(page)
+    return {role.get(t["field"], t["field"]): (t["x"], t["y"])
+            for t in _template_texts(page) if t.get("field")}
 
 
 def _item(kind, text, x, y, source, **kw):

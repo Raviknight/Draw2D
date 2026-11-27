@@ -26,7 +26,8 @@ def default_base(page):
     folder = os.path.dirname(doc.FileName) if doc.FileName else os.path.expanduser("~")
     name = ""
     try:
-        texts = dict(page.Template.EditableTexts)
+        from . import fieldmap
+        texts = fieldmap.read(page)
         name = texts.get("drawing_number") or texts.get("title") or ""
     except Exception:
         pass

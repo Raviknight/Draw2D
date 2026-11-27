@@ -1705,6 +1705,99 @@ def layout_key(page):
     return "ansi" if tb.is_ansi(page) else ("iso_tol" if tb.has_tolerance_row(page) else "iso")
 
 
+class FieldMapDialog(QtWidgets.QDialog):
+    """Which of the template's fields DrawingKit fills for each role: the
+    title, drawing number, revision, scale, sheet, date, drawn by... Saved
+    for the template (any sheet with it), and for the company if you use a
+    company file."""
+
+    def __init__(self, page, intro=None, parent=None):
+        from . import fieldmap, titleblock as tb
+        super().__init__(parent or Gui.getMainWindow())
+        self.page, self.fm = page, fieldmap
+        self.setWindowTitle("Fields DrawingKit fills - %s" % page.Label)
+        lay = QtWidgets.QVBoxLayout(self)
+        text = intro or ("For each item DrawingKit fills in or reads, pick the title block "
+                         "field it goes in. Guessed from the fields' names and the captions "
+                         "printed beside them; '(none)' leaves it alone.")
+        lab = QtWidgets.QLabel(text)
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        texts = dict(page.Template.EditableTexts)
+        now = fieldmap.mapping(page)
+        grid = QtWidgets.QGridLayout()
+        self.combos = {}
+        for i, role in enumerate(fieldmap.ROLE_NAMES):
+            c = QtWidgets.QComboBox()
+            c.addItem("(none)", "")
+            for name in texts:
+                val = (texts[name] or "").strip()
+                c.addItem("%s%s" % (name, ("   = " + val[:30]) if val else ""), name)
+            c.setCurrentIndex(max(0, c.findData(now.get(role, ""))))
+            c.setMinimumWidth(260)
+            star = " *" if role in fieldmap.CORE else ""
+            grid.addWidget(QtWidgets.QLabel(fieldmap.LABELS[role] + star), i, 0)
+            grid.addWidget(c, i, 1)
+            self.combos[role] = c
+        lay.addLayout(grid)
+        note = QtWidgets.QLabel("* filled in by DrawingKit: title and number from the part, "
+                                "revision from the revision table, scale, sheet numbers, date, "
+                                "your name.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self.company = QtWidgets.QCheckBox("Also save in the company file")
+        self.company.setVisible(bool(tb.company_file()))
+        self.company.setToolTip(tb.company_file())
+        lay.addWidget(self.company)
+        box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                         | QtWidgets.QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+
+    def mapping(self):
+        out, used = {}, set()
+        for role, c in self.combos.items():
+            name = c.currentData() or ""
+            if name and name in used:
+                name = ""                    # one field, one role
+            used.add(name)
+            out[role] = name
+        return out
+
+    def run(self):
+        """Ask, save and fill. True if saved."""
+        ok = self.exec_() if hasattr(self, "exec_") else self.exec()
+        if not ok:
+            return False
+        self.fm.save(self.page, self.mapping(), company=self.company.isChecked())
+        page, doc = self.page, self.page.Document
+
+        def fill():
+            core.fill_title_block(page)
+            try:
+                core.set_title_block_scale(page, core.view_scale(core.page_content(page)[0]))
+            except Exception:
+                pass
+            core.renumber_sheets(doc)
+        run_in_transaction(doc, "DrawingKit title block fields", fill)
+        doc.recompute()
+        say("Title block fields saved for this template")
+        return True
+
+
+def ask_field_map(page):
+    """A template DrawingKit doesn't know yet: show the fields it found for
+    it once, to check (saved, not asked again)."""
+    from . import fieldmap
+    if not fieldmap.needs_review(page):
+        return
+    FieldMapDialog(page, intro=(
+        "DrawingKit hasn't seen this title block before. Check which field each item goes "
+        "in (guessed from the fields' names and captions); this is kept for the template, so "
+        "it's asked only once.")).run()
+
+
 class TitleBlockDialog(QtWidgets.QDialog):
     """Every field of a page's title block in one form, with saving the
     fields that are the same on every drawing as your defaults or to a
@@ -1718,17 +1811,21 @@ class TitleBlockDialog(QtWidgets.QDialog):
         lay = QtWidgets.QVBoxLayout(self)
         grid = QtWidgets.QGridLayout()
         self.edits = {}
+        from . import fieldmap
+        # the template's own field names -> DrawingKit's roles (AuthorName -> creator)
+        self.role = fieldmap.role_of(page)
         # in-block tolerance rows are edited with "Tolerances by size..."
         rows = [r for r in tb.fields(page) if not r[0].startswith("tolsize_")]
         half = (len(rows) + 1) // 2
         for i, (key, label, value) in enumerate(rows):
             col, row = (0, i) if i < half else (2, i - half)
-            lab = QtWidgets.QLabel(label + (" *" if key in tb.SHARED else ""))
-            if key in tb.SHARED:
+            role = self.role.get(key, key)
+            lab = QtWidgets.QLabel(label + (" *" if role in tb.SHARED else ""))
+            if role in tb.SHARED:
                 lab.setToolTip("Same on every drawing: saved with your defaults")
             e = QtWidgets.QLineEdit(value)
             e.setMinimumWidth(240)
-            if key in ("scale", "sheet_number"):
+            if role in ("scale", "sheet_number"):
                 e.setToolTip("Set by DrawingKit (scale, sheet numbers)")
             grid.addWidget(lab, row, col)
             grid.addWidget(e, row, col + 1)
@@ -1758,6 +1855,12 @@ class TitleBlockDialog(QtWidgets.QDialog):
             self.done(2)
         self.layout_combo.currentIndexChanged.connect(switch)
         row.addWidget(self.layout_combo)
+        fmap = QtWidgets.QPushButton("Fields DrawingKit fills...")
+        fmap.setToolTip("Which field of this title block gets the title, drawing number, "
+                        "revision, scale, sheet, date, drawn by... (for templates that name "
+                        "their fields their own way)")
+        fmap.clicked.connect(self.open_field_map)
+        row.addWidget(fmap)
         design = QtWidgets.QPushButton("Design title blocks...")
         design.setToolTip("Draw your own title block: cells for fields, fixed text, your logo, "
                           "the tolerances by size, the projection symbol")
@@ -1825,6 +1928,13 @@ class TitleBlockDialog(QtWidgets.QDialog):
         btns.addWidget(ok)
         lay.addLayout(btns)
 
+    def open_field_map(self):
+        if FieldMapDialog(self.page, parent=self).run():
+            # the form opens again on the fields as filled now (what was
+            # typed in it before is not written over them)
+            self.refill = True
+            self.done(2)
+
     def open_designer(self):
         from . import blockdesigner
         cur = layout_key(self.page)
@@ -1843,7 +1953,7 @@ class TitleBlockDialog(QtWidgets.QDialog):
         return {k: e.text() for k, e in self.edits.items()}
 
     def units(self):
-        e = self.edits.get("units")
+        e = self._edit("units")
         return self.tb.units_label({"units": e.text() if e else "mm"})
 
     def _show_tol(self):
@@ -1862,13 +1972,21 @@ class TitleBlockDialog(QtWidgets.QDialog):
             self.tol_table = dlg.data()
             self.tol_changed = True
             self._show_tol()
-            g = self.edits.get("general_tolerances")
+            g = self._edit("general_tolerances")
             if g is not None and self.tol_table:
                 name = self.tol_table.get("preset") or ""
                 g.setText(name if name.upper().startswith("ISO") else "SEE TABLE")
 
+    def _edit(self, role):
+        """The form's field for a role (the template may call it anything)."""
+        for k, e in self.edits.items():
+            if self.role.get(k, k) == role:
+                return e
+        return None
+
     def defaults_values(self):
-        v = self.values()
+        # saved by role, so they fill the same field on any template
+        v = {self.role.get(k, k): text for k, text in self.values().items()}
         v[self.tb.TOL_TABLE] = self.tol_table
         return v
 
@@ -1896,8 +2014,9 @@ class TitleBlockDialog(QtWidgets.QDialog):
     def fill_defaults(self):
         vals = self.tb.load_defaults()
         for k in self.tb.SHARED:
-            if k in self.edits and k in vals:
-                self.edits[k].setText(vals[k])
+            e = self._edit(k)
+            if e is not None and k in vals:
+                e.setText(vals[k])
         if self.tb.TOL_TABLE in vals:
             self.tol_table = vals[self.tb.TOL_TABLE]
             self.tol_changed = True
@@ -1961,12 +2080,16 @@ class EditTitleBlock:
         if not tb.fields(page):
             warn("This page's template has no fields to edit.")
             return
+        ask_field_map(page)
         total = 0
         for _ in range(10):          # the form reopens after each layout switch
             dlg = TitleBlockDialog(page)
             res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
             if not res:
                 break
+            if getattr(dlg, "refill", False):
+                redraw_template(page)
+                continue
             vals = dlg.values()
             want = dlg.switch_to or dlg.layout_combo.currentData()
             tb.set_style_pref(dlg.new_combo.currentData())

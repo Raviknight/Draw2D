@@ -4200,3 +4200,130 @@ class TestAlignedUncutFrame(DocTest):
                 via_piece = h._orient(fit, (p - a).dot(u), (p - a).dot(d))
                 self.assertAlmostEqual(via_view[0], via_piece[0], places=6)
                 self.assertAlmostEqual(via_view[1], via_piece[1], places=6)
+
+
+COMPANY_SVG = """<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace"
+     width="420mm" height="297mm" viewBox="0 0 420 297">
+  <rect x="10" y="10" width="400" height="277" fill="none" stroke="#000" stroke-width="0.5"/>
+  <g transform="translate(250,250)">
+    <text x="2" y="4" font-size="2">PART NAME</text>
+    <text freecad:editable="PartTitle" x="2" y="10" font-size="4"><tspan>PART TITLE</tspan></text>
+    <text x="80" y="4" font-size="2">DWG. NO.</text>
+    <text freecad:editable="F1" x="80" y="10" font-size="4"><tspan>0000</tspan></text>
+    <text x="130" y="4" font-size="2">REV</text>
+    <text freecad:editable="F2" x="130" y="10" font-size="4"><tspan>-</tspan></text>
+    <text x="2" y="18" font-size="2">DRAWN BY</text>
+    <text freecad:editable="F3" x="2" y="24" font-size="3"><tspan></tspan></text>
+    <text x="50" y="18" font-size="2">DATE</text>
+    <text freecad:editable="F4" x="50" y="24" font-size="3"><tspan></tspan></text>
+    <text freecad:editable="Massstab" x="100" y="24" font-size="3"><tspan>1:1</tspan></text>
+    <text freecad:editable="Sheet_No" x="130" y="24" font-size="3"><tspan>1</tspan></text>
+    <text freecad:editable="Notes" x="2" y="32" font-size="3"><tspan></tspan></text>
+  </g>
+</svg>
+"""
+
+
+class TestTitleBlockFieldRoles(DocTest):
+    """Templates that name their fields their own way: DrawingKit finds the
+    title, number, revision, scale, sheet, date and drawn-by fields by name
+    or by the caption printed beside them."""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        import tempfile
+        from DrawingKitTools import fieldmap, titleblock
+        self.fm, self.tb = fieldmap, titleblock
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._saved = (fieldmap.USER_FILE, titleblock.company_file)
+        fieldmap.USER_FILE = os.path.join(self.tmp, "fields.json")
+        titleblock.company_file = lambda: os.path.join(self.tmp, "company.json")
+        fieldmap._CACHE.clear()
+        self.svg = os.path.join(self.tmp, "Company_A3.svg")
+        with open(self.svg, "w", encoding="utf-8") as f:
+            f.write(COMPANY_SVG)
+
+    def tearDown(self):
+        self.fm.USER_FILE, self.tb.company_file = self._saved
+        self.fm._CACHE.clear()
+        super().tearDown()
+
+    def company_page(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        page.Template.Template = self.svg
+        self.doc.recompute()
+        self.assertIn("F1", dict(page.Template.EditableTexts))
+        return page
+
+    def test_names_and_captions(self):
+        names = ["PartTitle", "F1", "F2", "F3", "F4", "Massstab", "Sheet_No", "Notes"]
+        m = self.fm.guess(names, COMPANY_SVG)
+        self.assertEqual(m, {"title": "PartTitle", "drawing_number": "F1", "revision_index": "F2",
+                             "creator": "F3", "date_of_issue": "F4", "scale": "Massstab",
+                             "sheet_number": "Sheet_No"})
+        # FreeCAD's own templates
+        self.assertEqual(self.fm.guess(["AuthorName", "CreationDate", "FC-Title", "SheetNumber"]),
+                         {"creator": "AuthorName", "date_of_issue": "CreationDate",
+                          "title": "FC-Title", "sheet_number": "SheetNumber"})
+        # a heading beside several fields (a 'CHECKED' row with name and date) is no caption
+        svg = COMPANY_SVG.replace('x="50" y="18" font-size="2">DATE', 'x="200" y="18" font-size="2">X')
+        svg = svg.replace('x="2" y="18" font-size="2">DRAWN BY', 'x="-30" y="24" font-size="2">DRAWN BY')
+        self.assertNotIn("creator", self.fm.guess(names, svg))
+
+    def test_drawingkit_fills_them(self):
+        from DrawingKitTools import tables, textlayer
+        page = self.company_page()
+        self.assertTrue(core.set_title_block_scale(page, 0.5))
+        t = dict(page.Template.EditableTexts)
+        self.assertEqual(t["Massstab"], "1 : 2")
+        core.fill_title_block(page, self.box)
+        t = dict(page.Template.EditableTexts)
+        self.assertEqual(t["PartTitle"], self.box.Label)
+        self.assertEqual(t["F1"], self.box.Label.upper())
+        tables.add_revision(page, "Initial release", "RS", "2026-11-26")
+        self.assertEqual(dict(page.Template.EditableTexts)["F2"], "A")
+        core.renumber_sheets(self.doc)
+        self.assertEqual(dict(page.Template.EditableTexts)["Sheet_No"], "1")   # a number stays one
+        self.assertEqual(textlayer.sheet_info(page)["drawing_number"], self.box.Label.upper())
+        labels = {k: lab for k, lab, _v in self.tb.fields(page)}
+        self.assertEqual(labels["F3"], "Drawn / created by")
+        self.assertEqual(labels["Notes"], "Notes")
+        self.assertTrue(self.fm.needs_review(page) is False)        # all the main ones found
+
+    def test_defaults_go_by_role(self):
+        page = self.company_page()
+        self.tb.apply_defaults(page, {"creator": "R. S."})
+        self.assertEqual(dict(page.Template.EditableTexts)["F3"], "R. S.")
+
+    def test_your_choice_is_kept_for_the_template(self):
+        page = self.company_page()
+        self.fm.save(page, {"title": "Notes", "drawing_number": "F1", "scale": ""})
+        self.assertEqual(self.fm.mapping(page).get("title"), "Notes")
+        self.assertNotIn("scale", self.fm.mapping(page))
+        self.assertFalse(core.set_title_block_scale(page, 0.5))
+        self.assertTrue(self.fm.is_saved(page))
+        self.assertFalse(self.fm.needs_review(page))
+        # in the company file too, for the whole team
+        self.fm.save(page, {"title": "PartTitle"}, company=True)
+        os.remove(self.fm.USER_FILE)
+        self.fm._CACHE.clear()
+        self.assertEqual(self.fm.mapping(page).get("title"), "PartTitle")
+
+    def test_unknown_template_is_asked_about_once(self):
+        svg = COMPANY_SVG.replace("DWG. NO.", "XYZ").replace("REV", "QQ")
+        with open(self.svg, "w", encoding="utf-8") as f:
+            f.write(svg)
+        page = self.company_page()
+        self.assertTrue(self.fm.needs_review(page))
+        self.fm.save(page, self.fm.mapping(page))
+        self.assertFalse(self.fm.needs_review(page))
+
+    def test_drawingkit_templates_unchanged(self):
+        page = core.create_page(self.doc, "A3", "Landscape")
+        m = self.fm.mapping(page)
+        for role in ("title", "drawing_number", "revision_index", "scale", "sheet_number"):
+            self.assertEqual(m.get(role), role)
+        self.assertFalse(self.fm.needs_review(page))

@@ -439,7 +439,8 @@ def move_tables_clear(page):
 def _texts_scale(page):
     """What the title block's scale field says now (None if it has none)."""
     try:
-        return dict(page.Template.EditableTexts).get("scale") or None
+        from . import fieldmap
+        return fieldmap.read(page).get("scale") or None
     except Exception:
         return None
 
@@ -1576,17 +1577,14 @@ def _apply_plan(page, group, extras, scale, positions):
 def set_title_block_scale(page, scale, text=None):
     """Write the scale (or ``text``, e.g. 'NTS') into the title block's
     'scale' field, if it has one."""
+    from . import fieldmap
     tpl = page.Template
     if tpl is None or "EditableTexts" not in tpl.PropertiesList:
         return False
-    texts = dict(tpl.EditableTexts)
-    keys = [k for k in texts if k.lower() == "scale"]
-    if not keys:
+    if "scale" not in fieldmap.read(tpl):       # whatever the template calls it
         return False
     text = text or scale_text(scale).replace(":", " : ")
-    for k in keys:
-        texts[k] = text
-    tpl.EditableTexts = texts
+    fieldmap.write(tpl, {"scale": text})
     return True
 
 
@@ -1626,15 +1624,18 @@ def _blank(value, defaults=()):
 def fill_title_block(page, part=None):
     """Fill empty (or still default) title-block fields from the part.
     Fields the user has typed in are left alone. Returns the fields set."""
+    from . import fieldmap
     tpl = page.Template
     if tpl is None or "EditableTexts" not in tpl.PropertiesList:
         return {}
     part = part or page_part(page)
-    texts = dict(tpl.EditableTexts)
+    texts = fieldmap.read(tpl)      # by role, whatever the template calls them
     doc = page.Document
     changed = {}
 
     def put(key, value, defaults=()):
+        # the template's own sample text ('PART TITLE', '0000') counts as empty
+        defaults = tuple(defaults) + (fieldmap.template_default(tpl, key),)
         if key in texts and value and _blank(texts[key], defaults):
             texts[key] = value
             changed[key] = value
@@ -1645,7 +1646,7 @@ def fill_title_block(page, part=None):
         put("drawing_number", part.Label.upper().replace(" ", "-"), ("DN",))
     put("creator", author_name(), ("A. Nemesis",))
     if changed:
-        tpl.EditableTexts = texts
+        fieldmap.write(tpl, changed)
     try:
         from . import titleblock
         changed.update(titleblock.apply_defaults(page))   # saved defaults in empty fields
@@ -1659,19 +1660,20 @@ def fill_title_block(page, part=None):
 def renumber_sheets(doc, force=False):
     """'1 / N', '2 / N'... ('1 OF N' in an ANSI title block) in the order
     the pages were made."""
-    from . import titleblock
+    from . import fieldmap, titleblock
     pages_ = [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")]
     n = len(pages_)
     for i, p in enumerate(pages_):
         tpl = p.Template
         if tpl is None or "EditableTexts" not in tpl.PropertiesList:
             continue
-        texts = dict(tpl.EditableTexts)
+        texts = fieldmap.read(tpl)
         if "sheet_number" in texts:
             want = titleblock.sheet_text(i + 1, n, titleblock.sheet_of(p, texts))
+            if not titleblock.template_style(p) and (texts["sheet_number"] or "").strip().isdigit():
+                want = str(i + 1)       # a template with the count in a field of its own
             if texts["sheet_number"] != want:
-                texts["sheet_number"] = want
-                tpl.EditableTexts = texts
+                fieldmap.write(tpl, {"sheet_number": want})
     return n
 
 

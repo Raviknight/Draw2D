@@ -288,15 +288,12 @@ def edit_table(table, headers, rows, title=""):
 
 def _title_block_revision(table, rows):
     """The title block's revision is the revision table's last letter."""
+    from . import fieldmap
     page = _page_of(table)
-    tpl = getattr(page, "Template", None) if page is not None else None
-    if tpl is None or "EditableTexts" not in tpl.PropertiesList:
-        return
-    texts = dict(tpl.EditableTexts)
+    texts = fieldmap.read(page) if page is not None else {}
     last = next((r[0] for r in reversed(rows) if r and str(r[0]).strip()), None)
     if "revision_index" in texts and last and texts["revision_index"] != last:
-        texts["revision_index"] = last
-        tpl.EditableTexts = texts
+        fieldmap.write(page, {"revision_index": last})
 
 
 def is_own_table(obj):
@@ -397,12 +394,9 @@ def add_revision(page, description, approved="", date=None, eco=""):
         setattr(table, annot.ANCHOR, App.Vector(place[0], place[1], 0))
         table.EditableTexts = []
         annot.render(table)
-    tpl = page.Template
-    if tpl is not None and "EditableTexts" in tpl.PropertiesList:
-        texts = dict(tpl.EditableTexts)
-        if "revision_index" in texts:
-            texts["revision_index"] = rev
-            tpl.EditableTexts = texts
+    from . import fieldmap
+    if "revision_index" in fieldmap.read(page):    # whatever the template calls it
+        fieldmap.write(page, {"revision_index": rev})
     return table
 
 

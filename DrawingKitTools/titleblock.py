@@ -116,6 +116,15 @@ def sheet_of(page, texts=None):
     rather than '1 / 3'?"""
     if texts is None:
         texts = _texts(page)
+    if not template_style(page):
+        # someone else's template: as its sheet field is written now, else
+        # as the drawing standard writes it
+        cur = (texts.get("sheet_number") or "").upper()
+        if " OF " in cur:
+            return True
+        if "/" in cur:
+            return False
+        return standards.is_asme()
     if is_custom(page):
         cur = (texts.get("sheet_number") or "").upper()
         if cur.strip():
@@ -272,20 +281,20 @@ def apply_defaults(page, values=None, only_blank=True):
     tpl = page.Template
     if tpl is None or "EditableTexts" not in tpl.PropertiesList:
         return {}
+    from . import fieldmap
     vals = load_defaults() if values is None else values
-    texts = dict(tpl.EditableTexts)
+    texts = fieldmap.read(tpl)          # by role, whatever the template calls them
     changed = {}
     for k in SHARED:
         if k not in texts or k not in vals:
             continue
         cur = (texts[k] or "").strip()
-        if only_blank and cur not in _template_defaults(k):
+        if only_blank and cur not in _template_defaults(k) | {fieldmap.template_default(tpl, k)}:
             continue
         if texts[k] != vals[k]:
-            texts[k] = vals[k]
             changed[k] = vals[k]
     if changed:
-        tpl.EditableTexts = texts
+        fieldmap.write(tpl, changed)
     return changed
 
 
@@ -320,6 +329,15 @@ def fields(page):
                 v, note = blocks.surface_names(c)
                 labels[v], labels[note] = "Surface finish value", "Surface finish note"
                 order += [v, note]
+    # someone else's template: its fields go by the role DrawingKit found
+    # for them (AuthorName shows as 'Drawn / created by', in that place)
+    from . import fieldmap
+    role = fieldmap.role_of(page) if d is None else {}
+    for k, r in role.items():
+        if k != r and k in texts:
+            labels[k] = labels.get(r, k)
+            if r in order:
+                order[order.index(r)] = k
     keys = [k for k in order if k in texts] + sorted(k for k in texts if k not in order)
     out = [(k, labels.get(k, k.replace("_", " ").capitalize()), texts[k]) for k in keys]
     seen = [lab for _k, lab, _v in out]
@@ -339,10 +357,9 @@ def set_fields(page, values):
 
 
 def _texts(page):
-    tpl = page.Template
-    if tpl is None or "EditableTexts" not in tpl.PropertiesList:
-        return {}
-    return dict(tpl.EditableTexts)
+    """The title block's texts, fields with a role under the role's name."""
+    from . import fieldmap
+    return fieldmap.read(page)
 
 
 def has_tolerance_row(page):
