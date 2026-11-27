@@ -99,6 +99,34 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(title[:3], (230, 10, 410))
         self.assertGreaterEqual(title[3], 58)
 
+    def test_title_block_measured_without_iso_ids(self):
+        import tempfile
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" '
+               'xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace" '
+               'width="420mm" height="297mm" viewBox="0 0 420 297">'
+               '<rect x="10" y="10" width="400" height="277"/>'
+               # zone letters and numbers round the border
+               '<text x="5" y="150">C</text><text x="415" y="150">C</text>'
+               '<text x="100" y="292">2</text><text x="100" y="292">3</text>'
+               # a 120 x 30 block in the corner: captions and fields
+               '<text x="292" y="262">Title</text>'
+               '<text freecad:editable="PartName" x="292" y="270">X</text>'
+               '<text x="350" y="280">Scale</text>'
+               '<text freecad:editable="Masstab" x="350" y="285">1:1</text>'
+               '<text x="395" y="285">A3</text></svg>')
+        path = os.path.join(tempfile.mkdtemp(), "company.svg")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(svg)
+        frame, title = core.drawing_area(path, 420, 297)
+        self.assertEqual(frame, (10, 10, 410, 287))
+        self.assertAlmostEqual(title[0], 289.0)          # 3 mm left of its texts
+        self.assertEqual((title[1], title[2]), (10, 410))
+        self.assertAlmostEqual(title[3], 297 - 262 + 6.0)  # just over the top caption
+        # a template with no texts low down keeps the 180 x 60 guess
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(svg.split("<text")[0] + "</svg>")
+        self.assertEqual(core.drawing_area(path, 420, 297)[1], (230, 10, 410, 70))
+
     def test_drawingkit_template_every_size_both_ways(self):
         import tempfile
         import xml.etree.ElementTree as ET
@@ -612,6 +640,41 @@ class TestCenterMarks(DocTest):
         core.add_center_marks(top)
         self.assertEqual(len(top.CosmeticEdges), n)
 
+    def test_marks_follow_scale_change(self):
+        top = self.group.getItemByLabel("Top")
+        front = self.group.Anchor
+        core.add_center_marks(top)
+        core.add_center_marks(front)
+
+        def arm(view):
+            # half the length of the cross's horizontal arm (unscaled)
+            for ce in view.CosmeticEdges:
+                if abs(ce.Start.y - ce.End.y) < 1e-6 and abs(ce.Start.x - ce.End.x) > 1e-6:
+                    return abs(ce.End.x - ce.Start.x) / 2.0, ((ce.Start.x + ce.End.x) / 2.0,
+                                                              ce.Start.y)
+            return None
+
+        self.assertEqual(core._marked_centres(top), [(-20.0, -10.0), (-20.0, -10.0)])
+        before, centre = arm(top)
+        s0 = core.view_scale(top)
+        ce = front.CosmeticEdges[0]
+        axis0 = abs(ce.End.y - ce.Start.y)
+        self.assertEqual(core.rescale_center_marks([top, front]), [])   # nothing changed
+        target = core.next_standard_scale(s0, -1)
+        core.fit_page(self.page, exact=target)
+        s1 = core.view_scale(top)
+        self.assertAlmostEqual(s1, target)
+        after, centre1 = arm(top)
+        r = before - core.OVERSHOOT / s0               # hole radius
+        self.assertAlmostEqual(after, r + core.OVERSHOOT / s1, places=3)
+        self.assertAlmostEqual(centre1[0], centre[0], places=3)
+        self.assertEqual(len(top.CosmeticEdges), 2)    # replaced, not added
+        self.assertEqual(len(front.CosmeticEdges), 1)
+        # the axis line in the front view sticks out by the new overshoot too
+        ce = front.CosmeticEdges[0]
+        self.assertAlmostEqual(abs(ce.End.y - ce.Start.y) - axis0,
+                               2 * core.OVERSHOOT * (1 / s1 - 1 / s0), places=3)
+
     def test_fillets_get_no_marks(self):
         import Part
         box = Part.makeBox(50, 40, 20)
@@ -886,6 +949,29 @@ class TestDetail(DocTest):
         self.assertLess(hole[0].Curve.Center.Length, 1e-3)    # hole in the middle
         # the next section/detail letter skips A
         self.assertEqual(core.next_free_letter(core.used_letters(self.doc)), "B")
+
+    def test_detail_follows_fit_to_page(self):
+        part = coupon(self.doc)
+        page = core.create_page(self.doc, "A3", "Landscape")
+        g = core.add_standard_views(page, [part], front=FRONT)
+        self.doc.recompute()
+        top = g.getItemByLabel("Top")
+        hx, hy = core.model_to_page(top, App.Vector(0, 17, 6))
+        det = core.add_detail(page, top, (hx, hy), 6 * core.view_scale(top), (300, 200))
+        self.doc.recompute()
+        ratio = core.view_scale(det) / core.view_scale(top)
+        # the page put down a step: Fit to page brings it back up, detail too
+        core.set_page_scale(page, core.next_standard_scale(core.view_scale(top), -1))
+        before = core.view_scale(top)
+        self.assertAlmostEqual(core.view_scale(det) / before, ratio, places=6)
+        s = core.fit_to_page(page)
+        self.assertGreater(s, before)
+        self.assertIn(round(core.view_scale(det), 6),
+                      {round(ratio * s, 6), round(core.nearest_standard_scale(ratio * s), 6)})
+        # nothing to do: a second fit leaves it alone
+        d0 = core.view_scale(det)
+        core.fit_to_page(page)
+        self.assertAlmostEqual(core.view_scale(det), d0)
 
 
 class TestBestFront(DocTest):

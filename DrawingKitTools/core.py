@@ -199,6 +199,8 @@ def drawing_area(template_path, page_w, page_h):
         else:
             frame = (10.0, 10.0, page_w - 10.0, page_h - 10.0)
     if title is None:
+        title = _title_block_from_texts(template_path, page_w, page_h, frame)
+    if title is None:
         tw = min(180.0, frame[2] - frame[0])
         th = min(60.0, (frame[3] - frame[1]) / 3.0)
         title = (frame[2] - tw, frame[1], frame[2], frame[1] + th)
@@ -212,6 +214,41 @@ def drawing_area(template_path, page_w, page_h):
                 top = max(top, y + 7.0)
         title = (tx0, ty0, tx1, top)
     return frame, title
+
+
+def _title_block_from_texts(template_path, page_w, page_h, frame):
+    """A template without ISO frame ids: the title block measured from where
+    its texts (fields and captions) are, out to the frame's bottom-right
+    corner. None if there are no texts low on the sheet to go by."""
+    from . import fieldmap
+    try:
+        with open(template_path, encoding="utf-8") as f:
+            svg = f.read()
+        root = ET.fromstring(svg.encode("utf-8"))
+        vb = root.get("viewBox")
+        parts = [float(v) for v in vb.replace(",", " ").split()] if vb else None
+    except (OSError, ET.ParseError, ValueError, TypeError):
+        return None
+    sx = page_w / parts[2] if parts and parts[2] else 1.0
+    sy = page_h / parts[3] if parts and parts[3] else 1.0
+    ox, oy = (parts[0], parts[1]) if parts else (0.0, 0.0)
+    fields, fixed = fieldmap.svg_fields(svg)
+    fx0, fy0, fx1, fy1 = frame
+    low = fy0 + 0.45 * (fy1 - fy0)
+    # zone letters and numbers round the border (and a sheet size such as
+    # A3) are one or two characters: not what marks out the title block
+    texts = list(fields) + [p for p in fixed if len(p[0].strip()) > 2]
+    pts = []
+    for _t, x, y in texts:
+        px, py = (x - ox) * sx, page_h - (y - oy) * sy
+        # below the frame too: the largest rectangle may be the outer border
+        if fx0 + 0.5 < px < fx1 - 0.5 and 0.5 < py < low:
+            pts.append((px, py))
+    if not pts:
+        return None
+    x0 = max(fx0, min(min(p[0] for p in pts) - 3.0, fx1 - 30.0))
+    top = min(low, max(max(p[1] for p in pts) + 6.0, fy0 + 15.0))
+    return (x0, fy0, fx1, top)
 
 
 def free_regions(frame, title, pad=5.0):
@@ -996,6 +1033,7 @@ def fit_page(page, max_scale=None, exact=None, title_text=None, draw=True, pad=N
         centre_content(page, group, extras, regions, margins)
     if not draw:
         return scale
+    rescale_center_marks(part_views(page))
     redraw([group] + list(group.Views) + list(extras))
     from . import annot
     annot.refresh_page(page)   # datums and frames follow their features
@@ -1032,6 +1070,53 @@ def nearest_standard_scale(value):
     import math
     return min((scale_value(r) for r in STANDARD_SCALES),
                key=lambda v: abs(math.log(v / value)))
+
+
+def detail_zooms(page):
+    """[(detail, its scale over its base view's, base view's scale)], taken
+    before the page scale changes (see follow_details)."""
+    out = []
+    for d in page.Views:
+        base = getattr(d, "BaseView", None) if d.isDerivedFrom("TechDraw::DrawViewDetail") else None
+        if base is not None:
+            out.append((d, view_scale(d) / view_scale(base), view_scale(base)))
+    return out
+
+
+def follow_details(page, zooms):
+    """Detail views keep their zoom over their base view after its scale
+    changed: a standard scale goes to the nearest standard scale, any other
+    keeps the exact ratio. Then they are moved where they fit. Returns the
+    details rescaled."""
+    std = {round(scale_value(r), 9) for r in STANDARD_SCALES}
+    moved = []
+    for d, ratio, base_old in zooms:
+        base_new = view_scale(d.BaseView)
+        if abs(base_new / base_old - 1.0) < 1e-9:
+            continue
+        old = view_scale(d)
+        new = ratio * base_new
+        if round(old, 9) in std:
+            new = nearest_standard_scale(new)
+        set_detail_scale(d, new)
+        moved.append(d)
+    if moved:
+        rescale_center_marks(moved)
+    if zooms:
+        place_details(page)
+    return moved
+
+
+def fit_to_page(page):
+    """The Fit to page button: the largest standard scale that fits, with
+    room for dimensions and callouts; detail views follow. Returns scale."""
+    zooms = detail_zooms(page)
+    fit_page(page)
+    make_room_for_tables(page)   # room for dimensions and callouts
+    if follow_details(page, zooms):
+        from . import annot
+        annot.refresh_page(page)
+    return view_scale(page_content(page)[0])
 
 
 def set_detail_scale(det, scale):
@@ -1087,6 +1172,7 @@ def step_page_scale(page, step):
     for d, ratio in details:
         set_detail_scale(d, nearest_standard_scale(ratio * view_scale(d.BaseView)))
     if details:
+        rescale_center_marks([d for d, _ in details])
         place_details(page)
         from . import annot
         annot.refresh_page(page)
@@ -1137,6 +1223,7 @@ def _set_own_scale(view, scale):
         set_detail_scale(view, scale)
     else:
         set_section_scale(view, scale)
+    rescale_center_marks([view])
 
 
 def step_view_scale(view, step):
@@ -1285,6 +1372,7 @@ def set_page_scale(page, value, label=None, draw=True):
     if not draw:
         return roomy
     if details:
+        rescale_center_marks([d for d, _ in details])
         from . import annot
         annot.refresh_page(page)
     return scale
@@ -2902,20 +2990,62 @@ def plan_center_marks(marks, over):
     return segs, circles
 
 
-def add_center_marks(view):
-    """(Re)draw DrawingKit centre marks, bolt circles and centre lines on a view.
-    Returns the number of cosmetic lines/circles made."""
-    if not view.isDerivedFrom("TechDraw::DrawViewPart"):
-        return 0
-    clear_center_marks(view)
+def _marked_centres(view):
+    """Centres of the holes DrawingKit's marks are on now: the midpoint of
+    each mark line (a cross's arms and a bolt circle's radial lines are
+    centred on their hole). Read from the cosmetic lines, so it needs no
+    drawing of the view (which lags behind a scale change)."""
+    tags = set(getattr(view, MARKS_PROP, []) or [])
+    geoms = set(getattr(view, MARKS_GEOM_PROP, []) or [])
+    out = []
+    try:
+        edges = list(view.CosmeticEdges)
+    except Exception:
+        edges = []
+    for ce in edges:
+        try:
+            if ce.Tag not in tags and _mark_key(ce) not in geoms:
+                continue
+            if _mark_key(ce).startswith("C "):
+                continue
+            out.append(((ce.Start.x + ce.End.x) / 2.0, (ce.Start.y + ce.End.y) / 2.0))
+        except Exception:
+            pass
+    return out
+
+
+def _plan_marks(view, keep=None):
+    """(segs, circles) for view; ``keep``: centres to mark (else the holes
+    TechDraw drew as visible)."""
     marks, lines = center_features(view, with_radius=True)
-    visible = _visible_circle_centres(view)
-    if visible:
+    visible = keep if keep is not None else _visible_circle_centres(view)
+    if visible or keep is not None:
         # skip holes hidden behind material in this view
         marks = [m for m in marks
                  if any(abs(m[0] - cx) < 1e-3 and abs(m[1] - cy) < 1e-3 for cx, cy in visible)]
     segs, circles = plan_center_marks(marks, OVERSHOOT / view_scale(view))
     segs.extend(lines)
+    return segs, circles
+
+
+def _planned_keys(segs, circles):
+    keys = set()
+    for (x0, y0), (x1, y1) in segs:
+        a, b = sorted([(round(x0, 3), round(y0, 3)), (round(x1, 3), round(y1, 3))])
+        keys.add("L %.3f %.3f %.3f %.3f" % (a[0] + 0.0, a[1] + 0.0, b[0] + 0.0, b[1] + 0.0))
+    for cx, cy, R in circles:
+        keys.add("C %.3f %.3f %.3f" % (cx, cy, R))
+    return keys
+
+
+def add_center_marks(view, keep=None):
+    """(Re)draw DrawingKit centre marks, bolt circles and centre lines on a view.
+    ``keep``: the hole centres to mark (see rescale_center_marks).
+    Returns the number of cosmetic lines/circles made."""
+    if not view.isDerivedFrom("TechDraw::DrawViewPart"):
+        return 0
+    segs, circles = _plan_marks(view, keep)
+    clear_center_marks(view)
     from . import lineweights
     weight = lineweights.centre_line()     # the sheet's thin line
     tags = []
@@ -2953,6 +3083,28 @@ def refresh_center_marks(views):
         if getattr(v, MARKS_PROP, None):
             n += add_center_marks(v)
     return n
+
+
+def rescale_center_marks(views):
+    """After a scale change: marks stick out OVERSHOOT paper mm past their
+    circle, so on views that have marks they are drawn again for the new
+    scale, on the same holes as before. Views whose marks already fit are
+    left alone. Returns the views redrawn."""
+    done = []
+    for v in views:
+        try:
+            if not getattr(v, MARKS_PROP, None):
+                continue
+            keep = _marked_centres(v)
+            segs, circles = _plan_marks(v, keep)
+            if _planned_keys(segs, circles) == set(getattr(v, MARKS_GEOM_PROP, []) or []):
+                continue
+            add_center_marks(v, keep)
+            v.touch()           # else the old marks stay among its edges
+            done.append(v)
+        except Exception as e:
+            App.Console.PrintWarning("DrawingKit centre marks: %s\n" % e)
+    return done
 
 
 # ---------------------------------------------------------------------------

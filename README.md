@@ -4,7 +4,7 @@ A FreeCAD 1.1 workbench that makes TechDraw drawings quicker, inspired by how On
 
 The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. The DrawingKit buttons are also added at the end of TechDraw's *TechDraw Pages* toolbar, for when you are in TechDraw. (Double-clicking a page in the tree still switches to TechDraw; that is TechDraw's own preference, *switch workbench on click*.)
 
-Status: early version (0.8), not yet in the Addon Manager.
+Status: early version (0.15), not yet in the Addon Manager.
 
 ## Commands
 
@@ -24,7 +24,7 @@ The buttons sit on four toolbars: **DrawingKit views**, **DrawingKit dimensions*
 | **Edit a part's hatch** | Click a part in a section hatched by part: set its angle, spacing (mm on paper) and pattern, switch its hatching off (drawn uncut) or on (e.g. a pin you do want cut), or reset it. Your choice is kept whenever the hatch is redone. |
 | **Detail view by clicking** | Click the centre of the area to enlarge, click again to set the circle, then click where the detail goes. It gets the next free letter and a standard scale, e.g. "DETAIL A (5 : 1)". |
 | **Auxiliary view** | Select a slanted straight edge (a face seen edge-on), then click on the side where the view goes: it looks square-on at that face, so the face shows true size, and stays lined up with its parent along the face's normal. |
-| **Fit to page** | Picks the scale again so the projection group and the other views fit, then re-centres them, keeping views off tables. A section stays in line with the view it was cut from (a section of the Top view stays beside the Top view); if that doesn't fit, a smaller scale is used. Room is kept round the views for their dimensions and callouts, and a table sitting on them moves to a free spot. Datums, frames and dimensions follow (a dimension keeps its distance from the view's edge when the scale changes). |
+| **Fit to page** | Picks the scale again so the projection group and the other views fit, then re-centres them, keeping views off tables. A section stays in line with the view it was cut from (a section of the Top view stays beside the Top view); if that doesn't fit, a smaller scale is used. Room is kept round the views for their dimensions and callouts, and a table sitting on them moves to a free spot. Datums, frames and dimensions follow (a dimension keeps its distance from the view's edge when the scale changes), and so do centre marks (they still stick out 3 mm on paper). Detail views keep their zoom over their view and move to a free spot if they no longer fit. On a template from elsewhere, the title block is measured from where its texts are. |
 | **Scale up / Scale down** | One standard scale bigger or smaller (1:2 → 1:1 → 2:1 …), laid out again like Fit to page. Detail views keep their zoom over their view and move to a free spot if they no longer fit. Scale up refuses if the views would not fit the sheet. With a detail view selected, only that detail changes (it stays larger than its view). |
 | **Set scale** | Any scale, standard or not: type 1:3, 3:4, 2.5:1, 0.8 or 150 %; the title block shows it as typed, and the sheet keeps it when tables or notes are added later. A scale at which the views fit but their dimensions and callouts wouldn't is refused, with the largest standard scale that does fit. **Fill sheet (NTS)** zooms the views to fill the drawing area at whatever scale that takes (leaving room for detail views), and the title block says NTS. With a detail view selected, sets that detail's scale. | With a **section or auxiliary view** selected, Set scale and Scale up / down change just that view: its caption gets the scale (SECTION A-A SCALE 2 : 1), and it keeps its zoom over the page when the page scale changes.
 | **Hidden lines on/off** | Shows hidden edges as dashed lines (a counterbore seen from the side, say) in the selected views, or in every view on the sheet; click again to hide them. |
@@ -94,9 +94,7 @@ Which page a command acts on: a selected page (or a view on it), else the page i
 ## Limits of this version
 
 - Fitting uses each view's bounding box, so a rotated or round part may get one scale step smaller than it strictly needs.
-- With a template from elsewhere that has no ISO frame ids, Fit to page assumes a 180 × 60 mm title block in the bottom-right corner.
-- Detail views keep their own scale and position when you use Fit to page (Scale up / down and Set scale do rescale and move them).
-- Centre marks are cosmetic lines: after Fit to page changes the scale, run the button again so the overhang matches the new scale.
+- With a template from elsewhere that has no ISO frame ids, the title block is taken to run from its texts to the frame's bottom-right corner; a template with no texts low on the sheet is given a 180 × 60 mm title block there.
 - Stepped sections use TechDraw's complex section ("Offset" style), so only right-angle steps are supported.
 
 ## Tests
