@@ -2,7 +2,7 @@
 
 A FreeCAD 1.1 workbench that makes TechDraw drawings quicker, inspired by how Onshape drawings feel. It sits on top of TechDraw: every page and view it creates is an ordinary TechDraw object, so you can keep editing them with the normal TechDraw tools.
 
-The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. The DrawingKit buttons are also added at the end of TechDraw's *TechDraw Pages* toolbar, for when you are in TechDraw. (Double-clicking a page in the tree still switches to TechDraw; that is TechDraw's own preference, *switch workbench on click*.)
+The **DrawingKit** workbench has the DrawingKit buttons plus TechDraw's own view, dimension, centre-line, annotation and export tools, so you can make a whole drawing without switching workbench. Clicking a page switches to TechDraw (TechDraw's own preference, *switch workbench on click*). To keep the DrawingKit buttons at hand there, tick **DrawingKit → Show DrawingKit buttons in TechDraw**: they are then added at the end of TechDraw's *TechDraw Pages* toolbar, from the next time TechDraw opens. It is off unless you switch it on, so TechDraw's toolbars are left as they are.
 
 Status: early version (0.15), not yet in the Addon Manager.
 

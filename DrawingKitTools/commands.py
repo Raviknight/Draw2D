@@ -3596,6 +3596,46 @@ COMMANDS = [
 for _name, _cmd in COMMANDS:
     Gui.addCommand(_name, _cmd)
 
+
+IN_TECHDRAW_PREF = "ButtonsInTechDraw"
+
+
+def buttons_in_techdraw():
+    """Whether DrawingKit's buttons are also put on TechDraw's toolbar (off
+    unless the user switches it on: an add-on leaves FreeCAD's own
+    workbenches alone by default)."""
+    try:
+        from . import annot
+        return App.ParamGet(annot.PREFS).GetBool(IN_TECHDRAW_PREF, False)
+    except Exception:
+        return False
+
+
+class ButtonsInTechDraw:
+    """Menu switch: also show the DrawingKit buttons in TechDraw (handy when
+    clicking a page switches to TechDraw)."""
+
+    def GetResources(self):
+        return {"MenuText": "Show DrawingKit buttons in TechDraw",
+                "ToolTip": "Also put the DrawingKit buttons at the end of TechDraw's "
+                           "'TechDraw Pages' toolbar, for when clicking a page switches "
+                           "to TechDraw. Takes effect the next time TechDraw opens.",
+                "Checkable": buttons_in_techdraw()}
+
+    def IsActive(self):
+        return True
+
+    def Activated(self, checked=None):
+        from . import annot
+        on = bool(checked) if checked is not None else not buttons_in_techdraw()
+        App.ParamGet(annot.PREFS).SetBool(IN_TECHDRAW_PREF, on)
+        say("DrawingKit buttons in TechDraw: %s (from the next time TechDraw opens)"
+            % ("on" if on else "off"))
+
+
+Gui.addCommand("DrawingKit_ButtonsInTechDraw", ButtonsInTechDraw())
+SETTINGS_COMMANDS = ["DrawingKit_ButtonsInTechDraw"]
+
 # toolbars in the DrawingKit workbench
 COMMAND_GROUPS = [
     ("DrawingKit views", ["DrawingKit_NewSheet", "DrawingKit_Standard", "DrawingKit_StandardViews",

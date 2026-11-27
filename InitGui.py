@@ -53,7 +53,8 @@ class DrawingKitWorkbench(Gui.Workbench):
         fonts.ensure_registered()      # DejaVu Sans, the drawing font
         for name, cmds in commands.COMMAND_GROUPS:
             self.appendToolbar(name, cmds)
-        self.appendMenu("DrawingKit", commands.COMMAND_NAMES)
+        self.appendMenu("DrawingKit", commands.COMMAND_NAMES + ["Separator"]
+                        + commands.SETTINGS_COMMANDS)
         known = set(Gui.listCommands())
         for name, cmds in self.TECHDRAW_TOOLBARS:
             cmds = [c for c in cmds if c in known]
@@ -74,14 +75,20 @@ Gui.addWorkbench(DrawingKitWorkbench())
 
 
 class DrawingKitInTechDraw:
-    """Also show the DrawingKit buttons in the TechDraw workbench.
+    """Also show the DrawingKit buttons in the TechDraw workbench, if the
+    user switched that on (DrawingKit menu > Show DrawingKit buttons in
+    TechDraw; off by default).
 
     FreeCAD switches to TechDraw when you click on a page, which would hide
     the DrawingKit toolbar; this puts the same buttons at the end of TechDraw's
-    'TechDraw Pages' toolbar.
+    'TechDraw Pages' toolbar. Asked each time a workbench opens.
     """
 
     def modifyToolBars(self):
+        import FreeCAD
+        if not FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/DrawingKit") \
+                .GetBool("ButtonsInTechDraw", False):
+            return []
         try:
             from DrawingKitTools import commands
         except Exception:
