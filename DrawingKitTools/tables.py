@@ -10,6 +10,7 @@ the drawing frame; adding a revision also updates the title block.
 """
 
 import datetime
+import json
 
 import FreeCAD as App
 
@@ -244,6 +245,46 @@ def add_table(page, headers, rows, title="", place=None, tsize=None):
     if place is None:
         place = free_table_spot(page, W, Ht)
     return annot._new(page, "table", title or "Table", p, "free", None, place, (0, 0))
+
+
+def table_contents(table):
+    """(title, headers, rows) of a table of your own, with any cell edits."""
+    p = annot._params(table)
+    values = annot._values(table)
+    rows = [[values.get("r%dc%d" % (r, c), txt) for c, txt in enumerate(row)]
+            for r, row in enumerate(p.get("rows", []))]
+    return p.get("title", ""), list(p.get("headers", [])), rows
+
+
+def contents_text(table):
+    """The table as rows of cells split by ' | ', headings first, for editing."""
+    _title, headers, rows = table_contents(table)
+    return "\n".join(" | ".join(str(c) for c in r) for r in [headers] + rows)
+
+
+def edit_table(table, headers, rows, title=""):
+    """New headings, rows and title for a table of your own; it stays
+    centred where it is."""
+    if not headers:
+        raise ValueError("A table needs at least a header row")
+    rows = [list(r) + [""] * (len(headers) - len(r)) for r in rows]
+    p = annot._params(table)
+    if table.Label in (p.get("title") or "Table", "Table", ""):
+        table.Label = title or "Table"      # named after its title: keep it so
+    p.update({"title": title or "", "headers": list(headers), "rows": rows,
+              "widths": column_widths(headers, rows), "editable": True})
+    p.pop("fields", None)
+    setattr(table, annot.PARAMS, json.dumps(p))
+    setattr(table, annot.KIND, "table")     # a hole table edited by hand is yours now
+    table.EditableTexts = []                # the cells now live in the rows
+    annot.render(table)
+    return table
+
+
+def is_own_table(obj):
+    """A table whose cells are edited as text: a table of your own, or a
+    hole table (which nothing fills in again once made)."""
+    return getattr(obj, annot.KIND, "") in ("table", "holetable")
 
 
 # ---------------------------------------------------------------------------

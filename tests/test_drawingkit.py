@@ -3601,6 +3601,30 @@ class TestForgeLayoutFixes(DocTest):
         words = " ".join(x["text"] for x in textlayer.page_texts(page))
         self.assertIn("SPLINE DATA", words)
 
+    def test_edit_table_of_your_own(self):
+        from DrawingKitTools import annot, tables
+        page = core.create_page(self.doc, "A3", "Landscape")
+        t = tables.add_table(page, ["TEETH", "PITCH"], [["16", "32/64"]], "SPLINE DATA")
+        self.doc.recompute()
+        self.assertEqual(tables.contents_text(t), "TEETH | PITCH\n16 | 32/64")
+        # a cell changed in its properties is kept when the table is edited
+        texts = list(t.EditableTexts)
+        texts[texts.index("16")] = "18"
+        t.EditableTexts = texts
+        self.assertEqual(tables.table_contents(t)[2], [["18", "32/64"]])
+        where = (App.Vector(getattr(t, annot.ANCHOR)), App.Vector(getattr(t, annot.OFFSET)))
+        rows = tables.parse_rows(tables.contents_text(t) + "\n20 | 24/48 | EXTRA WIDE CELL")
+        tables.edit_table(t, rows[0], rows[1:], "SPLINE DATA (REV B)")
+        self.doc.recompute()
+        self.assertEqual(t.Label, "SPLINE DATA (REV B)")
+        title, headers, body = tables.table_contents(t)
+        self.assertEqual(headers, ["TEETH", "PITCH", ""])
+        self.assertEqual(body, [["18", "32/64", ""], ["20", "24/48", "EXTRA WIDE CELL"]])
+        self.assertIn("EXTRA WIDE CELL", t.Symbol)
+        # the grid stays centred where it was
+        self.assertEqual((getattr(t, annot.ANCHOR), getattr(t, annot.OFFSET)), where)
+        self.assertEqual(len(annot._params(t)["widths"]), 3)
+
     def test_sheet_check_finds_text_on_part_lines(self):
         from DrawingKitTools import sheetcheck, smartdim
         part = plate_two_holes(self.doc)

@@ -3312,13 +3312,18 @@ class Table:
                 "ToolTip": "A table of your own (data for a spline, a gear, a gauge...): type "
                            "or paste the rows, the first one being the headings, cells split "
                            "by tabs (from a spreadsheet), '|' or ';'. Placed in a free spot; "
-                           "drag it where you want it and edit any cell later."}
+                           "drag it where you want it. To change it, select the table and "
+                           "run this again, or double-click it on the sheet."}
 
     def IsActive(self):
         return App.ActiveDocument is not None and bool(pages(App.ActiveDocument))
 
     def Activated(self):
         from . import tables
+        own = [o for o in Gui.Selection.getSelection() if tables.is_own_table(o)]
+        if own:
+            edit_own_table(own[0])
+            return
         page = target_page()
         if page is None:
             warn("Select the page (or a view on it) first.")
@@ -3341,8 +3346,33 @@ class Table:
                                lambda: tables.add_table(page, rows[0], rows[1:],
                                                         title.text().strip()))
         doc.recompute()
-        say("%s: %d column(s), %d row(s); drag it into place, edit cells in its properties"
-            % (t.Label, len(rows[0]), len(rows) - 1))
+        say("%s: %d column(s), %d row(s); drag it into place; to change it, select it "
+            "and run Table again" % (t.Label, len(rows[0]), len(rows) - 1))
+
+
+def edit_own_table(table):
+    """Edit a table of your own: its title and all its cells as text."""
+    from . import tables
+    title_now, _h, _r = tables.table_contents(table)
+    pop = ui.Popover("Edit %s" % table.Label)
+    title = ui.field(title_now, 260, "Title (optional), e.g. SPLINE DATA")
+    body = QtWidgets.QPlainTextEdit()
+    body.setPlainText(tables.contents_text(table))
+    body.setMinimumSize(420, 160)
+    pop.add_row(title, stretch=True)
+    pop.add_row(body, stretch=True)
+    if not pop.run():
+        return False
+    rows = tables.parse_rows(body.toPlainText())
+    if not rows:
+        warn("Type the headings and at least one row.")
+        return False
+    doc = table.Document
+    run_in_transaction(doc, "DrawingKit edit table",
+                       lambda: tables.edit_table(table, rows[0], rows[1:], title.text().strip()))
+    doc.recompute()
+    say("%s updated: %d column(s), %d row(s)" % (table.Label, len(rows[0]), len(rows) - 1))
+    return True
 
 
 class LineWeights:

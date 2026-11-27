@@ -312,6 +312,20 @@ class DragAnywhere(QtCore.QObject):
         item = self.gview.itemAt(pos)
         return isinstance(item, QtWidgets.QGraphicsPathItem)
 
+    def _own_table_at(self, pos):
+        """The table of your own under viewport point pos, if any."""
+        from . import tables
+        for item in self.gview.items(pos):
+            it = item
+            while it is not None and it.data(0) != "QGIV":
+                it = it.parentItem()
+            if it is None:
+                continue
+            obj = self.page.Document.getObject(str(it.data(1) or ""))
+            if obj is not None and tables.is_own_table(obj):
+                return obj
+        return None
+
     def eventFilter(self, obj, event):
         t = event.type()
         if t == QtCore.QEvent.Paint:
@@ -327,6 +341,15 @@ class DragAnywhere(QtCore.QObject):
         if PagePicker.active is not None:
             return False
         try:
+            if t == QtCore.QEvent.MouseButtonDblClick and event.button() == QtCore.Qt.LeftButton:
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                table = self._own_table_at(pos)
+                if table is not None:
+                    self.press, self.dragging = None, False
+                    from . import commands
+                    QtCore.QTimer.singleShot(0, lambda: commands.edit_own_table(table))
+                    return True
+                return False
             if t == QtCore.QEvent.MouseButtonPress:
                 self.press, self.dragging = None, False
                 if event.button() != QtCore.Qt.LeftButton or \
