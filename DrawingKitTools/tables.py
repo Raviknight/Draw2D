@@ -275,16 +275,35 @@ def edit_table(table, headers, rows, title=""):
               "widths": column_widths(headers, rows), "editable": True})
     p.pop("fields", None)
     setattr(table, annot.PARAMS, json.dumps(p))
-    setattr(table, annot.KIND, "table")     # a hole table edited by hand is yours now
+    rev = getattr(table, annot.KIND, "") == "revtable"
+    if not rev:
+        setattr(table, annot.KIND, "table")  # a hole table edited by hand is yours now
     table.EditableTexts = []                # the cells now live in the rows
     annot.render(table)
+    if rev:
+        keep_in_frame(table)                # hangs from the frame's corner again
+        _title_block_revision(table, rows)
     return table
 
 
+def _title_block_revision(table, rows):
+    """The title block's revision is the revision table's last letter."""
+    page = _page_of(table)
+    tpl = getattr(page, "Template", None) if page is not None else None
+    if tpl is None or "EditableTexts" not in tpl.PropertiesList:
+        return
+    texts = dict(tpl.EditableTexts)
+    last = next((r[0] for r in reversed(rows) if r and str(r[0]).strip()), None)
+    if "revision_index" in texts and last and texts["revision_index"] != last:
+        texts["revision_index"] = last
+        tpl.EditableTexts = texts
+
+
 def is_own_table(obj):
-    """A table whose cells are edited as text: a table of your own, or a
-    hole table (which nothing fills in again once made)."""
-    return getattr(obj, annot.KIND, "") in ("table", "holetable")
+    """A table whose cells are edited in the grid editor: a table of your
+    own, a hole table (which nothing fills in again once made) or the
+    revision table."""
+    return getattr(obj, annot.KIND, "") in ("table", "holetable", "revtable")
 
 
 # ---------------------------------------------------------------------------

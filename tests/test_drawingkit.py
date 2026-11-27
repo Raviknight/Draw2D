@@ -1713,6 +1713,32 @@ class TestTitleAndTables(DocTest):
         self.assertEqual(dict(page.Template.EditableTexts)["revision_index"], "B")
         self.assertEqual(len([v for v in page.Views if getattr(v, "DrawingKitAnnot", "") == "revtable"]), 1)
 
+    def test_revision_table_edited_in_the_grid(self):
+        from DrawingKitTools import tables
+        page = core.create_page(self.doc, "A3", "Landscape")
+        t = tables.add_revision(page, "Initial release", "RS", "2026-11-22", eco="ECO-1")
+        self.doc.recompute()
+        self.assertTrue(tables.is_own_table(t))
+        _title, headers, rows = tables.table_contents(t)
+        rows[0][2] = "FIRST ISSUE"
+        rows.append(["B", "ECO-2", "Holes enlarged", "2026-12-01", "RS"])
+        tables.edit_table(t, headers, rows)
+        self.doc.recompute()
+        self.assertEqual(getattr(t, "DrawingKitAnnot"), "revtable")       # still the revision table
+        self.assertEqual(t.Label, "Revision table")
+        self.assertEqual(tables.table_contents(t)[2][0][2], "FIRST ISSUE")
+        self.assertEqual(dict(page.Template.EditableTexts)["revision_index"], "B")
+        # it still hangs from the frame's top-right corner, and the next
+        # revision carries on from the edited rows
+        frame, _ = core.drawing_area(page.Template.Template, *core.page_size(page))
+        W, Ht = tables.table_size(__import__("json").loads(t.DrawingKitParams))
+        a = getattr(t, "DrawingKitAnchor")
+        self.assertAlmostEqual(a.x + W / 2.0, frame[2], places=6)
+        self.assertAlmostEqual(a.y + Ht / 2.0, frame[3], places=6)
+        tables.add_revision(page, "Thread changed", "RS", "2026-12-05")
+        self.assertEqual([r[0] for r in tables.table_contents(t)[2]], ["A", "B", "C"])
+        self.assertEqual(tables.table_contents(t)[2][0][2], "FIRST ISSUE")
+
     def test_revision_eco_column_and_old_tables(self):
         import json
         from DrawingKitTools import tables, annot
