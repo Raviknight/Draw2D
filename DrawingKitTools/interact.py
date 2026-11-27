@@ -312,6 +312,39 @@ class DragAnywhere(QtCore.QObject):
         item = self.gview.itemAt(pos)
         return isinstance(item, QtWidgets.QGraphicsPathItem)
 
+    def _on_text(self, x, y):
+        """True if page point (x, y) is on a dimension's text or a DrawingKit
+        symbol: TechDraw (or DrawingKit's own drag) moves those."""
+        from . import annot, clearance
+        for o in self.page.Views:
+            try:
+                if o.isDerivedFrom("TechDraw::DrawViewDimension"):
+                    b = clearance.dimension_label_box(o)
+                elif annot.is_annotation(o):
+                    b = annot.body_box(o)
+                else:
+                    continue
+                if b and b[0] - 1 <= x <= b[2] + 1 and b[1] - 1 <= y <= b[3] + 1:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _locked_view_at(self, pos):
+        """The group's front view under viewport point pos when the press is
+        on its blank face, not a line: TechDraw won't drag it (its place is
+        locked to the group), so DrawingKit moves the group instead."""
+        x, y = to_page(self.gview.mapToScene(pos))
+        view = _view_under(self.page, x, y, margin=0.0)
+        if view is None or not view.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+            return None
+        group = core.parent_group(view)
+        if group is None or not core.same(group.Anchor, view):
+            return None
+        if self._on_text(x, y):
+            return None
+        return view
+
     def _own_table_at(self, pos):
         """The table of your own under viewport point pos, if any. Worked
         out from the tables' places on the page, not from the scene's items:
@@ -366,10 +399,13 @@ class DragAnywhere(QtCore.QObject):
                                              | QtCore.Qt.ShiftModifier):
                     return False
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-                if not self._scene_item_is_geometry(pos):
-                    return False  # labels, frames, dimensions: TechDraw handles them
                 x, y = to_page(self.gview.mapToScene(pos))
-                view = _view_under(self.page, x, y)
+                if self._scene_item_is_geometry(pos):
+                    view = _view_under(self.page, x, y)
+                else:
+                    # labels, frames, dimensions: TechDraw handles them; but
+                    # the group's front view can't be moved by TechDraw at all
+                    view = self._locked_view_at(pos)
                 if view is None:
                     return False
                 target = self._move_target(view)
