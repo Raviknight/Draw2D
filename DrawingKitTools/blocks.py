@@ -51,9 +51,22 @@ def cell(x, y, w, h, kind="empty", **kw):
     c = {"x": float(x), "y": float(y), "w": float(w), "h": float(h), "kind": kind,
          "label": "", "field": "", "text": "", "size": 3.5, "bold": False, "align": "left",
          "vertical": False, "rows": 6, "lines": 1, "image": "", "image_type": "",
-         "border": True}
+         "border": SIDES}
     c.update(kw)
     return c
+
+
+SIDES = "ltrb"                          # left, top, right, bottom
+
+
+def sides(value):
+    """The border sides of a cell as a string out of 'ltrb' (True: all,
+    False: none, as saved by 0.15.5)."""
+    if value is True or value is None:
+        return SIDES
+    if value is False:
+        return ""
+    return "".join(s for s in SIDES if s in str(value))
 
 
 def new_design(name="My title block", width=180.0, height=40.0):
@@ -90,7 +103,7 @@ def clean(d):
             pass
         n["bold"] = bool(c.get("bold"))
         n["vertical"] = bool(c.get("vertical"))
-        n["border"] = bool(c.get("border", True))
+        n["border"] = sides(c.get("border", True))
         if n["kind"] not in KINDS:
             n["kind"] = "empty"
         if n["align"] not in ALIGNS:
@@ -547,25 +560,25 @@ def _minus(a, b, cuts):
 
 def inner_lines(d):
     """The lines between cells as (x, y, length, vertical) in block mm (y
-    down); the outer frame is not included. Each cell draws its left and
-    top edge. Where a cell without a border meets another cell without a
-    border the line is left out, so a group of them reads as one open area."""
+    down); the outer frame is not included (it is always drawn). Each cell
+    draws its left and top edge. A line between two cells is left out where
+    either of them has that side switched off, so switching off a cell's
+    left border always takes away the line on its left."""
     out = []
     cells = d["cells"]
     for c in cells:
+        mine = sides(c.get("border", True))
         for vertical in (True, False):
             pos, start, span = ("x", "y", "h") if vertical else ("y", "x", "w")
-            if c[pos] <= EPS:
+            near, far_side = ("l", "r") if vertical else ("t", "b")
+            if c[pos] <= EPS or near not in mine:
                 continue
             a, b = c[start], c[start] + c[span]
-            if c.get("border", True):
-                parts = [(a, b)]
-            else:
-                far = "w" if vertical else "h"
-                cuts = [(n[start], n[start] + n[span]) for n in cells
-                        if not n.get("border", True) and n is not c
-                        and abs(n[pos] + n[far] - c[pos]) < EPS]
-                parts = _minus(a, b, cuts)
+            far = "w" if vertical else "h"
+            cuts = [(n[start], n[start] + n[span]) for n in cells
+                    if n is not c and far_side not in sides(n.get("border", True))
+                    and abs(n[pos] + n[far] - c[pos]) < EPS]
+            parts = _minus(a, b, cuts)
             for p0, p1 in parts:
                 if vertical:
                     out.append((c["x"], p0, p1 - p0, True))
@@ -788,6 +801,12 @@ def preset_asme():
                       field=name, text=default, size=font,
                       bold=name in ("drawing_number", "revision_index"),
                       align="centre" if align == "middle" else "left"))
+    # notes cells keep only the lines round the notes area: right (to the main
+    # area) and, for the last one, bottom (over INTERPRET PER)
+    for c in C:
+        if c["border"] is False:
+            c["border"] = sides(("r" if abs(c["x"] + c["w"] - tw) < EPS else "")
+                                + ("b" if abs(c["y"] + c["h"] - (yb - 6)) < EPS else ""))
     d["cells"] = C
     return d
 

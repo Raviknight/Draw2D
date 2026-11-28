@@ -82,7 +82,7 @@ class BlockCanvas(QtWidgets.QWidget):
         r = self._layout()
         if self.renderer is not None:
             self.renderer.render(p, r)
-        # cells without a border: a faint dashed outline, so they can still be seen and
+        # cells with a side switched off: a faint dashed outline, so they can still be seen and
         # picked (it is not part of the block)
         pen = QtGui.QPen(QtGui.QColor("#9aa5b1"))
         pen.setStyle(QtCore.Qt.DashLine)
@@ -90,7 +90,7 @@ class BlockCanvas(QtWidgets.QWidget):
         p.setPen(pen)
         p.setBrush(QtCore.Qt.NoBrush)
         for c in self.d["cells"]:
-            if not c.get("border", True):
+            if blocks.sides(c.get("border", True)) != blocks.SIDES:
                 p.drawRect(QtCore.QRectF(self.ox + c["x"] * self.k, self.oy + c["y"] * self.k,
                                          c["w"] * self.k, c["h"] * self.k))
         i = self.owner.current
@@ -287,15 +287,35 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.vertical = QtWidgets.QCheckBox("Runs upwards")
         self.bold.toggled.connect(self._edited)
         self.vertical.toggled.connect(self._edited)
-        self.open = QtWidgets.QCheckBox("No border")
-        self.open.setToolTip("Leave out the lines between this cell and its neighbours that "
-                             "have no border either, so they read as one open area (for "
-                             "notes). Lines to other cells and the outer frame stay.")
-        self.open.toggled.connect(self._edited)
         row.addWidget(self.bold)
         row.addWidget(self.vertical)
-        row.addWidget(self.open)
         form.addRow("", row)
+        # borders, like the Borders button in a spreadsheet: one switch per side,
+        # plus All and None
+        self.borders = QtWidgets.QToolButton()
+        self.borders.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.borders.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.borders.setToolTip("Which lines this cell has. Switching off a side takes away "
+                                "the line there, also for the cell next to it. The outer "
+                                "frame of the block always stays.")
+        menu = QtWidgets.QMenu(self.borders)
+        a_all = menu.addAction("All borders")
+        a_none = menu.addAction("No border")
+        menu.addSeparator()
+        self.side_actions = {}
+        for s, name in (("l", "Left border"), ("t", "Top border"), ("r", "Right border"),
+                        ("b", "Bottom border")):
+            act = menu.addAction(name)
+            act.setCheckable(True)
+            act.toggled.connect(self._edited)
+            self.side_actions[s] = act
+        a_all.triggered.connect(lambda: self._set_sides(blocks.SIDES))
+        a_none.triggered.connect(lambda: self._set_sides(""))
+        self.borders.setMenu(menu)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.borders)
+        row.addStretch(1)
+        form.addRow("Borders", row)
         self.align = QtWidgets.QComboBox()
         for a_ in blocks.ALIGNS:
             self.align.addItem(a_.capitalize(), a_)
@@ -498,7 +518,10 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             self.size.setValue(c["size"])
             self.bold.setChecked(c["bold"])
             self.vertical.setChecked(c["vertical"])
-            self.open.setChecked(not c.get("border", True))
+            have = blocks.sides(c.get("border", True))
+            for s, act in self.side_actions.items():
+                act.setChecked(s in have)
+            self._show_sides(have)
             self.align.setCurrentIndex(self.align.findData(c["align"]))
             self.rows.setValue(c["rows"])
             self.lines.setValue(c["lines"])
@@ -524,6 +547,24 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             self.label.setEnabled(k != "text")
         self._loading = False
 
+    def _show_sides(self, have):
+        names = {"l": "Left", "t": "Top", "r": "Right", "b": "Bottom"}
+        if have == blocks.SIDES:
+            text = "All borders"
+        elif not have:
+            text = "No border"
+        else:
+            text = ", ".join(names[s] for s in have)
+        self.borders.setText(text)
+
+    def _set_sides(self, have):
+        """All borders / No border: set the four side switches in one step."""
+        self._loading = True
+        for s, act in self.side_actions.items():
+            act.setChecked(s in have)
+        self._loading = False
+        self._edited()
+
     def _field_key(self):
         t = self.field.currentText()
         i = self.field.findText(t)
@@ -548,7 +589,8 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         new["size"] = self.size.value()
         new["bold"] = self.bold.isChecked()
         new["vertical"] = self.vertical.isChecked()
-        new["border"] = not self.open.isChecked()
+        new["border"] = "".join(s for s in blocks.SIDES if self.side_actions[s].isChecked())
+        self._show_sides(new["border"])
         new["align"] = self.align.currentData()
         new["rows"] = self.rows.value()
         if new["kind"] == "field" and not new["field"]:

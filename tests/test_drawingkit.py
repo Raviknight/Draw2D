@@ -3241,31 +3241,43 @@ class TestTitleBlockDesigns(DocTest):
         self.assertTrue(any(v and abs(x - t.ANSI_TOL_W) < 1e-6 and y < tol1["y"] < y + ln
                             for x, y, ln, v in lines))
 
-    def test_cells_without_border(self):
+    def test_cell_border_sides(self):
         b = self.blocks
         d = b.new_design("T", 90, 30)
         b.split(d, 0, "h", 3)                 # three columns of 30
+        cells = sorted(d["cells"], key=lambda c: c["x"])
         full = b.inner_lines(d)
-        self.assertEqual(len(full), 2)
-        d["cells"][0]["border"] = False       # one open cell alone changes nothing
-        self.assertEqual(b.inner_lines(d), full)
-        d["cells"][1]["border"] = False       # two open neighbours: their line goes
+        self.assertEqual(sorted(full), [(30.0, 0.0, 30.0, True), (60.0, 0.0, 30.0, True)])
+        cells[0]["border"] = "ltb"            # no right border: the line at 30 goes
         self.assertEqual(b.inner_lines(d), [(60.0, 0.0, 30.0, True)])
-        # a taller open neighbour on one side only cuts the part they share
+        cells[0]["border"] = "ltrb"
+        cells[2]["border"] = "trb"            # no left border on the last: line at 60 goes
+        self.assertEqual(b.inner_lines(d), [(30.0, 0.0, 30.0, True)])
+        cells[1]["border"] = ""               # no border at all: both go
+        cells[2]["border"] = "ltrb"
+        self.assertEqual(b.inner_lines(d), [])
+        # a taller neighbour without its right side only cuts the part they share
         d = b.new_design("T", 60, 30)
         b.split(d, 0, "h")
-        b.split(d, 1, "v")                    # right column cut into top and bottom
-        for c in d["cells"]:
-            c["border"] = c["x"] < 1 or c["y"] > 1
-        d["cells"][0]["border"] = False
+        right = [c for c in d["cells"] if c["x"] > 1][0]
+        b.split(d, d["cells"].index(right), "v")   # right column cut into top and bottom
+        left = [c for c in d["cells"] if c["x"] < 1][0]
+        left["border"] = "ltb"
+        lines = b.inner_lines(d)
+        self.assertNotIn((30.0, 0.0, 15.0, True), lines)
+        self.assertNotIn((30.0, 15.0, 15.0, True), lines)
+        left["border"] = "ltrb"
+        top_right = [c for c in d["cells"] if c["x"] > 1 and c["y"] < 1][0]
+        top_right["border"] = "trb"
         lines = b.inner_lines(d)
         self.assertIn((30.0, 15.0, 15.0, True), lines)
-        self.assertNotIn((30.0, 0.0, 30.0, True), lines)
-        self.assertFalse(any(v and y < 14 for x, y, _l, v in lines))
-        # it survives clean() (save and load) and old designs default to a border
-        self.assertFalse(b.clean(d)["cells"][0]["border"])
+        self.assertNotIn((30.0, 0.0, 15.0, True), lines)
+        # it survives clean() (save and load); old designs: True all, False none
+        self.assertEqual(b.clean(d)["cells"][d["cells"].index(top_right)]["border"], "trb")
         old = {"width": 50, "height": 20, "cells": [{"x": 0, "y": 0, "w": 50, "h": 20}]}
-        self.assertTrue(b.clean(old)["cells"][0]["border"])
+        self.assertEqual(b.clean(old)["cells"][0]["border"], "ltrb")
+        self.assertEqual(b.sides(False), "")
+        self.assertEqual(b.sides("btl"), "ltb")
 
     def test_problems_found(self):
         b = self.blocks
