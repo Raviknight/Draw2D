@@ -3232,6 +3232,40 @@ class TestTitleBlockDesigns(DocTest):
         self.assertIn("Copy of DrawingKit ASME", dict(b.PRESETS))
         s = b.svg(d, 0, 0, "C")
         self.assertIn('freecad:editable="drawing_number"', s)
+        # the notes area is open: no line between two tolerance rows, but the line
+        # between the notes and the main area stays
+        tol1 = [c for c in d["cells"] if c["field"] == "tol_1"][0]
+        lines = b.inner_lines(d)
+        self.assertFalse(any(not v and abs(y - tol1["y"]) < 1e-6 and x < t.ANSI_TOL_W - 1
+                             for x, y, _l, v in lines))
+        self.assertTrue(any(v and abs(x - t.ANSI_TOL_W) < 1e-6 and y < tol1["y"] < y + ln
+                            for x, y, ln, v in lines))
+
+    def test_cells_without_border(self):
+        b = self.blocks
+        d = b.new_design("T", 90, 30)
+        b.split(d, 0, "h", 3)                 # three columns of 30
+        full = b.inner_lines(d)
+        self.assertEqual(len(full), 2)
+        d["cells"][0]["border"] = False       # one open cell alone changes nothing
+        self.assertEqual(b.inner_lines(d), full)
+        d["cells"][1]["border"] = False       # two open neighbours: their line goes
+        self.assertEqual(b.inner_lines(d), [(60.0, 0.0, 30.0, True)])
+        # a taller open neighbour on one side only cuts the part they share
+        d = b.new_design("T", 60, 30)
+        b.split(d, 0, "h")
+        b.split(d, 1, "v")                    # right column cut into top and bottom
+        for c in d["cells"]:
+            c["border"] = c["x"] < 1 or c["y"] > 1
+        d["cells"][0]["border"] = False
+        lines = b.inner_lines(d)
+        self.assertIn((30.0, 15.0, 15.0, True), lines)
+        self.assertNotIn((30.0, 0.0, 30.0, True), lines)
+        self.assertFalse(any(v and y < 14 for x, y, _l, v in lines))
+        # it survives clean() (save and load) and old designs default to a border
+        self.assertFalse(b.clean(d)["cells"][0]["border"])
+        old = {"width": 50, "height": 20, "cells": [{"x": 0, "y": 0, "w": 50, "h": 20}]}
+        self.assertTrue(b.clean(old)["cells"][0]["border"])
 
     def test_problems_found(self):
         b = self.blocks

@@ -50,7 +50,8 @@ EPS = 1e-6
 def cell(x, y, w, h, kind="empty", **kw):
     c = {"x": float(x), "y": float(y), "w": float(w), "h": float(h), "kind": kind,
          "label": "", "field": "", "text": "", "size": 3.5, "bold": False, "align": "left",
-         "vertical": False, "rows": 6, "lines": 1, "image": "", "image_type": ""}
+         "vertical": False, "rows": 6, "lines": 1, "image": "", "image_type": "",
+         "border": True}
     c.update(kw)
     return c
 
@@ -89,6 +90,7 @@ def clean(d):
             pass
         n["bold"] = bool(c.get("bold"))
         n["vertical"] = bool(c.get("vertical"))
+        n["border"] = bool(c.get("border", True))
         if n["kind"] not in KINDS:
             n["kind"] = "empty"
         if n["align"] not in ALIGNS:
@@ -526,6 +528,52 @@ def _anchor_x(c, x0, pad=1.2):
     return x0 + c["x"] + pad, "start"
 
 
+def _minus(a, b, cuts):
+    """Parts of the interval a..b not covered by the intervals in ``cuts``."""
+    parts = [(a, b)]
+    for c0, c1 in cuts:
+        nxt = []
+        for p0, p1 in parts:
+            if c1 <= p0 + EPS or c0 >= p1 - EPS:
+                nxt.append((p0, p1))
+                continue
+            if c0 > p0 + EPS:
+                nxt.append((p0, c0))
+            if c1 < p1 - EPS:
+                nxt.append((c1, p1))
+        parts = nxt
+    return [(p0, p1) for p0, p1 in parts if p1 - p0 > EPS]
+
+
+def inner_lines(d):
+    """The lines between cells as (x, y, length, vertical) in block mm (y
+    down); the outer frame is not included. Each cell draws its left and
+    top edge. Where a cell without a border meets another cell without a
+    border the line is left out, so a group of them reads as one open area."""
+    out = []
+    cells = d["cells"]
+    for c in cells:
+        for vertical in (True, False):
+            pos, start, span = ("x", "y", "h") if vertical else ("y", "x", "w")
+            if c[pos] <= EPS:
+                continue
+            a, b = c[start], c[start] + c[span]
+            if c.get("border", True):
+                parts = [(a, b)]
+            else:
+                far = "w" if vertical else "h"
+                cuts = [(n[start], n[start] + n[span]) for n in cells
+                        if not n.get("border", True) and n is not c
+                        and abs(n[pos] + n[far] - c[pos]) < EPS]
+                parts = _minus(a, b, cuts)
+            for p0, p1 in parts:
+                if vertical:
+                    out.append((c["x"], p0, p1 - p0, True))
+                else:
+                    out.append((p0, c["y"], p1 - p0, False))
+    return out
+
+
 def svg(d, x0, y0, size_letter="", first_angle=True, preview=False, font=None):
     """SVG elements of the title block with its top-left corner on (x0, y0)
     (mm). ``preview``: show field names in empty fields (for the designer)."""
@@ -534,12 +582,11 @@ def svg(d, x0, y0, size_letter="", first_angle=True, preview=False, font=None):
     out = []
     a = out.append
     lines = []
-    for c in d["cells"]:
-        cx0, cy0 = x0 + c["x"], y0 + c["y"]
-        if c["x"] > EPS:
-            lines.append("M %.3f,%.3f V %.3f" % (cx0, cy0, cy0 + c["h"]))
-        if c["y"] > EPS:
-            lines.append("M %.3f,%.3f H %.3f" % (cx0, cy0, cx0 + c["w"]))
+    for x, y, length, vertical in inner_lines(d):
+        if vertical:
+            lines.append("M %.3f,%.3f V %.3f" % (x0 + x, y0 + y, y0 + y + length))
+        else:
+            lines.append("M %.3f,%.3f H %.3f" % (x0 + x, y0 + y, x0 + x + length))
     a('<g id="title_block" style="fill:none;stroke:#000000;stroke-linecap:round;'
       'stroke-linejoin:round;stroke-width:0.35">')
     a('<rect id="title_block_frame" x="%.3f" y="%.3f" width="%.3f" height="%.3f" '
@@ -701,15 +748,18 @@ def preset_asme():
     # the saved defaults (units, .X / .XX ..., angles, notes) fill them
     r = 3.3
 
+    # the notes area is open: its cells have no lines between them
     def txt(x, y, w, text, bold=False):
-        return cell(x, y, w, r, "text", text=text, size=small, bold=bold)
+        return cell(x, y, w, r, "text", text=text, size=small, bold=bold, border=False)
 
     def fld(x, y, w, name, text="", h=r, lines=1):
-        return cell(x, y, w, h, "field", field=name, text=text, size=small, lines=lines)
+        return cell(x, y, w, h, "field", field=name, text=text, size=small, lines=lines,
+                    border=False)
 
     half = tw / 2.0
     C = [
-        cell(0, 0, tw, 5, "text", text="UNLESS OTHERWISE SPECIFIED:", size=small, bold=True),
+        cell(0, 0, tw, 5, "text", text="UNLESS OTHERWISE SPECIFIED:", size=small, bold=True,
+             border=False),
         txt(0, 5, 32, "DIMENSIONS ARE IN"), fld(32, 5, tw - 32, "units", "INCHES"),
         txt(0, 5 + r, tw, "TOLERANCES:", bold=True),
         txt(0, 5 + 2 * r, 11, ".X"), fld(11, 5 + 2 * r, half - 11, "tol_1"),

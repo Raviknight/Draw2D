@@ -82,6 +82,17 @@ class BlockCanvas(QtWidgets.QWidget):
         r = self._layout()
         if self.renderer is not None:
             self.renderer.render(p, r)
+        # cells without a border: a faint dashed outline, so they can still be seen and
+        # picked (it is not part of the block)
+        pen = QtGui.QPen(QtGui.QColor("#9aa5b1"))
+        pen.setStyle(QtCore.Qt.DashLine)
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        for c in self.d["cells"]:
+            if not c.get("border", True):
+                p.drawRect(QtCore.QRectF(self.ox + c["x"] * self.k, self.oy + c["y"] * self.k,
+                                         c["w"] * self.k, c["h"] * self.k))
         i = self.owner.current
         if i is not None and i < len(self.d["cells"]):
             c = self.d["cells"][i]
@@ -276,8 +287,14 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.vertical = QtWidgets.QCheckBox("Runs upwards")
         self.bold.toggled.connect(self._edited)
         self.vertical.toggled.connect(self._edited)
+        self.open = QtWidgets.QCheckBox("No border")
+        self.open.setToolTip("Leave out the lines between this cell and its neighbours that "
+                             "have no border either, so they read as one open area (for "
+                             "notes). Lines to other cells and the outer frame stay.")
+        self.open.toggled.connect(self._edited)
         row.addWidget(self.bold)
         row.addWidget(self.vertical)
+        row.addWidget(self.open)
         form.addRow("", row)
         self.align = QtWidgets.QComboBox()
         for a_ in blocks.ALIGNS:
@@ -481,6 +498,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             self.size.setValue(c["size"])
             self.bold.setChecked(c["bold"])
             self.vertical.setChecked(c["vertical"])
+            self.open.setChecked(not c.get("border", True))
             self.align.setCurrentIndex(self.align.findData(c["align"]))
             self.rows.setValue(c["rows"])
             self.lines.setValue(c["lines"])
@@ -530,6 +548,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         new["size"] = self.size.value()
         new["bold"] = self.bold.isChecked()
         new["vertical"] = self.vertical.isChecked()
+        new["border"] = not self.open.isChecked()
         new["align"] = self.align.currentData()
         new["rows"] = self.rows.value()
         if new["kind"] == "field" and not new["field"]:
