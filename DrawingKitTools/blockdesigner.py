@@ -7,6 +7,7 @@ the tolerances by size, the projection symbol). Saved designs show up as
 layouts in the Title block form and for new sheets.
 """
 
+import os
 import re
 
 import FreeCAD as App
@@ -184,6 +185,11 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.open_combo = QtWidgets.QComboBox()
         self.open_combo.setMinimumWidth(220)
         top.addWidget(self.open_combo)
+        imp = QtWidgets.QPushButton("Import SVG...")
+        imp.setToolTip("Start from the title block of an SVG template (yours or one of "
+                       "FreeCAD's): its lines become cells, its editable texts fields")
+        imp.clicked.connect(self._import_svg)
+        top.addWidget(imp)
         top.addSpacing(12)
         top.addWidget(QtWidgets.QLabel("Name:"))
         self.name = QtWidgets.QLineEdit()
@@ -648,6 +654,44 @@ class TitleBlockDesigner(QtWidgets.QDialog):
 
     def _name_changed(self):
         self.design["name"] = self.name.text().strip() or "Title block"
+
+    def _template_folder(self):
+        """Where to look first: the open page's template folder, else FreeCAD's."""
+        try:
+            doc = App.ActiveDocument
+            for o in (doc.Objects if doc else []):
+                path = getattr(getattr(o, "Template", None), "Template", "") or ""
+                if path and os.path.isfile(path):
+                    return os.path.dirname(path)
+            from . import core
+            return core.template_dir()
+        except Exception:
+            return ""
+
+    def _import_svg(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "SVG template with the title block", self._template_folder(),
+            "SVG templates (*.svg)")
+        if path:
+            self.import_file(path)
+
+    def import_file(self, path):
+        """Load the title block of an SVG template as a new design."""
+        from . import blockimport
+        try:
+            d, notes = blockimport.design_from_file(path)
+        except blockimport.ImportError_ as e:
+            QtWidgets.QMessageBox.warning(self, "Import SVG", "%s.\n\n%s" % (
+                e, "The importer looks for the lines round the editable texts in the "
+                   "lower right of the sheet."))
+            return False
+        self.load(d)
+        msg = ("%d cells, %d fields. Check the captions and the field names, then save it."
+               % (len(d["cells"]), sum(1 for c in d["cells"] if c["kind"] == "field")))
+        if notes:
+            msg += "\n\n" + "\n".join("- " + n for n in notes)
+        QtWidgets.QMessageBox.information(self, "Import SVG", msg)
+        return True
 
     def _pick_picture(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(

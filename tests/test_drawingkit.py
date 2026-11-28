@@ -3279,6 +3279,80 @@ class TestTitleBlockDesigns(DocTest):
         self.assertEqual(b.sides(False), "")
         self.assertEqual(b.sides("btl"), "ltb")
 
+    def test_import_svg_title_block(self):
+        from DrawingKitTools import blockimport as BI
+        b = self.blocks
+        # A4 landscape: frame, a 100 x 30 block in the corner with a caption over a
+        # field, a caption beside a field, a fixed text, an open area holding two
+        # fields, an icon (closed square) in a cell and a stray tick mark
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg"
+          xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace"
+          width="297mm" height="210mm" viewBox="0 0 297 210">
+          <rect x="20" y="10" width="267" height="190" style="fill:none;stroke:#000"/>
+          <g transform="translate(187,170)" style="stroke:#000;fill:none">
+            <path d="M 0,0 H 100 M 0,0 V 30 M 0,10 H 100 M 50,0 V 30 M 50,20 H 100"/>
+            <line x1="75" y1="20" x2="75" y2="30"/>
+            <rect x="5" y="22" width="3" height="3"/>
+            <path d="M 30,25 h 1"/>
+          </g>
+          <g style="font-size:3px">
+            <text x="188" y="173">Title</text>
+            <text x="188" y="178.5" freecad:editable="title" style="font-size:4.5px">PART</text>
+            <text x="238" y="176" text-anchor="middle">ACME LTD</text>
+            <text x="188" y="185" freecad:editable="line_1">first</text>
+            <text x="188" y="194" freecad:editable="line_2">second</text>
+            <text x="238" y="186">Drawn:</text>
+            <text x="252" y="186" freecad:editable="drawn by">JS</text>
+            <text x="238" y="196">Scale</text>
+            <text x="270" y="196" freecad:editable="scale" text-anchor="middle">1:1</text>
+          </g>
+        </svg>'''
+        d, notes, box = BI.import_svg(svg)
+        self.assertEqual([round(v, 3) for v in box], [187.0, 170.0, 287.0, 200.0])
+        self.assertEqual((d["width"], d["height"]), (100.0, 30.0))
+        self.assertEqual(b.problems(d), [])
+        by = {c["field"] or c["text"]: c for c in d["cells"]}
+        self.assertEqual(by["title"]["label"], "Title")              # caption over it
+        self.assertAlmostEqual(by["title"]["size"], 4.5)
+        self.assertEqual((by["title"]["w"], by["title"]["h"]), (50.0, 10.0))
+        self.assertEqual(by["ACME LTD"]["kind"], "text")
+        self.assertEqual(by["ACME LTD"]["align"], "centre")
+        self.assertEqual(by["drawn_by"]["kind"], "field")              # name made valid
+        self.assertEqual(by["Drawn:"]["kind"], "text")                 # beside its field
+        self.assertAlmostEqual(by["Drawn:"]["y"], by["drawn_by"]["y"])
+        self.assertLess(by["Drawn:"]["x"], by["drawn_by"]["x"])
+        self.assertEqual(by["scale"]["align"], "centre")
+        # the open area with two fields: cut in two with no line between them
+        top, low = by["line_1"], by["line_2"]
+        self.assertAlmostEqual(top["y"] + top["h"], low["y"])
+        self.assertNotIn("b", top["border"])
+        self.assertFalse(any(not v and abs(y - low["y"]) < 1e-6 and x < 50
+                             for x, y, _l, v in b.inner_lines(d)))
+        # the icon and the stray tick did not make cells
+        self.assertFalse(any(c["w"] < 4 and c["h"] < 4 for c in d["cells"]))
+        self.assertTrue(notes)                                         # the icon is mentioned
+        self.assertEqual(len(d["cells"]), 8)
+        with self.assertRaises(BI.ImportError_):
+            BI.import_svg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297 210" '
+                          'width="297mm" height="210mm"/>')
+
+    def test_import_freecad_templates(self):
+        from DrawingKitTools import blockimport as BI, core
+        b = self.blocks
+        base = core.template_dir()
+        for rel, size, fields in (("ISO/A3_Landscape_ISO5457_advanced.svg", (180, 60), 20),
+                                  ("ASME/ANSIB_Landscape.svg", (146.3, 47.9), 15),
+                                  ("ASME/ANSIC_Landscape.svg", (153.6, 49.7), 22)):
+            path = os.path.join(base, rel)
+            if not os.path.isfile(path):
+                continue
+            d, _notes = BI.design_from_file(path)
+            self.assertEqual(b.problems(d), [], rel)
+            self.assertAlmostEqual(d["width"], size[0], delta=0.2, msg=rel)
+            self.assertAlmostEqual(d["height"], size[1], delta=0.2, msg=rel)
+            self.assertEqual(sum(1 for c in d["cells"] if c["kind"] == "field"), fields, rel)
+            self.assertIn('freecad:editable', b.svg(d, 0, 0))
+
     def test_problems_found(self):
         b = self.blocks
         d = b.new_design("T", 100, 20)
