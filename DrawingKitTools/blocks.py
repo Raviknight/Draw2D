@@ -187,6 +187,55 @@ def merge(d, i, side):
     return d["cells"].index(c)
 
 
+def merge_cells(d, indices, keep):
+    """Join the cells ``indices`` into one; they have to make up a
+    rectangle together. The cell ``keep`` keeps its contents. Returns the
+    index of the joined cell."""
+    idx = sorted(set(indices))
+    if len(idx) < 2:
+        raise ValueError("Pick two or more cells to merge (Shift- or Ctrl-click)")
+    cs = [d["cells"][i] for i in idx]
+    x0 = min(c["x"] for c in cs)
+    y0 = min(c["y"] for c in cs)
+    x1 = max(c["x"] + c["w"] for c in cs)
+    y1 = max(c["y"] + c["h"] for c in cs)
+    if abs(sum(c["w"] * c["h"] for c in cs) - (x1 - x0) * (y1 - y0)) > 1e-3:
+        raise ValueError("The picked cells don't make a rectangle together")
+    c = d["cells"][keep if keep in idx else idx[0]]
+    c.update({"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0})
+    d["cells"] = [o for i, o in enumerate(d["cells"]) if i not in idx or o is c]
+    return d["cells"].index(c)
+
+
+def open_between(d, indices):
+    """Take away the lines between the cells ``indices`` (the lines round
+    them stay): a side of a cell goes where only picked cells are on the
+    other side of it."""
+    pick = [d["cells"][i] for i in set(indices)]
+    for c in pick:
+        have = sides(c.get("border", True))
+        for s in SIDES:
+            vertical = s in "lr"
+            pos = (c["x"] if s == "l" else c["x"] + c["w"]) if vertical else \
+                (c["y"] if s == "t" else c["y"] + c["h"])
+            lo, hi = (c["y"], c["y"] + c["h"]) if vertical else (c["x"], c["x"] + c["w"])
+            facing = []
+            for o in d["cells"]:
+                if o is c:
+                    continue
+                if vertical:
+                    edge = o["x"] + o["w"] if s == "l" else o["x"]
+                    a, b = o["y"], o["y"] + o["h"]
+                else:
+                    edge = o["y"] + o["h"] if s == "t" else o["y"]
+                    a, b = o["x"], o["x"] + o["w"]
+                if abs(edge - pos) < EPS and min(b, hi) - max(a, lo) > EPS:
+                    facing.append(o)
+            if facing and all(any(o is p for p in pick) for o in facing):
+                have = have.replace(s, "")
+        c["border"] = have
+
+
 def _edge_group(d, i, side):
     """Cells on either side of cell i's edge, along the whole straight line it
     is part of: ([cells ending there], [cells starting there], position)."""

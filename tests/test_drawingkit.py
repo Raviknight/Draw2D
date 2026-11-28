@@ -3279,6 +3279,39 @@ class TestTitleBlockDesigns(DocTest):
         self.assertEqual(b.sides(False), "")
         self.assertEqual(b.sides("btl"), "ltb")
 
+    def test_several_cells(self):
+        b = self.blocks
+        d = b.new_design("T", 90, 20)
+        d["cells"] = [b.cell(x, y, 30, 10) for y in (0, 10) for x in (0, 30, 60)]
+        at = lambda x, y: b.cell_at(d, x, y)      # 6 cells of 30 x 10
+        # the four on the left make a rectangle: one cell, keeping the kept one's contents
+        d["cells"][at(35, 15)].update(kind="field", field="title")
+        keep = at(35, 15)
+        j = b.merge_cells(d, [at(5, 5), at(35, 5), at(5, 15), keep], keep)
+        c = d["cells"][j]
+        self.assertEqual((c["x"], c["y"], c["w"], c["h"], c["field"]), (0, 0, 60, 20, "title"))
+        self.assertEqual(len(d["cells"]), 3)
+        self.assertEqual(b.problems(d), [])
+        # an L shape is refused and changes nothing
+        d = b.new_design("T", 60, 20)
+        d["cells"] = [b.cell(x, y, 30, 10) for y in (0, 10) for x in (0, 30)]
+        before = b.copy_of(d)
+        with self.assertRaises(ValueError):
+            b.merge_cells(d, [b.cell_at(d, 5, 5), b.cell_at(d, 35, 5), b.cell_at(d, 35, 15)], 0)
+        self.assertEqual(d, before)
+        with self.assertRaises(ValueError):
+            b.merge_cells(d, [0], 0)
+        # no lines between the picked cells: the two on top open to each other, the
+        # line under them and the outer lines stay
+        top = [b.cell_at(d, 5, 5), b.cell_at(d, 35, 5)]
+        b.open_between(d, top)
+        lines = b.inner_lines(d)
+        self.assertNotIn((30.0, 0.0, 10.0, True), lines)
+        self.assertIn((30.0, 10.0, 10.0, True), lines)
+        self.assertTrue(any(not v and y == 10.0 for x, y, _l, v in lines))
+        self.assertEqual(d["cells"][top[0]]["border"], "ltb")
+        self.assertEqual(d["cells"][top[1]]["border"], "trb")
+
     def test_import_svg_title_block(self):
         from DrawingKitTools import blockimport as BI
         b = self.blocks

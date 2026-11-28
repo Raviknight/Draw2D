@@ -94,6 +94,17 @@ class BlockCanvas(QtWidgets.QWidget):
             if blocks.sides(c.get("border", True)) != blocks.SIDES:
                 p.drawRect(QtCore.QRectF(self.ox + c["x"] * self.k, self.oy + c["y"] * self.k,
                                          c["w"] * self.k, c["h"] * self.k))
+        # the other picked cells: lighter
+        pen = QtGui.QPen(QtGui.QColor("#1e88e5"))
+        pen.setWidthF(1.5)
+        pen.setStyle(QtCore.Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(QtGui.QColor(30, 136, 229, 22))
+        for j in self.owner.extra:
+            if j < len(self.d["cells"]):
+                c = self.d["cells"][j]
+                p.drawRect(QtCore.QRectF(self.ox + c["x"] * self.k, self.oy + c["y"] * self.k,
+                                         c["w"] * self.k, c["h"] * self.k))
         i = self.owner.current
         if i is not None and i < len(self.d["cells"]):
             c = self.d["cells"][i]
@@ -133,12 +144,16 @@ class BlockCanvas(QtWidgets.QWidget):
         edge = self._edge_at(pos)
         if edge is not None:
             self.owner.remember()
+            self.owner.extra = []
             self.drag = edge
             return
         x, y = self.to_mm(pos)
         i = blocks.cell_at(self.d, x, y)
         if i is not None:
-            self.owner.select(i)
+            if e.modifiers() & (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier):
+                self.owner.toggle(i)
+            else:
+                self.owner.select(i)
 
     def mouseMoveEvent(self, e):
         pos = e.position() if hasattr(e, "position") else e.pos()
@@ -175,6 +190,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.use_on_page = None
         self.design = blocks.preset_size_table()
         self.current = None
+        self.extra = []          # more picked cells (Shift- or Ctrl-click), besides current
         self.undo = []
         self._loading = False
         lay = QtWidgets.QVBoxLayout(self)
@@ -211,7 +227,8 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         left = QtWidgets.QVBoxLayout()
         self.canvas = BlockCanvas(self)
         left.addWidget(self.canvas, 1)
-        hint = QtWidgets.QLabel("Click a cell to pick it. Drag a line between cells to move it.")
+        hint = QtWidgets.QLabel("Click a cell to pick it; Shift- or Ctrl-click to pick more. "
+                                "Drag a line between cells to move it.")
         hint.setStyleSheet("color:#666")
         left.addWidget(hint)
         ops = QtWidgets.QHBoxLayout()
@@ -224,6 +241,10 @@ class TitleBlockDesigner(QtWidgets.QDialog):
                  lambda: self._op(lambda: blocks.merge(self.design, self.current, "right"), True)),
                 ("Merge down", "Join with the cell below (same width)",
                  lambda: self._op(lambda: blocks.merge(self.design, self.current, "below"), True)),
+                ("Merge picked", "Join all the picked cells into one (they have to make a "
+                                 "rectangle); the first one picked keeps its contents",
+                 lambda: self._op(lambda: blocks.merge_cells(self.design, self.picked(),
+                                                             self.current), True)),
                 ("Undo", "Undo the last change", self._undo)):
             b = QtWidgets.QPushButton(text)
             b.setToolTip(tip)
@@ -301,6 +322,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         self.borders = QtWidgets.QToolButton()
         self.borders.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.borders.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.borders.setMinimumWidth(170)
         self.borders.setToolTip("Which lines this cell has. Switching off a side takes away "
                                 "the line there, also for the cell next to it. The outer "
                                 "frame of the block always stays.")
@@ -315,6 +337,10 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             act.setCheckable(True)
             act.toggled.connect(self._edited)
             self.side_actions[s] = act
+        menu.addSeparator()
+        self.a_open = menu.addAction("No lines between the picked cells")
+        self.a_open.setToolTip("Pick several cells first; the lines round them stay")
+        self.a_open.triggered.connect(self._open_between)
         a_all.triggered.connect(lambda: self._set_sides(blocks.SIDES))
         a_none.triggered.connect(lambda: self._set_sides(""))
         self.borders.setMenu(menu)
@@ -433,6 +459,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
     def load(self, d):
         self.design = blocks.clean(d)
         self.undo = []
+        self.extra = []
         self.current = 0 if self.design["cells"] else None
         self.name.setText(self.design["name"])
         self._show_size()
@@ -452,6 +479,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
     def _undo(self):
         if self.undo:
             self.design = self.undo.pop()
+            self.extra = []
             if self.current is not None and self.current >= len(self.design["cells"]):
                 self.current = len(self.design["cells"]) - 1
             self._show_size()
@@ -470,6 +498,7 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             return
         if isinstance(res, int):
             self.current = res
+        self.extra = []                     # cell numbers may have changed
         self.changed(remember=False)
         self.show_cell()
 
@@ -503,14 +532,52 @@ class TitleBlockDesigner(QtWidgets.QDialog):
 
     def select(self, i):
         self.current = i
+        self.extra = []
         self.show_cell()
         self.canvas.update()
+
+    def picked(self):
+        """All picked cells, the one shown in the panel first."""
+        return ([self.current] if self.current is not None else []) + list(self.extra)
+
+    def toggle(self, i):
+        """Shift- or Ctrl-click: add a cell to the picked ones, or take it out."""
+        if self.current is None:
+            self.select(i)
+            return
+        if i == self.current:
+            if not self.extra:
+                return
+            self.current = self.extra.pop(0)    # the next picked one goes in the panel
+        elif i in self.extra:
+            self.extra.remove(i)
+        else:
+            self.extra.append(i)
+        self.show_cell()
+        self.canvas.update()
+
+    def _open_between(self):
+        if not self.extra:
+            self.problem.setText("Pick two or more cells first (Shift- or Ctrl-click)")
+            return
+        self.remember()
+        blocks.open_between(self.design, self.picked())
+        self.changed()
+        self.show_cell()
 
     # -- the cell panel ----------------------------------------------------
     def show_cell(self):
         self._loading = True
         c = self.design["cells"][self.current] if self.current is not None else None
         self.cell_box.setEnabled(c is not None)
+        self.cell_box.setTitle(
+            "%d cells picked (changes go to all)" % (1 + len(self.extra))
+            if self.extra else "Cell")
+        self.cell_box.setToolTip(
+            "What the cells hold, text height, bold, align and borders change on all the "
+            "picked cells; caption, field and text only on the one shown"
+            if self.extra else "")
+        self.a_open.setEnabled(bool(self.extra))
         if c is not None:
             self.kind.setCurrentIndex(self.kind.findData(c["kind"]))
             self.label.setText(c["label"].replace("\n", " | "))
@@ -569,6 +636,14 @@ class TitleBlockDesigner(QtWidgets.QDialog):
         for s, act in self.side_actions.items():
             act.setChecked(s in have)
         self._loading = False
+        if self.extra:
+            # on every picked cell, also where the first one already had it
+            self.remember()
+            for j in self.picked():
+                self.design["cells"][j]["border"] = have
+            self.changed()
+            self.show_cell()
+            return
         self._edited()
 
     def _field_key(self):
@@ -605,9 +680,39 @@ class TitleBlockDesigner(QtWidgets.QDialog):
             new["label"] = "TOLERANCE"
         if new != c:
             self.remember()
+            self._to_others(c, new)
             c.update(new)
             self.changed()
             self.show_cell()
+
+    SHARED = ("size", "bold", "vertical", "align")
+
+    def _to_others(self, old, new):
+        """The same change on the other picked cells: what it holds, text height,
+        bold, runs upwards, align and the border sides switched (one by one)."""
+        if not self.extra:
+            return
+        old_s, new_s = blocks.sides(old.get("border", True)), new["border"]
+        added = [s for s in new_s if s not in old_s]
+        gone = [s for s in old_s if s not in new_s]
+        names = set(blocks.field_names(self.design))
+        for j in self.extra:
+            o = self.design["cells"][j]
+            for k in self.SHARED:
+                if new[k] != old[k]:
+                    o[k] = new[k]
+            if added or gone:
+                have = blocks.sides(o.get("border", True))
+                o["border"] = "".join(s for s in blocks.SIDES
+                                      if (s in have or s in added) and s not in gone)
+            if new["kind"] != old["kind"]:
+                o["kind"] = new["kind"]
+                if o["kind"] == "field" and not o["field"]:
+                    n = j + 1
+                    while "field_%d" % n in names:
+                        n += 1
+                    o["field"] = "field_%d" % n
+                    names.add(o["field"])
 
     def _text_changed(self):
         if self._loading or self.current is None:
