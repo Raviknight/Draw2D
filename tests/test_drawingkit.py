@@ -3373,7 +3373,9 @@ class TestTitleBlockDesigns(DocTest):
         from DrawingKitTools import blockimport as BI, core
         b = self.blocks
         base = core.template_dir()
-        for rel, size, fields in (("ISO/A3_Landscape_ISO5457_advanced.svg", (180, 60), 20),
+        # the ISO block's top row (material, tolerances, scale) has no line over it: the
+        # top goes just over its texts
+        for rel, size, fields in (("ISO/A3_Landscape_ISO5457_advanced.svg", (180, 61.4), 20),
                                   ("ASME/ANSIB_Landscape.svg", (146.3, 47.9), 15),
                                   ("ASME/ANSIC_Landscape.svg", (153.6, 49.7), 22)):
             path = os.path.join(base, rel)
@@ -3385,6 +3387,25 @@ class TestTitleBlockDesigns(DocTest):
             self.assertAlmostEqual(d["height"], size[1], delta=0.2, msg=rel)
             self.assertEqual(sum(1 for c in d["cells"] if c["kind"] == "field"), fields, rel)
             self.assertIn('freecad:editable', b.svg(d, 0, 0))
+            if rel.startswith("ASME/ANSIB"):
+                self.assertEqual(sum(1 for c in d["cells"] if c["kind"] == "projection"), 1)
+        # a projection symbol (two circles drawn as arcs, centre lines from wall to wall)
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg"
+          xmlns:freecad="http://www.freecad.org/wiki/index.php?title=Svg_Namespace"
+          width="297mm" height="210mm" viewBox="0 0 297 210">
+          <g style="stroke:#000;fill:none">
+            <rect x="20" y="10" width="267" height="190"/>
+            <path d="M 187,180 H 287 M 187,180 V 200 M 237,180 V 200 M 270,180 V 200"/>
+            <path d="m 258,190 a 4,4 0 1 0 -8,0 4,4 0 1 0 8,0 z"/>
+            <path d="m 256,190 a 2,2 0 1 0 -4,0 2,2 0 1 0 4,0 z"/>
+            <path d="M 254,180 V 200"/>
+          </g>
+          <text x="190" y="190" freecad:editable="title">T</text>
+          <text x="272" y="190">SIZE</text>
+        </svg>'''
+        d, _notes = BI.design_from_svg(svg)
+        self.assertEqual([c["kind"] for c in sorted(d["cells"], key=lambda c: c["x"])],
+                         ["field", "projection", "text"])
 
     def test_problems_found(self):
         b = self.blocks

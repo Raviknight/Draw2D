@@ -109,6 +109,54 @@ def _path_lines(d):
     return out
 
 
+def _path_round(d):
+    """(cx, cy, r) of a path that draws something round (curves whose end
+    points fit a square), in its own units, or None."""
+    if not re.search(r"[CcSsQqAa]", d or ""):
+        return None
+    toks = _TOK.findall(d)
+    pts = []
+    arc_r = 0.0
+    i, cmd = 0, None
+    x = y = 0.0
+    while i < len(toks):
+        t = toks[i]
+        if t.isalpha():
+            cmd = t
+            i += 1
+            continue
+        if cmd is None or cmd in "Zz":
+            break
+        n = _ARGS[cmd.upper()]
+        if i + n > len(toks) or any(v.isalpha() for v in toks[i:i + n]):
+            break
+        a = [float(v) for v in toks[i:i + n]]
+        i += n
+        rel = cmd.islower()
+        big = cmd.upper()
+        if big == "H":
+            x = x + a[0] if rel else a[0]
+        elif big == "V":
+            y = y + a[0] if rel else a[0]
+        else:
+            x, y = (x + a[-2], y + a[-1]) if rel else (a[-2], a[-1])
+        if big == "M":
+            cmd = "l" if rel else "L"
+        elif big == "A":
+            arc_r = max(arc_r, abs(a[0]), abs(a[1]))
+        pts.append((x, y))
+    if len(pts) < 3:
+        return None
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    w, h = max(xs) - min(xs), max(ys) - min(ys)
+    if arc_r > 0 and max(w, h) <= 2 * arc_r * 1.05:
+        # a circle drawn as arcs: the end points may all lie on one diameter
+        return (min(xs) + w / 2.0, min(ys) + h / 2.0, arc_r)
+    if w <= 0 or h <= 0 or not 0.8 <= w / h <= 1.25:
+        return None
+    return (min(xs) + w / 2.0, min(ys) + h / 2.0, max(w, h) / 2.0)
+
+
 def _style(el, inherited):
     st = dict(inherited)
     for k in ("stroke", "fill", "display", "visibility", "font-size", "font-weight",
@@ -135,7 +183,7 @@ def read_svg(svg):
     except ET.ParseError as e:
         raise ImportError_("This isn't a readable SVG file (%s)" % e)
     m0, page_w, page_h = page_transform(root)
-    lines, texts, images, outlines = [], [], [], []
+    lines, texts, images, outlines, rounds = [], [], [], [], []
 
     def walk(el, m, st):
         tag = _local(el.tag)
@@ -164,6 +212,18 @@ def read_svg(svg):
             p = _floats(el.get("d") or "%s %s" % (el.get("cx"), el.get("cy")))
             if len(p) >= 2:
                 outlines.append(_apply(m, p[0], p[1]))
+        # round things (circles of a projection symbol)
+        rnd = None
+        if tag == "circle":
+            rnd = (_num(el.get("cx")), _num(el.get("cy")), _num(el.get("r")))
+        elif tag == "ellipse":
+            rnd = (_num(el.get("cx")), _num(el.get("cy")),
+                   max(_num(el.get("rx")), _num(el.get("ry"))))
+        elif tag == "path":
+            rnd = _path_round(el.get("d"))
+        if rnd and rnd[2] > 0:
+            cx, cy = _apply(m, rnd[0], rnd[1])
+            rounds.append((cx, cy, rnd[2] * math.sqrt(abs(m[0] * m[3] - m[1] * m[2]))))
         pieces = []
         if tag == "path" and drawn:
             pieces = _path_lines(el.get("d"))
@@ -190,7 +250,7 @@ def read_svg(svg):
     walk(root, m0, {})
     texts = [t for t in texts if t["text"] or t["field"]]
     return {"lines": lines, "texts": texts, "images": images, "outlines": outlines,
-            "width": page_w, "height": page_h}
+            "rounds": rounds, "width": page_w, "height": page_h}
 
 
 def _num(v):
@@ -288,9 +348,11 @@ def _region(path, page_w, page_h):
     return tx0, page_h - ty1, tx1, page_h - ty0
 
 
-def find_box(vs, hs, pts):
+def find_box(vs, hs, pts, outer=None):
     """The lines round the points: the nearest line beyond the outermost
-    point on each side that runs past the points."""
+    point on each side that runs past the points. A side with no line (an
+    open row of tolerances over an ISO block) goes to ``outer`` (just
+    outside the texts); at least two sides need a line."""
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
 
@@ -304,9 +366,15 @@ def find_box(vs, hs, pts):
     right = [x for x in edges(vs, y0, y1) if x > x1]
     top = [y for y in edges(hs, x0, x1) if y < y0]
     bottom = [y for y in edges(hs, x0, x1) if y > y1]
-    if not (left and right and top and bottom):
+    if outer:
+        # an open top row: the next line up is then the drawing frame, far off
+        top = [y for y in top if y >= outer[1] - 25.0]
+    found = [bool(left), bool(top), bool(right), bool(bottom)]
+    if sum(found) < (2 if outer else 4):
         return None
-    return max(left), max(top), min(right), min(bottom)
+    ox0, oy0, ox1, oy1 = outer or (x0, y0, x1, y1)
+    return (max(left) if left else ox0, max(top) if top else oy0,
+            min(right) if right else ox1, min(bottom) if bottom else oy1)
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +645,20 @@ def _split_columns(c, row):
     return out
 
 
+def _symbols(rounds):
+    """Centres of projection symbols: two circles round one centre, one
+    1.25 to 4 times the other."""
+    out = []
+    for k, a in enumerate(rounds):
+        for b in rounds[k + 1:]:
+            if (abs(a[0] - b[0]) < 0.6 and abs(a[1] - b[1]) < 0.6 and 1.0 < max(a[2], b[2]) < 30
+                    and 1.25 <= max(a[2], b[2]) / max(min(a[2], b[2]), 1e-6) <= 4.0):
+                c = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, max(a[2], b[2]))
+                if not any(abs(c[0] - o[0]) < 1 and abs(c[1] - o[1]) < 1 for o in out):
+                    out.append(c)
+    return out
+
+
 def design_from_svg(svg, path="", name=""):
     """(design, notes) made from an SVG template's title block. ``notes``
     are sentences about what could not be brought over."""
@@ -588,6 +670,13 @@ def import_svg(svg, path="", name=""):
     """(design, notes, box): box is where the block was on the sheet (mm, y down)."""
     data = read_svg(svg)
     vs, hs = _axis_lines(data["lines"])
+    # projection symbols: two circles round one centre. Their centre lines can
+    # run from wall to wall; they are not cell walls
+    symbols = _symbols(data["rounds"])
+    vs = [s for s in vs if not any(abs(s[0] - x) < 0.6 and s[1] <= y <= s[2]
+                                   and s[2] - s[1] <= 5 * r for x, y, r in symbols)]
+    hs = [s for s in hs if not any(abs(s[0] - y) < 0.6 and s[1] <= x <= s[2]
+                                   and s[2] - s[1] <= 5 * r for x, y, r in symbols)]
     if path:
         rx0, ry0, rx1, ry1 = _region(path, data["width"], data["height"])
     else:
@@ -601,7 +690,11 @@ def import_svg(svg, path="", name=""):
             title_texts.append(t)
     if not title_texts:
         raise ImportError_("No title block texts found in the lower right of this sheet")
-    box = find_box(vs, hs, [_core(t) for t in title_texts])
+    outer = (min(_left(t) for t in title_texts) - 1.5,
+             min(t["y"] - t["size"] for t in title_texts) - 1.5,
+             max(_left(t) + _width(t) for t in title_texts) + 1.5,
+             max(t["y"] for t in title_texts) + 1.5)
+    box = find_box(vs, hs, [_core(t) for t in title_texts], outer)
     if box is None:
         raise ImportError_("No lines found round the title block texts")
     bx0, by0, bx1, by1 = box
@@ -678,6 +771,17 @@ def import_svg(svg, path="", name=""):
         c = cell_of(img["x"], img["y"]) if bx0 <= img["x"] <= bx1 and by0 <= img["y"] <= by1 else None
         if c is not None and any(c is f for f in final) and c["kind"] == "empty":
             c.update(kind="logo", image=img["data"], image_type=img["type"])
+    # an empty cell with two circles round one centre holds a projection symbol
+    projections = 0
+    for c in final:
+        if c["kind"] == "empty" and any(
+                c["x"] <= x - bx0 <= c["x"] + c["w"] and c["y"] <= y - by0 <= c["y"] + c["h"]
+                for x, y, _r in symbols):
+            c["kind"] = "projection"
+            projections += 1
+    if projections:
+        notes.append("The projection symbol became a Projection cell (it follows the "
+                     "drawing's first or third angle setting)")
     stem = name or (os.path.splitext(os.path.basename(path))[0] if path else "Imported")
     d = blocks.new_design(stem, bx1 - bx0, by1 - by0)
     d["cells"] = final

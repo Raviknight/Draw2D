@@ -95,7 +95,7 @@ Which page a command acts on: a selected page (or a view on it), else the page i
 
 - Fitting uses each view's bounding box, so a rotated or round part may get one scale step smaller than it strictly needs.
 - With a template from elsewhere that has no ISO frame ids, the title block is taken to run from its texts to the frame's bottom-right corner; a template with no texts low on the sheet is given a 180 × 60 mm title block there.
-- Import SVG brings over lines, texts and embedded pictures. Symbols drawn with shapes (a projection symbol, an icon) and texts turned into outlines are left out; add a Projection or Picture cell, or type the caption in. Captions come in at the designer's caption size, and in the designer's font.
+- Import SVG brings over lines, texts and embedded pictures. A projection symbol (two circles round one centre) becomes a Projection cell. Other symbols drawn with shapes (an icon) and texts turned into outlines are left out; add a Picture cell, or type the caption in. Captions come in at the designer's caption size, and in the designer's font.
 - Stepped sections use TechDraw's complex section ("Offset" style), so only right-angle steps are supported.
 
 ## Tests
